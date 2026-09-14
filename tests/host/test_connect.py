@@ -442,9 +442,26 @@ async def test_handle_model_options_serves_the_pi_harness(
     such session carried an empty picker while an identical pi-native session
     listed its models. Both harness spellings resolve the same configured
     inventory.
+
+    The expected row carries the ``source`` decoration, which
+    ``_with_model_configuration_source`` derives from the host's AMBIENT
+    provider config — keyring-backed, so it differs per machine (a pi
+    subscription default decorates the row, a bare CI machine does not;
+    see #7012). Pin the source-resolution seam to a fixed subscription so
+    the exact-frame assertion is identical on any machine.
     """
     from omnigent.harnesses.pi_native import credentials as pi_native_credentials
+    from omnigent.host import connect as host_connect
 
+    monkeypatch.setattr(
+        host_connect,
+        "_model_configuration_source_for_harness",
+        lambda harness: {
+            "kind": "subscription",
+            "label": "Subscription",
+            "name": "pi",
+        },
+    )
     monkeypatch.setattr(
         pi_native_credentials,
         "pi_native_model_options",
