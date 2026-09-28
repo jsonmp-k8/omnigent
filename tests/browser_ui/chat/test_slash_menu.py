@@ -292,6 +292,7 @@ def test_compact_stays_visible_during_active_turn(
         pending.pop().fulfill(json={"queued": False, "item_id": stable_id})
     expect(bubble).to_have_count(1)
     expect(bubble).to_be_visible()
+    expect(page.get_by_test_id("slash-command-card")).to_have_count(0)
     chat.emit_idle("compact-active-turn")
     expect(bubble).to_be_visible()
     chat.set_items(
@@ -311,6 +312,7 @@ def test_compact_stays_visible_during_active_turn(
     page.reload()
     expect(bubble).to_have_count(1)
     expect(bubble).to_be_visible()
+    expect(page.get_by_test_id("slash-command-card")).to_have_count(0)
 
 
 def test_compact_retry_reuses_identity_and_one_bubble_after_reload(

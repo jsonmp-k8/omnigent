@@ -15480,7 +15480,12 @@ describe("chatStore compact dispatch", () => {
     },
   );
 
-  it("clears only the matching queued retry when its compact receipt arrives", async () => {
+  it.each([
+    ["command", "compact", "omnigent", true],
+    ["command", "context", "omnigent", false],
+    ["command", "compact", "claude-native-ui", false],
+    ["skill", "compact", "omnigent", false],
+  ] as const)("reconciles %s /%s from %s as compact=%s", async (kind, name, agentName, compact) => {
     const pending = {
       tempId: "other",
       content: [{ type: "input_text" as const, text: "next prompt" }],
@@ -15493,16 +15498,16 @@ describe("chatStore compact dispatch", () => {
     const [queued] = useChatStore.getState().queuedMessages;
     handleSessionEvent({
       type: "slash_command",
-      kind: "command",
-      name: "compact",
+      kind,
+      name,
       arguments: "",
       output: null,
-      agentName: "omnigent",
+      agentName,
       itemId: queued!.stableId!,
       responseId: "receipt",
     });
-    expect(useChatStore.getState().queuedMessages).toEqual([]);
-    expect(useChatStore.getState().pendingUserMessages).toEqual([pending]);
+    expect(useChatStore.getState().queuedMessages).toEqual(compact ? [] : [queued]);
+    expect(useChatStore.getState().pendingUserMessages).toEqual(compact ? [pending] : []);
   });
 
   it("renders a compact user bubble immediately when idle and posts the control event", async () => {

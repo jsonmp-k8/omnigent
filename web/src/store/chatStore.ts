@@ -49,6 +49,7 @@ import type {
   ElicitationBlock,
   ErrorBlock,
   MessageContentBlock,
+  SlashCommandBlock,
   TextDone,
   ToolGroup,
   UserMessageBlock,
@@ -59,6 +60,7 @@ import {
   OMNIGENT_AGENT_NAME,
   LIVE_ITEM_PREFIX,
   PENDING_FILE_PREFIX,
+  isCompactReceipt,
   slashCommandEchoItemId,
   structuredErrorFields,
 } from "@/lib/blocks";
@@ -1926,7 +1928,6 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     });
     for (const m of own) {
       const agentId = m.agentId ?? s.boundAgentId;
-      if (agentId === null && m.command !== COMPACT_COMMAND_NAME) continue;
       void s.send(m.text, agentId, m.files, queuedSendOptions(m, batchOrder));
     }
   },
@@ -3200,6 +3201,12 @@ function setActive(partial: Partial<ChatState> | ((state: ChatState) => Partial<
 
 // ── Internal helpers ─────────────────────────────────────
 
+function isCompactReceiptBlock(block: AnyBlock): block is SlashCommandBlock {
+  return (
+    block.type === "slash_command" && isCompactReceipt(block.kind, block.name, block.ctx.agent)
+  );
+}
+
 async function sendCompact(
   conversationId: string,
   stableId = randomUUID().replace(/-/g, ""),
@@ -3248,7 +3255,7 @@ async function sendCompact(
     }));
   } catch (err) {
     set((s) =>
-      s.blocks.some((block) => block.type === "slash_command" && block.ctx.itemId === stableId)
+      s.blocks.some((block) => isCompactReceiptBlock(block) && block.ctx.itemId === stableId)
         ? {}
         : { blocks: s.blocks.filter((block) => block.ctx.itemId !== itemId) },
     );
@@ -3317,7 +3324,7 @@ function queuedSendOptions(
         if (
           message.command === COMPACT_COMMAND_NAME &&
           setterForState(message.conversationId)?.blocks.some(
-            (block) => block.type === "slash_command" && block.ctx.itemId === stableId,
+            (block) => isCompactReceiptBlock(block) && block.ctx.itemId === stableId,
           )
         )
           return {};
@@ -5869,9 +5876,7 @@ export async function pumpStreamEvents(
               mcpStartupLaunch: { ...s.mcpStartupLaunch, dismissed: true },
             }
           : {}),
-        ...(fresh.some(
-          (block) => block.type === "slash_command" && block.name === COMPACT_COMMAND_NAME,
-        )
+        ...(fresh.some(isCompactReceiptBlock)
           ? {
               queuedMessages: s.queuedMessages.filter(
                 (message) =>
@@ -5879,10 +5884,7 @@ export async function pumpStreamEvents(
                   message.command !== COMPACT_COMMAND_NAME ||
                   !fresh.some(
                     (block) =>
-                      block.type === "slash_command" &&
-                      block.kind === "command" &&
-                      block.name === COMPACT_COMMAND_NAME &&
-                      block.ctx.itemId === message.stableId,
+                      isCompactReceiptBlock(block) && block.ctx.itemId === message.stableId,
                   ),
               ),
             }
@@ -7038,7 +7040,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       return;
     case "slash_command":
       // Control receipts reconcile their own optimistic user bubble.
-      if (event.kind === "command" && event.agentName === OMNIGENT_AGENT_NAME) {
+      if (isCompactReceipt(event.kind, event.name, event.agentName)) {
         rootSetState((s) => ({
           queuedMessages: s.queuedMessages.filter(
             (message) =>

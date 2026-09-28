@@ -242,6 +242,7 @@ describe("BlockStream — block ctx carries response_id and item_id", () => {
           createdBy: "alice@example.com",
         },
       ]);
+      expect(blocks.every((block) => block.ctx.agent === agent)).toBe(true);
       const echoes = blocks.filter((b) => b.type === "user_message");
       if (agent === "omnigent") {
         expect(echoes).toEqual([

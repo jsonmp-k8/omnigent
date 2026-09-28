@@ -2055,6 +2055,30 @@ describe("buildBubbles — reasoning", () => {
 });
 
 describe("buildBubbles — slash_command items", () => {
+  it.each(["omnigent", "claude-native-ui"])(
+    "hides compact delivery receipts but retains harness output (%s)",
+    (agent) => {
+      const blocks: AnyBlock[] = [
+        {
+          type: "user_message",
+          ctx: ctx({ itemId: "compact:user", agent: "omnigent" }),
+          content: [{ type: "input_text", text: "/compact" }],
+        },
+        {
+          type: "slash_command",
+          ctx: ctx({ itemId: "compact", agent }),
+          kind: "command",
+          name: "compact",
+          arguments: "",
+          output: null,
+        },
+      ];
+      expect(buildBubbles(blocks, null).map((bubble) => bubble.kind)).toEqual(
+        agent === "omnigent" ? ["user"] : ["user", "assistant"],
+      );
+    },
+  );
+
   it("slash_command block becomes a slash_command RenderItem inside its bubble", () => {
     const blocks: AnyBlock[] = [
       {

@@ -636,16 +636,18 @@ function* processEvent(state: ReducerState, event: StreamEvent): Generator<AnyBl
     // ── Slash command (Claude Code TUI) ─────────────
     case "slash_command": {
       adoptResponseIdIfUnset(state, event.responseId);
+      const receiptCtx = ctx(
+        { ...state, agent: event.agentName },
+        event.itemId || null,
+        event.responseId || null,
+      );
       if (shouldEchoSlashCommand(event.kind, event.name, event.agentName)) {
         // The derived id matches history hydration and the optimistic compact echo.
         yield {
           type: "user_message",
           ctx: {
-            ...ctx(
-              state,
-              event.itemId ? slashCommandEchoItemId(event.itemId) : null,
-              event.responseId || null,
-            ),
+            ...receiptCtx,
+            itemId: event.itemId ? slashCommandEchoItemId(event.itemId) : null,
             ...(event.createdBy !== undefined ? { createdBy: event.createdBy } : {}),
           },
           content: [
@@ -655,7 +657,7 @@ function* processEvent(state: ReducerState, event: StreamEvent): Generator<AnyBl
       }
       yield {
         type: "slash_command",
-        ctx: ctx(state, event.itemId || null, event.responseId || null),
+        ctx: receiptCtx,
         kind: event.kind,
         name: event.name,
         arguments: event.arguments,

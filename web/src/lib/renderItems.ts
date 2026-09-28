@@ -26,7 +26,7 @@ import type {
   ToolExecution,
   ToolResultBlock,
 } from "./blocks";
-import { LIVE_ITEM_PREFIX } from "./blocks";
+import { isCompactReceipt, LIVE_ITEM_PREFIX } from "./blocks";
 import { isUserInputElicitation } from "./askUserQuestion";
 import {
   type RoutingDecisionExtras,
@@ -812,8 +812,7 @@ function walkBubbles(
   while (i < blocks.length) {
     const b = blocks[i]!;
 
-    // Lifecycle markers don't render — they exist for the streaming
-    // reducer and the eager URL update, not the renderer.
+    // Lifecycle markers and delivery receipts are internal bookkeeping.
     if (isNonRenderingBlock(b)) {
       // A new lifecycle edge means the next assistant group is a distinct
       // response, even if a harness happens to reuse the same response id.
@@ -1319,9 +1318,13 @@ function sameRoutingVerdict(a: RoutingDecisionBlock, b: RoutingDecisionBlock): b
   );
 }
 
-/** Lifecycle markers that produce no bubble of their own. */
+/** Lifecycle markers and compact delivery receipts produce no bubble of their own. */
 function isNonRenderingBlock(b: AnyBlock): boolean {
-  return b.type === "response_start" || b.type === "response_end";
+  return (
+    b.type === "response_start" ||
+    b.type === "response_end" ||
+    (b.type === "slash_command" && isCompactReceipt(b.kind, b.name, b.ctx.agent))
+  );
 }
 
 /**
