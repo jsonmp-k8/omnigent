@@ -29,6 +29,7 @@ from typing import Any
 from omnigent.harness_availability import HarnessAvailability, is_harness_availability
 from omnigent.inner.native_attachments import CAP_FILESYSTEM_ATTACHMENTS
 from omnigent.util.json_types import JsonObject as _JsonObject
+from omnigent.util.tunnel_limits import RUNNER_TUNNEL_MAX_MESSAGE_BYTES
 
 # Structured error code carried in ``HostLaunchRunnerResultFrame.error_code``
 # when the host refuses a launch because the session's harness is not
@@ -1033,11 +1034,15 @@ class HostImportLocalFrame:
     :param source: Harness whose local sessions to read, e.g. ``"claude"``, or
         ``"all"`` to read every supported harness on the host in one batch.
     :param limit: Maximum number of most-recent sessions to return per harness.
+    :param allow_session_chunks: Whether the requesting server understands
+        ``host.import_local_session_chunk``. Missing from older servers, so the
+        safe default is legacy whole-session framing.
     """
 
     request_id: str
     source: str
     limit: int = 10
+    allow_session_chunks: bool = False
 
 
 @dataclass
@@ -1047,11 +1052,14 @@ class HostImportLocalByIdFrame:
     :param request_id: Unique id for correlating the result.
     :param source: Harness namespace containing the session.
     :param session_id: Exact harness-native session id to load.
+    :param allow_session_chunks: Whether the requesting server understands
+        ``host.import_local_session_chunk``. Missing from older servers.
     """
 
     request_id: str
     source: str
     session_id: str
+    allow_session_chunks: bool = False
 
 
 @dataclass
@@ -1569,6 +1577,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "request_id": frame.request_id,
                 "source": frame.source,
                 "limit": frame.limit,
+                "allow_session_chunks": frame.allow_session_chunks,
             }
         )
     if isinstance(frame, HostImportLocalByIdFrame):
@@ -1578,6 +1587,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "request_id": frame.request_id,
                 "source": frame.source,
                 "session_id": frame.session_id,
+                "allow_session_chunks": frame.allow_session_chunks,
             }
         )
     if isinstance(frame, HostImportLocalSessionFrame):
@@ -1634,9 +1644,9 @@ def _imported_local_session_payload(session: HostImportedLocalSession) -> _JsonO
 # string escaping.
 IMPORT_SESSION_CHUNK_CHARS = 8 * 1024 * 1024
 
-# Reassembly cap for one chunked session, enforced server-side so a buggy or
-# hostile host can't buffer unbounded data; a session past it is counted as
-# failed instead of imported.
+# Serialized reassembly cap for one chunked session, enforced server-side so a
+# buggy or hostile host cannot retain unbounded chunk text. Decoding and the
+# completed session object require additional transient memory.
 IMPORT_SESSION_MAX_REASSEMBLED_CHARS = 512 * 1024 * 1024
 
 # Bound all in-flight chunk buffers on one host connection. A host may serve
@@ -1645,22 +1655,35 @@ IMPORT_SESSION_MAX_REASSEMBLED_CHARS = 512 * 1024 * 1024
 IMPORT_SESSION_MAX_CONNECTION_REASSEMBLED_CHARS = 512 * 1024 * 1024
 
 
+class ImportSessionChunkingUnsupportedError(ValueError):
+    """A legacy server cannot safely accept one oversized session frame."""
+
+
 def encode_import_local_session_frames(
     request_id: str,
     total: int,
     session: HostImportedLocalSession,
+    *,
+    allow_chunks: bool,
 ) -> Iterator[str]:
     """Encode one streamed session, slicing it into chunks when oversized.
 
-    Yields a single ``host.import_local_session`` frame when the session's
-    JSON fits in one tunnel message, otherwise consecutive
-    ``host.import_local_session_chunk`` frames for the server to reassemble.
+    Yields a single ``host.import_local_session`` frame when the session is
+    small. When the server explicitly negotiated chunk support, larger
+    sessions use consecutive ``host.import_local_session_chunk`` frames. An
+    older server gets legacy whole-session framing up to its WebSocket limit;
+    anything larger fails this session locally instead of dropping the tunnel.
     """
     session_json = json.dumps(_imported_local_session_payload(session))
-    if len(session_json) <= IMPORT_SESSION_CHUNK_CHARS:
-        yield encode_host_frame(
+    if len(session_json) <= IMPORT_SESSION_CHUNK_CHARS or not allow_chunks:
+        whole_frame = encode_host_frame(
             HostImportLocalSessionFrame(request_id=request_id, total=total, session=session)
         )
+        if len(whole_frame.encode("utf-8")) > RUNNER_TUNNEL_MAX_MESSAGE_BYTES:
+            raise ImportSessionChunkingUnsupportedError(
+                "session exceeds the legacy host-tunnel message limit"
+            )
+        yield whole_frame
         return
     end = len(session_json)
     for seq, start in enumerate(range(0, end, IMPORT_SESSION_CHUNK_CHARS)):
@@ -1733,7 +1756,7 @@ class ImportLocalSessionChunkAssembler:
             raise ValueError(corrupt)
         try:
             raw = json.loads("".join(parts))
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, RecursionError) as exc:
             raise ValueError(f"chunked session is not valid JSON: {exc}") from exc
         return _decode_imported_local_session(raw)
 
@@ -2478,6 +2501,9 @@ def _decode_import_local(msg: _JsonObject) -> HostImportLocalFrame:
         request_id=_required_str(msg, "request_id"),
         source=_required_str(msg, "source"),
         limit=_required_int(msg, "limit"),
+        allow_session_chunks=(
+            _required_bool(msg, "allow_session_chunks") if "allow_session_chunks" in msg else False
+        ),
     )
 
 
@@ -2487,6 +2513,9 @@ def _decode_import_local_by_id(msg: _JsonObject) -> HostImportLocalByIdFrame:
         request_id=_required_str(msg, "request_id"),
         source=_required_str(msg, "source"),
         session_id=_required_str(msg, "session_id"),
+        allow_session_chunks=(
+            _required_bool(msg, "allow_session_chunks") if "allow_session_chunks" in msg else False
+        ),
     )
 
 

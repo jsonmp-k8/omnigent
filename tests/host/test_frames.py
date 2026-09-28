@@ -63,9 +63,18 @@ from omnigent.host.frames import (
 def test_import_local_frames_round_trip() -> None:
     """Request, per-session, and done frames survive the tunnel (title + source)."""
     request = decode_host_frame(
-        encode_host_frame(HostImportLocalFrame(request_id="req_imp", source="claude", limit=3))
+        encode_host_frame(
+            HostImportLocalFrame(
+                request_id="req_imp",
+                source="claude",
+                limit=3,
+                allow_session_chunks=True,
+            )
+        )
     )
-    assert request == HostImportLocalFrame(request_id="req_imp", source="claude", limit=3)
+    assert request == HostImportLocalFrame(
+        request_id="req_imp", source="claude", limit=3, allow_session_chunks=True
+    )
 
     exact_request = decode_host_frame(
         encode_host_frame(
@@ -73,6 +82,7 @@ def test_import_local_frames_round_trip() -> None:
                 request_id="req_exact",
                 source="codex",
                 session_id="0198d07d-session",
+                allow_session_chunks=True,
             )
         )
     )
@@ -80,7 +90,21 @@ def test_import_local_frames_round_trip() -> None:
         request_id="req_exact",
         source="codex",
         session_id="0198d07d-session",
+        allow_session_chunks=True,
     )
+
+    legacy_request = decode_host_frame(
+        json.dumps(
+            {
+                "kind": "host.import_local",
+                "request_id": "req_legacy",
+                "source": "claude",
+                "limit": 1,
+            }
+        )
+    )
+    assert isinstance(legacy_request, HostImportLocalFrame)
+    assert legacy_request.allow_session_chunks is False
 
     session = decode_host_frame(
         encode_host_frame(
@@ -212,12 +236,49 @@ def _session_with_payload(payload: str) -> HostImportedLocalSession:
 
 def test_encode_import_local_session_frames_small_session_is_one_frame() -> None:
     """A session under the chunk threshold rides in one whole-session frame."""
-    frames = list(encode_import_local_session_frames("req_one", 1, _session_with_payload("hi")))
+    frames = list(
+        encode_import_local_session_frames(
+            "req_one", 1, _session_with_payload("hi"), allow_chunks=True
+        )
+    )
 
     assert len(frames) == 1
     decoded = decode_host_frame(frames[0])
     assert isinstance(decoded, HostImportLocalSessionFrame)
     assert decoded.session.external_session_id == "s_big"
+
+
+def test_encode_import_local_session_frames_preserves_legacy_framing() -> None:
+    """An older server still receives a 10 MiB session as one legacy frame."""
+
+    frames = list(
+        encode_import_local_session_frames(
+            "req_legacy",
+            1,
+            _session_with_payload("x" * (10 * 1024 * 1024)),
+            allow_chunks=False,
+        )
+    )
+
+    assert len(frames) == 1
+    assert isinstance(decode_host_frame(frames[0]), HostImportLocalSessionFrame)
+
+
+def test_encode_import_local_session_frames_rejects_unsafe_legacy_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session beyond an older server's cap fails before dropping the tunnel."""
+    import omnigent.host.frames as frames_module
+
+    monkeypatch.setattr(frames_module, "IMPORT_SESSION_CHUNK_CHARS", 64)
+    monkeypatch.setattr(frames_module, "RUNNER_TUNNEL_MAX_MESSAGE_BYTES", 128)
+
+    with pytest.raises(frames_module.ImportSessionChunkingUnsupportedError):
+        list(
+            encode_import_local_session_frames(
+                "req_legacy", 1, _session_with_payload("x" * 500), allow_chunks=False
+            )
+        )
 
 
 def test_encode_import_local_session_frames_slices_oversized_session(
@@ -231,7 +292,7 @@ def test_encode_import_local_session_frames_slices_oversized_session(
 
     frames = [
         decode_host_frame(text)
-        for text in encode_import_local_session_frames("req_big", 2, session)
+        for text in encode_import_local_session_frames("req_big", 2, session, allow_chunks=True)
     ]
 
     assert len(frames) > 1
@@ -311,6 +372,38 @@ def test_chunk_assembler_enforces_size_cap() -> None:
                 request_id="r", total=1, seq=1, last=True, data="x" * 8
             )
         )
+
+
+def test_chunk_assembler_contains_recursive_json_failure() -> None:
+    """Deeply nested JSON fails one session and leaves the assembler reusable."""
+    assembler = ImportLocalSessionChunkAssembler()
+    nested = "[" * 10_000 + "0" + "]" * 10_000
+
+    with pytest.raises(ValueError, match="not valid JSON"):
+        assembler.add(
+            HostImportLocalSessionChunkFrame(
+                request_id="r", total=2, seq=0, last=True, data=nested
+            )
+        )
+
+    session = _session_with_payload("ok")
+    encoded = json.dumps(
+        {
+            "external_session_id": session.external_session_id,
+            "workspace": session.workspace,
+            "items": session.items,
+            "title": session.title,
+            "source": session.source,
+        }
+    )
+    assert (
+        assembler.add(
+            HostImportLocalSessionChunkFrame(
+                request_id="r", total=2, seq=0, last=True, data=encoded
+            )
+        )
+        == session
+    )
 
 
 def test_model_options_frames_round_trip() -> None:

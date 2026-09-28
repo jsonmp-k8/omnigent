@@ -271,9 +271,15 @@ async def _stream_local_sessions_from_host(
             request_id=request_id,
             source=source,
             session_id=session_id,
+            allow_session_chunks=True,
         )
         if session_id is not None
-        else HostImportLocalFrame(request_id=request_id, source=source, limit=limit)
+        else HostImportLocalFrame(
+            request_id=request_id,
+            source=source,
+            limit=limit,
+            allow_session_chunks=True,
+        )
     )
     frame = encode_host_frame(request_frame)
     queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()

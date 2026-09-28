@@ -612,7 +612,7 @@ async def test_host_tunnel_reassembles_chunked_import_session(
         title="giant",
         source="claude",
     )
-    texts = list(encode_import_local_session_frames("req_chunked", 1, session))
+    texts = list(encode_import_local_session_frames("req_chunked", 1, session, allow_chunks=True))
     assert len(texts) > 1  # actually exercised the chunk path
     for text in texts:
         await comm.send_input({"type": "websocket.receive", "text": text})

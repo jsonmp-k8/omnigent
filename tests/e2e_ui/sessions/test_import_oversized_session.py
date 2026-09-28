@@ -43,6 +43,8 @@ from playwright.sync_api import Page, expect
 
 from omnigent.runner.transports.ws_tunnel.limits import RUNNER_TUNNEL_MAX_MESSAGE_BYTES
 
+pytestmark = pytest.mark.min_server_version("0.16.0")
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # Claude Code source session ids seeded on the host, oldest → newest. The
@@ -55,6 +57,7 @@ _NEW_SESSION_ID = "8c1d0e0a-cccc-4ccc-8ccc-000000000003"
 # First-user-message texts double as the imported sessions' synthesized
 # titles, which the import panel's result list renders.
 _OLD_TITLE = "inspect oversized-import OLD.md"
+_GIANT_TITLE = "giant session start"
 _NEW_TITLE = "inspect oversized-import NEW.md"
 
 # Ambient env that must not leak into the spawned host daemon: harness config
@@ -118,7 +121,7 @@ def _write_giant_transcript(path: Path, session_id: str) -> None:
             "type": "user",
             "uuid": f"{session_id}-user-0",
             "cwd": "/repo",
-            "message": {"role": "user", "content": "giant session start"},
+            "message": {"role": "user", "content": _GIANT_TITLE},
         }
         handle.write(json.dumps(first))
         handle.write("\n")
@@ -277,7 +280,9 @@ def test_recent_import_continues_past_oversized_session(
             f"session (after {elapsed:.0f}s): {error.inner_text()!r}"
         )
 
-    # DESIRED: the session newer than the oversized one still imported.
+    # The oversized session itself and the session after it both imported;
+    # neither silent omission nor batch abortion can satisfy this assertion.
+    expect(page.get_by_test_id("import-result-sessions")).to_contain_text(_GIANT_TITLE)
     expect(page.get_by_test_id("import-result-sessions")).to_contain_text(_NEW_TITLE)
 
 
