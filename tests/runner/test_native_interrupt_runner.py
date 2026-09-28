@@ -48,13 +48,29 @@ class _FakeResourceRegistry:
 
 def _make_runner(**overrides: Any) -> tuple[NativeInterruptRunner, dict[str, Any]]:
     """Build a runner with recording fakes; return it plus a capture dict."""
-    captured: dict[str, Any] = {"published": [], "wakes": []}
+    captured: dict[str, Any] = {"published": [], "wakes": [], "wake_calls": []}
 
     def _publish(conv_id: str, event: dict[str, Any]) -> None:
         captured["published"].append((conv_id, event))
 
-    def _mark_and_wake(child_session_id: str, *, status: str, output: str | None) -> _FakeAck:
+    def _mark_and_wake(
+        child_session_id: str,
+        *,
+        status: str,
+        output: str | None,
+        cancel_confirmed: bool = False,
+        response_id: str | None = None,
+    ) -> _FakeAck:
         captured["wakes"].append((child_session_id, status, output))
+        captured["wake_calls"].append(
+            {
+                "child_session_id": child_session_id,
+                "status": status,
+                "output": output,
+                "cancel_confirmed": cancel_confirmed,
+                "response_id": response_id,
+            }
+        )
         return _FakeAck()
 
     async def _codex_bridge_state(conv_id: str, *, action: str, **_kw: Any) -> Any | None:
@@ -159,6 +175,9 @@ async def test_interrupt_grace_timer_delivers_unconfirmed_cancel(
 
     await asyncio.sleep(0.1)
     assert captured["wakes"] == [("conv_g", "cancelled", None)]
+    # The grace-timer cancel is a guess, not a confirmed kill, so a same-turn
+    # survivor completion may still correct it later.
+    assert captured["wake_calls"][-1]["cancel_confirmed"] is False
     assert runner.take_pending_interrupt("conv_g") is False
 
 
@@ -257,6 +276,9 @@ async def test_uniform_stop_kills_tears_down_and_goes_idle(
     idle = [e for _, e in captured["published"] if e.get("status") == "idle"]
     assert idle == [{"type": "session.status", "status": "idle"}]
     assert captured["wakes"] == [("conv_c", "cancelled", None)]
+    # The kill is definitive: tag the cancel confirmed so a later stale
+    # completion cannot overturn it.
+    assert captured["wake_calls"][-1]["cancel_confirmed"] is True
 
 
 @pytest.mark.asyncio
@@ -336,6 +358,9 @@ async def test_claude_stop_is_idempotent_without_advertised_tmux(
 
     assert isinstance(resp, Response) and resp.status_code == 204
     assert captured["wakes"] == [("conv_cn", "cancelled", None)]
+    # A confirmed stop tags the cancel definitive so a stale completion cannot
+    # resurrect the killed session.
+    assert captured["wake_calls"][-1]["cancel_confirmed"] is True
 
 
 @pytest.mark.asyncio

@@ -1626,6 +1626,17 @@ class _SubagentWorkEntry:
         terminal status, or ``None`` while running.
     :param delivered: Whether the terminal payload has been pushed to
         the parent's inbox.
+    :param cancel_confirmed: Whether a ``"cancelled"`` status came from a
+        confirmed hard stop (the kill succeeded) rather than an unconfirmed
+        interrupt guess (the grace timer, or an interrupt whose only follow-up
+        was a quiescence idle). A confirmed cancellation is definitive: a later
+        completion must never overturn it, so a stale retried completion from a
+        different turn cannot resurrect a session the operator killed.
+    :param turn_response_id: Assistant ``response_id`` of the turn this entry
+        currently represents, learned from the child's status edges. Used to
+        reject a completion whose turn differs from the one that was cancelled
+        (e.g. a prior turn's retried ``Stop`` landing after the session was
+        reused), so a completion only corrects a cancellation of its own turn.
     """
 
     parent_session_id: str
@@ -1640,6 +1651,8 @@ class _SubagentWorkEntry:
     created_at: float = dataclasses.field(default_factory=time.time)
     completed_at: float | None = None
     delivered: bool = False
+    cancel_confirmed: bool = False
+    turn_response_id: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2110,6 +2123,8 @@ def mark_subagent_work_terminal(
     status: str,
     output: str | None,
     turn_confirmed: bool = False,
+    cancel_confirmed: bool = False,
+    response_id: str | None = None,
 ) -> _SubagentDeliveryAck:
     """
     Mark a sub-agent dispatch terminal and notify the parent inbox.
@@ -2124,7 +2139,17 @@ def mark_subagent_work_terminal(
         output before retrying parent inbox delivery.
     :param turn_confirmed: Whether the harness itself confirmed this turn
         outcome (e.g. Claude's ``Stop`` hook edge). A confirmed ``completed``
-        may replace a delivered ``cancelled`` guess and be re-delivered.
+        may replace an *unconfirmed*, same-turn ``cancelled`` guess and be
+        re-delivered.
+    :param cancel_confirmed: For a ``"cancelled"`` status, whether it came from
+        a confirmed hard stop (the kill succeeded) rather than an unconfirmed
+        interrupt guess. A confirmed cancellation is definitive and is never
+        overturned by a later completion.
+    :param response_id: Assistant turn id this terminal edge belongs to, when
+        the harness supplies one. A confirmed completion only corrects a
+        cancellation of the *same* turn: if this differs from the cancelled
+        entry's recorded turn, the completion is a stale report for a superseded
+        turn (e.g. a reused session) and is not applied.
     :returns: Delivery acknowledgement for this terminal report.
     :raises ValueError: If ``status`` is not terminal.
     """
@@ -2162,16 +2187,38 @@ def mark_subagent_work_terminal(
             entry.completed_at = time.time()
             entry.delivered = False
             return _deliver_subagent_completion(entry)
-        # A harness-confirmed completion outranks a delivered ``cancelled``:
+        # A harness-confirmed completion can outrank a delivered ``cancelled``:
         # an interrupted agent can survive the Escape and finish, and its real
         # result must correct the earlier guess rather than be discarded. Like
         # the ``failed``-over-``completed`` rule above, re-delivery is the
-        # mitigation for a parent that already acted on the guess.
-        if status == "completed" and turn_confirmed and entry.status == "cancelled":
+        # mitigation for a parent that already acted on the guess. But it may
+        # only correct an *unconfirmed, same-turn* cancellation; two it must
+        # never overturn:
+        #   - a confirmed hard stop (``cancel_confirmed``): the operator killed
+        #     the session, so a completion cannot resurrect it; and
+        #   - a cancellation of a *different* turn: a lost-then-retried ``Stop``
+        #     from a prior turn landing after the child session was reused would
+        #     otherwise graft that turn's result onto this turn's cancellation.
+        # When either id is unknown the turn cannot be disproven, so provenance
+        # (``cancel_confirmed``) is the backstop that still blocks a hard stop.
+        completion_is_same_turn = (
+            response_id is None
+            or entry.turn_response_id is None
+            or response_id == entry.turn_response_id
+        )
+        if (
+            status == "completed"
+            and turn_confirmed
+            and entry.status == "cancelled"
+            and not entry.cancel_confirmed
+            and completion_is_same_turn
+        ):
             entry.status = status
             entry.output = output
             entry.completed_at = time.time()
             entry.delivered = False
+            if response_id is not None:
+                entry.turn_response_id = response_id
             return _deliver_subagent_completion(entry)
         if entry.delivered:
             return _SubagentDeliveryAck(
@@ -2190,11 +2237,32 @@ def mark_subagent_work_terminal(
             entry.status = status
             entry.output = output
             entry.completed_at = time.time()
+            _record_terminal_provenance(entry, status, cancel_confirmed, response_id)
         return _deliver_subagent_completion(entry)
     entry.status = status
     entry.output = output
     entry.completed_at = time.time()
+    _record_terminal_provenance(entry, status, cancel_confirmed, response_id)
     return _deliver_subagent_completion(entry)
+
+
+def _record_terminal_provenance(
+    entry: _SubagentWorkEntry,
+    status: str,
+    cancel_confirmed: bool,
+    response_id: str | None,
+) -> None:
+    """Stamp cancel provenance and turn id when recording a terminal status.
+
+    ``cancel_confirmed`` is sticky — a confirmed hard stop already recorded is
+    never downgraded by a later unconfirmed ``cancelled`` edge — so the override
+    guard in :func:`mark_subagent_work_terminal` keeps rejecting completions
+    against a killed session.
+    """
+    if status == "cancelled":
+        entry.cancel_confirmed = entry.cancel_confirmed or cancel_confirmed
+    if response_id is not None:
+        entry.turn_response_id = response_id
 
 
 def _deliver_subagent_completion(entry: _SubagentWorkEntry) -> _SubagentDeliveryAck:
@@ -8445,10 +8513,21 @@ def create_runner_app(
         _background_tasks.add(_retry_task)
 
     def _mark_subagent_terminal_and_wake(
-        child_session_id: str, *, status: str, output: str | None, turn_confirmed: bool = False
+        child_session_id: str,
+        *,
+        status: str,
+        output: str | None,
+        turn_confirmed: bool = False,
+        cancel_confirmed: bool = False,
+        response_id: str | None = None,
     ) -> _SubagentDeliveryAck:
         ack = mark_subagent_work_terminal(
-            child_session_id, status=status, output=output, turn_confirmed=turn_confirmed
+            child_session_id,
+            status=status,
+            output=output,
+            turn_confirmed=turn_confirmed,
+            cancel_confirmed=cancel_confirmed,
+            response_id=response_id,
         )
         if ack.entry is not None and ack.delivered_now:
             _schedule_subagent_wake(ack.entry)
@@ -10361,6 +10440,10 @@ def create_runner_app(
             status = data.get("status") if isinstance(data, dict) else None
             forwarded_output = data.get("output") if isinstance(data, dict) else None
             output = forwarded_output if isinstance(forwarded_output, str) else None
+            forwarded_response_id = data.get("response_id") if isinstance(data, dict) else None
+            edge_response_id = (
+                forwarded_response_id if isinstance(forwarded_response_id, str) else None
+            )
             delivery_ack: _SubagentDeliveryAck | None = None
             recovered_entry: _SubagentWorkEntry | None = None
             if status in ("running", "waiting", "idle", "failed"):
@@ -10368,6 +10451,14 @@ def create_runner_app(
                 # them here too; the idle watchdog reads them for native turns.
                 _native_pane_status[conversation_id] = status
                 resource_registry.note_external_session_status(conversation_id, status)
+                if edge_response_id is not None:
+                    # Bind the dispatch to the turn now driving it, so a later
+                    # completion that carries a *different* turn's id (a stale
+                    # retried ``Stop`` after the child session was reused) cannot
+                    # overturn this turn's cancellation.
+                    tracked = get_subagent_work(conversation_id)
+                    if tracked is not None:
+                        tracked.turn_response_id = edge_response_id
                 _fan_out_child_delta_to_parent(
                     conversation_id,
                     {"type": "session.status", "status": status},
@@ -10410,10 +10501,13 @@ def create_runner_app(
                 if status in ("idle", "failed"):
                     recovered_entry = await _ensure_subagent_work_entry(conversation_id)
                 if status == "idle" and interrupt_pending:
+                    # Interrupt with no confirming edge: an unconfirmed guess, so
+                    # a same-turn confirmed completion may still correct it.
                     delivery_ack = _mark_subagent_terminal_and_wake(
                         conversation_id,
                         status="cancelled",
                         output=output,
+                        response_id=edge_response_id,
                     )
                 elif status == "idle":
                     _native_interrupt_runner.clear_pending_interrupt(conversation_id)
@@ -10422,6 +10516,7 @@ def create_runner_app(
                         status="completed",
                         output=output if output is not None else "",
                         turn_confirmed=turn_completed is True,
+                        response_id=edge_response_id,
                     )
                 elif status == "failed":
                     _native_interrupt_runner.clear_pending_interrupt(conversation_id)
@@ -10429,6 +10524,7 @@ def create_runner_app(
                         conversation_id,
                         status="failed",
                         output=output or "Error: native sub-agent turn failed",
+                        response_id=edge_response_id,
                     )
             if delivery_ack is not None:
                 if (
