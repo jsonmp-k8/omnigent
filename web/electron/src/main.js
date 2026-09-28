@@ -305,6 +305,46 @@ const arcaConnectFlow = createArcaConnectFlow({
 });
 
 /**
+ * Feature flag for Arca auto-connect, off by default: `OMNIGENT_ARCA_AUTO_CONNECT=1`
+ * forces it on, otherwise settings.json `arca_auto_connect: true` enables it.
+ * Owner: desktop. Review by 0.16.0: make it default-on and delete this flag,
+ * or remove the feature.
+ *
+ * @returns {boolean}
+ */
+function arcaAutoConnectFeatureEnabled() {
+  return (
+    process.env.OMNIGENT_ARCA_AUTO_CONNECT === "1" || loadSettings().arca_auto_connect === true
+  );
+}
+
+/** Auto-connect runs by server origin: at most one per launch, shared while running. */
+const arcaAutoConnectRuns = new Map();
+
+/**
+ * When the feature flag is on, connect the user's Arca instance to a
+ * Databricks-managed server once per launch, running the same idempotent
+ * command as "Run on Arca" without its consent console. The remote daemon
+ * then keeps its own tunnel, so nothing here outlives the run.
+ *
+ * @param {string} serverUrl
+ */
+function autoConnectArca(serverUrl) {
+  if (!arcaAutoConnectFeatureEnabled() || !isDatabricksManagedServerUrl(serverUrl)) return;
+  const origin = originOf(serverUrl);
+  if (!origin || arcaAutoConnectRuns.has(origin)) return;
+  console.log(`[omnigent] arca auto-connect: running against ${origin}`);
+  const run = arca.startArcaConnect(serverUrl).promise.then((result) => {
+    arcaAutoConnectRuns.set(origin, null);
+    console.log(
+      `[omnigent] arca auto-connect: ${result.ok ? "online" : `failed: ${result.error}`}`,
+    );
+    return result;
+  });
+  arcaAutoConnectRuns.set(origin, run);
+}
+
+/**
  * Quit-safety timeouts (see the before-quit handler near the end of this
  * file). `let` (not const) so tests can shrink them via testApi.setQuitTimeouts
  * to exercise the force-exit safety nets without waiting seconds in real
@@ -1457,6 +1497,7 @@ async function loadServerUrl(
     });
     await win.loadURL(target);
     assertCurrent();
+    autoConnectArca(serverUrl);
     return serverUrl;
   } finally {
     attempt.pending = false;
@@ -3482,6 +3523,10 @@ function registerIpc() {
     if (!isDatabricksManagedServerUrl(serverUrl)) {
       return { ok: false, error: "Arca hosts can only connect to Databricks-managed servers." };
     }
+    // An auto-connect still running shares its outcome instead of racing a
+    // second `arca ssh`.
+    const autoRun = arcaAutoConnectRuns.get(originOf(serverUrl));
+    if (autoRun) return autoRun;
     const win = BrowserWindow.fromWebContents(event.sender);
     return arcaConnectFlow.run(win, serverUrl);
   });

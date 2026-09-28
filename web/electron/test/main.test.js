@@ -41,6 +41,7 @@ function loadNavigationHarness({
   ensureSession = async (_ses, origin) => origin,
   expandWorkspace = async (url) => url,
   realBrowserRegistry = false,
+  arcaResult = { ok: true },
 } = {}) {
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), "omnigent-navigation-test-"));
   if (savedServerUrl) {
@@ -50,7 +51,15 @@ function loadNavigationHarness({
     );
   }
   const listeners = new Map();
-  const calls = { loadFile: [], loadURL: [], auth: [], manifests: [], progress: [], reloads: 0 };
+  const calls = {
+    loadFile: [],
+    loadURL: [],
+    auth: [],
+    manifests: [],
+    progress: [],
+    reloads: 0,
+    arcaConnects: [],
+  };
   const pickers = [];
   const ipc = new Map();
   const webRequest = {};
@@ -224,6 +233,14 @@ function loadNavigationHarness({
       chooseDeepLinkStrategy: () => null,
     },
     "./workspace-chrome": { registerWorkspaceChromeHide: () => {} },
+    // Never spawn a real arca from tests.
+    "./arca": {
+      ...require("../src/arca"),
+      startArcaConnect: (url) => {
+        calls.arcaConnects.push(url);
+        return { command: "arca ssh", promise: Promise.resolve(arcaResult), cancel: () => {} };
+      },
+    },
     "./databricks-session": {
       ensureDatabricksSession: (...args) => {
         calls.auth.push(args);
@@ -353,6 +370,58 @@ function loadNavigationHarness({
     },
   };
 }
+
+describe("Arca auto-connect wiring", () => {
+  const workspace = "https://workspace.cloud.databricks.com/omnigent";
+  const tick = () =>
+    new Promise((resolve) => {
+      setImmediate(resolve);
+    });
+  const enableFeature = (h) =>
+    fs.writeFileSync(h.settingsPath, JSON.stringify({ arca_auto_connect: true }));
+
+  it("connects Arca once per launch after loading a managed server", async (t) => {
+    const h = loadNavigationHarness({ serverUrl: workspace, databricksMode: "browser" });
+    t.after(h.cleanup);
+    enableFeature(h);
+    await h.api.loadServerUrl(h.win, workspace);
+    await h.api.loadServerUrl(h.win, workspace);
+    await tick();
+    assert.deepEqual(h.calls.arcaConnects, [workspace]);
+  });
+
+  it("stays off without the feature flag", async (t) => {
+    const h = loadNavigationHarness({ serverUrl: workspace, databricksMode: "browser" });
+    t.after(h.cleanup);
+    await h.api.loadServerUrl(h.win, workspace);
+    await tick();
+    assert.deepEqual(h.calls.arcaConnects, []);
+  });
+
+  it("turns on with OMNIGENT_ARCA_AUTO_CONNECT=1", async (t) => {
+    process.env.OMNIGENT_ARCA_AUTO_CONNECT = "1";
+    let h;
+    try {
+      h = loadNavigationHarness({ serverUrl: workspace, databricksMode: "browser" });
+    } finally {
+      delete process.env.OMNIGENT_ARCA_AUTO_CONNECT;
+    }
+    t.after(h.cleanup);
+    await h.api.loadServerUrl(h.win, workspace);
+    await tick();
+    assert.deepEqual(h.calls.arcaConnects, [workspace]);
+  });
+
+  it("skips servers that aren't Databricks-managed", async (t) => {
+    const local = "http://localhost:6767";
+    const h = loadNavigationHarness({ serverUrl: local });
+    t.after(h.cleanup);
+    enableFeature(h);
+    await h.api.loadServerUrl(h.win, local);
+    await tick();
+    assert.deepEqual(h.calls.arcaConnects, []);
+  });
+});
 
 describe("Databricks auth mode wiring", () => {
   const workspace = "https://workspace.cloud.databricks.com/omnigent";
