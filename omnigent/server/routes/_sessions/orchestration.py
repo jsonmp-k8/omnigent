@@ -7256,7 +7256,16 @@ async def _relay_runner_stream(
                     deadline - now,
                     extra={"session_id": session_id},
                 )
-                await asyncio.sleep(_RELAY_RETRY_INTERVAL_S)
+                # Park until the runner re-registers rather than re-opening the
+                # stream every interval: one attempt per outage, resolved the
+                # instant the tunnel is back. A client without a tunnel
+                # transport (in-process tests) keeps the interval sleep.
+                transport = getattr(runner_client, "_transport", None)
+                wait = getattr(transport, "wait_for_runner", None)
+                if wait is not None:
+                    await wait(deadline - now)
+                else:
+                    await asyncio.sleep(_RELAY_RETRY_INTERVAL_S)
                 continue
             if lost.intentional:
                 decision = "intentional_stop"
@@ -7537,6 +7546,21 @@ async def _relay_runner_stream_once(
                             # would deliver a premature, lock-out completion.
                             raw_blocked_on = event.get("blocked_on")
                             raw_response_id = event.get("response_id")
+                            # The runner finishing a turn the server had written
+                            # off as a runner drop proves the drop was transient:
+                            # honor the completion and clear the disconnect cause.
+                            # A genuine task failure keeps its sticky ``failed``
+                            # (the guard only clears a ``runner_disconnected`` label).
+                            if (
+                                status == "idle"
+                                and _session_status_cache.get(session_id) == "failed"
+                            ):
+                                await _publish_runner_recovered_status(
+                                    session_id,
+                                    conversation_store,
+                                    require_disconnect_code=True,
+                                )
+                                continue
                             _publish_status(
                                 session_id,
                                 status,

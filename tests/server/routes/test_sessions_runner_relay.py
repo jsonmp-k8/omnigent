@@ -1101,6 +1101,94 @@ async def test_relay_running_edge_clears_stale_intentional_stop_marker(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("prior_error_code", "expect_cleared"),
+    [
+        ("runner_disconnected", True),
+        ("agent_error", False),
+    ],
+)
+async def test_relay_completion_idle_clears_only_a_disconnect_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    prior_error_code: str,
+    expect_cleared: bool,
+) -> None:
+    """
+    The runner's completion ``idle`` clears a stale ``runner_disconnected`` failure.
+
+    A false disconnect fail (the tunnel dropped, but the runner kept working
+    and reconnected) lands the cache on ``failed``. When the runner then
+    finishes the turn its ``idle`` edge must be honored and the disconnect
+    labels cleared; otherwise the sticky-failed rule swallows the completion
+    and the red card stays until the next user message. A genuine task
+    failure with any other code must stay sticky, exactly as before.
+    """
+    from omnigent.runtime import session_stream
+    from omnigent.server.routes import sessions as sessions_module
+
+    monkeypatch.setattr(
+        "omnigent.server.routes._sessions.orchestration.RUNNER_DISCONNECT_GRACE_S",
+        0.0,
+    )
+    sessions_module._runner_relay_tasks.clear()
+    gate = asyncio.Event()
+    frames = ['data: {"type": "session.status", "status": "idle"}\n\n']
+    fake_runner = _ScriptedThenDropRunnerClient(frames, gate)
+    store = _RecordingLabelStore(live_status="idle")
+    session_id = "d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6"
+    store.set_labels(
+        session_id,
+        {
+            sessions_module._LAST_TASK_ERROR_CODE_LABEL_KEY: prior_error_code,
+            sessions_module._LAST_TASK_ERROR_MESSAGE_LABEL_KEY: "prior failure",
+        },
+    )
+    sessions_module._session_status_cache[session_id] = "failed"
+
+    collector = None
+    try:
+        handle = await sessions_module._ensure_runner_relay_ready(
+            session_id,
+            "runner_completion_idle",
+            fake_runner,  # type: ignore[arg-type]
+            conversation_store=store,  # type: ignore[arg-type]
+        )
+        assert handle is not None
+        collector = await start_session_stream_collector(session_id)
+        gate.set()
+        await asyncio.wait_for(handle.task, timeout=_TASK_TIMEOUT_S)
+
+        statuses = []
+        while not collector.queue.empty():
+            statuses.append(await collector.queue.get())
+        idle_edges = [e for e in statuses if e.get("status") == "idle"]
+        persisted = sessions_module._last_task_error_from_labels(store.labels[session_id])
+        if expect_cleared:
+            assert sessions_module._session_status_cache.get(session_id) == "idle", (
+                f"completion idle was swallowed by the sticky-failed rule; saw {statuses}"
+            )
+            assert idle_edges, f"no idle edge reached the stream; saw {statuses}"
+            assert persisted is None, f"disconnect labels survived recovery: {persisted}"
+        else:
+            assert sessions_module._session_status_cache.get(session_id) == "failed", (
+                f"a genuine {prior_error_code} failure was downgraded to idle; saw {statuses}"
+            )
+            assert persisted is not None and persisted["code"] == prior_error_code
+    finally:
+        gate.set()
+        if collector is not None:
+            await collector.stop()
+        handle = sessions_module._runner_relay_tasks.get(session_id)
+        if handle is not None and not handle.task.done():
+            handle.task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(handle.task, timeout=_TASK_TIMEOUT_S)
+        sessions_module._runner_relay_tasks.clear()
+        sessions_module._session_status_cache.pop(session_id, None)
+        session_stream.close(session_id)
+
+
+@pytest.mark.asyncio
 async def test_relay_stays_quiet_when_runner_leaves_an_idle_session(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
