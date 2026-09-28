@@ -566,6 +566,31 @@ async def test_model_metadata_lookup_uses_models_api_and_caches() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_metadata_lookup_keeps_a_versioned_base() -> None:
+    """A base that already ends in a version segment lists at ``<base>/models``."""
+    requests_seen: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests_seen.append(request)
+        if request.url.path != "/anthropic/v4/models/claude-opus-4-8":
+            return httpx.Response(404, json={"error": {"type": "not_found_error"}})
+        return httpx.Response(200, json={"id": "claude-opus-4-8", "max_input_tokens": 200_000})
+
+    metadata = await _get_anthropic_model_metadata(
+        {"x-api-key": "test-key", "anthropic-version": "2023-06-01"},
+        "https://gateway.example.com/anthropic/v4",
+        "claude-opus-4-8",
+        transport=httpx.MockTransport(_handler),
+    )
+
+    assert [str(request.url) for request in requests_seen] == [
+        "https://gateway.example.com/anthropic/v4/models/claude-opus-4-8"
+    ]
+    assert metadata is not None
+    assert metadata.context_window == 200_000
+
+
+@pytest.mark.asyncio
 async def test_model_metadata_lookup_does_not_cache_failures(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

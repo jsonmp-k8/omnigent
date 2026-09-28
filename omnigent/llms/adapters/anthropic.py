@@ -12,6 +12,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import secrets
 import threading
 import time
@@ -218,7 +219,11 @@ def _chat_to_anthropic(
 def _models_url(base_url: str) -> str:
     """Return the Anthropic Models API URL for an adapter base URL."""
     trimmed = base_url.rstrip("/")
-    return f"{trimmed}/models" if trimmed.endswith("/v1") else f"{trimmed}/v1/models"
+    # A base that already names its API version lists at <base>/models;
+    # appending /v1 again builds a path no server serves.
+    if re.search(r"/v\d+$", trimmed):
+        return f"{trimmed}/models"
+    return f"{trimmed}/v1/models"
 
 
 async def _get_anthropic_model_metadata(

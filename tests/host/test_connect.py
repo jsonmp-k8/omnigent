@@ -434,25 +434,11 @@ async def test_handle_model_options_uses_host_pi_configuration(
 async def test_handle_model_options_serves_the_pi_harness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The headless ``pi`` harness gets the same launch picker as ``pi-native``.
-
-    ``omnigent run`` agents execute on the ``pi`` harness (the gateway-wrapped
-    headless Pi); their session picker asks the host for model options and was
-    answered ``model options are unsupported for harness 'pi'`` — so every
-    such session carried an empty picker while an identical pi-native session
-    listed its models. Both harness spellings resolve the same configured
-    inventory.
-
-    The expected row carries the ``source`` decoration, which
-    ``_with_model_configuration_source`` derives from the host's AMBIENT
-    provider config — keyring-backed, so it differs per machine (a pi
-    subscription default decorates the row, a bare CI machine does not;
-    see #7012). Pin the source-resolution seam to a fixed subscription so
-    the exact-frame assertion is identical on any machine.
-    """
+    """The headless ``pi`` harness gets the same launch picker as ``pi-native``."""
     from omnigent.harnesses.pi_native import credentials as pi_native_credentials
     from omnigent.host import connect as host_connect
 
+    # The source decoration comes from the host's ambient provider config; pin it.
     monkeypatch.setattr(
         host_connect,
         "_model_configuration_source_for_harness",
