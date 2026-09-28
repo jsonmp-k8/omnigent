@@ -144,6 +144,53 @@ async def test_turn_completed_idle_delivers_completed_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_grace_timer_cancel_is_corrected_by_survivor_via_turn_start_identity() -> None:
+    """A survivor's result is preserved after the grace-timer cancel.
+
+    The regression Polly flagged: the fallback cancel carries no turn id, and
+    claude only surfaces one on its terminal ``Stop``. Turn identity must be
+    established BEFORE the timeout so the later confirmed completion can be
+    matched to the cancelled turn — otherwise the survivor's result is lost.
+
+    Here the forwarder's turn-start ``running`` edge publishes the turn id
+    (``resp1``); the grace-timer cancel is delivered with no id (as the real
+    fallback does); the survivor's confirmed ``Stop`` carries ``resp1`` and, on
+    a positive same-turn match, corrects the cancellation and reaches the parent.
+    """
+    rig = _Rig("claude-native")
+    try:
+        async with _runner_client(rig.app) as client:
+            await rig.create_child_session(client)
+            # Turn-start identity (forwarder's running edge) — established BEFORE
+            # any cancel, independently of the terminal edge.
+            resp = await rig.post_status(client, {"status": "running", "response_id": "resp1"})
+            assert resp.status_code == 204, resp.text
+            assert rig.runner_app.get_subagent_work(rig.child_id).turn_response_id == "resp1"
+
+            # The grace-timer fallback fires with NO turn id (as it really does).
+            rig.runner_app.mark_subagent_work_terminal(
+                rig.child_id, status="cancelled", output=None
+            )
+
+            # The child survived the interrupt and finished: its confirmed Stop
+            # carries the same turn id, so the cancellation is corrected.
+            resp = await rig.post_status(
+                client,
+                {
+                    "status": "idle",
+                    "turn_completed": True,
+                    "response_id": "resp1",
+                    "output": "the verdict",
+                },
+            )
+            assert resp.status_code == 204, resp.text
+        delivered = [(item["status"], item["output"]) for item in rig.drained()]
+        assert delivered == [("cancelled", ""), ("completed", "the verdict")]
+    finally:
+        rig.close()
+
+
+@pytest.mark.asyncio
 async def test_quiescence_idle_for_legacy_native_harness_still_completes() -> None:
     """Harnesses without turn-outcome plumbing keep the idle -> completed mapping.
 

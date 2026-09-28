@@ -1226,6 +1226,13 @@ async def forward_claude_transcript_to_session(
     # lifetime of the forwarder task; the server's idempotence handles
     # the rare case where two forwarder processes race the same conv.
     external_session_id_mirrored = False
+    # The turn id whose identity we have already published on a turn-start
+    # ``running`` edge, so we announce each new turn exactly once. Lets the
+    # runner learn which turn drives a sub-agent dispatch BEFORE any interrupt
+    # or terminal edge — the independent identity a later completion is matched
+    # against so it cannot overturn a different turn's cancellation. Reset on
+    # /clear and /fork rotations alongside other session state.
+    published_turn_response_id: str | None = None
     # Native task system state: maps and ordered list accumulated from
     # TaskCreated / TaskCompleted / PostToolUse/TaskUpdate hook events.
     # Reset on /clear and /fork rotations alongside other session state.
@@ -1317,6 +1324,7 @@ async def forward_claude_transcript_to_session(
                         )
                         subagent_status_retries = _PostRetryTracker()
                         external_session_id_mirrored = False
+                        published_turn_response_id = None
                         task_subjects = {}
                         task_statuses = {}
                         task_order = []
@@ -1360,6 +1368,7 @@ async def forward_claude_transcript_to_session(
                         )
                         subagent_status_retries = _PostRetryTracker()
                         external_session_id_mirrored = False
+                        published_turn_response_id = None
                         task_subjects = {}
                         task_statuses = {}
                         task_order = []
@@ -1426,6 +1435,12 @@ async def forward_claude_transcript_to_session(
                             retry_tracker=item_retries,
                             skip_user_messages=skip_user_messages,
                             dedupe=dedupe,
+                        )
+                        published_turn_response_id = await _publish_turn_identity(
+                            client=client,
+                            session_id=current_session_id,
+                            response_id=state.current_response_id,
+                            already_published=published_turn_response_id,
                         )
                         hook_state = await _forward_available_status_events(
                             client=client,
@@ -3709,6 +3724,49 @@ def _compaction_status_for_record(record: ClaudeHookRecord) -> str | None:
     if record.event_name == "SessionStart" and record.source == "compact":
         return "completed"
     return None
+
+
+async def _publish_turn_identity(
+    *,
+    client: httpx.AsyncClient,
+    session_id: str,
+    response_id: str | None,
+    already_published: str | None,
+) -> str | None:
+    """Announce a new turn's id on a ``running`` edge, once per turn.
+
+    Claude surfaces a turn's ``response_id`` to the runner only on its terminal
+    ``Stop`` edge. That is too late to safely correct a cancellation: a delayed
+    ``Stop`` from a superseded turn would be indistinguishable from the current
+    turn's. Publishing the id on a turn-start ``running`` edge lets the runner
+    bind the dispatch to its turn independently — so a later completion is
+    matched to the turn that was cancelled, and a stale one is rejected.
+
+    Best-effort: the running badge is otherwise PTY-derived, so a dropped post
+    only forgoes the identity hint for this turn (the terminal edge still
+    carries the id); it never blocks forwarding. Returns the id now published
+    (or the unchanged ``already_published`` when there is nothing new to send).
+
+    :param client: Omnigent HTTP client.
+    :param session_id: Omnigent session/conversation id.
+    :param response_id: The active turn's id, or ``None`` when none is known.
+    :param already_published: The id last announced, to avoid re-announcing.
+    :returns: The id that has now been announced for this turn.
+    """
+    if response_id is None or response_id == already_published:
+        return already_published
+    try:
+        await post_external_session_status(
+            client,
+            session_id=session_id,
+            status="running",
+            response_id=response_id,
+        )
+    except httpx.HTTPError:
+        # Identity is a hint, not a correctness dependency of forwarding; the
+        # terminal edge still carries the id. Retry on the next poll.
+        return already_published
+    return response_id
 
 
 async def _forward_available_status_events(

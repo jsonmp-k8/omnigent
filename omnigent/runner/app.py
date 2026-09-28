@@ -2588,6 +2588,11 @@ def _subagent_delivery_not_confirmed_response(
     """
     if ack.delivered:
         return None
+    if ack.reason == _SUBAGENT_DELIVERY_SUPERSEDED_DISPATCH:
+        # A delayed op intentionally dropped because a newer send replaced the
+        # dispatch: acknowledge so the forwarder does not retry, and never touch
+        # the newer dispatch. Not a delivery failure.
+        return None
     if ack.entry is None and not is_runner_known_subagent:
         return None
     reason = _SUBAGENT_DELIVERY_MISSING_WORK_ENTRY if ack.entry is None else ack.reason

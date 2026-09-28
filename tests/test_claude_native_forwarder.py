@@ -4155,6 +4155,49 @@ async def test_stop_edge_retry_keeps_original_turn_id(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_publish_turn_identity_announces_each_turn_once() -> None:
+    """A turn's id is announced on a ``running`` edge once, so the runner can bind it.
+
+    This is the independent turn identity the runner needs BEFORE any interrupt
+    or terminal edge: without it, a delayed ``Stop`` from a superseded turn
+    cannot be told apart from the current turn's, and a survivor's result is
+    lost after the grace-timer cancel. Each new turn is announced once; the same
+    turn is not re-announced, and ``None`` is a no-op.
+    """
+    posts: list[dict[str, Any]] = []
+
+    def _handle_request(request: httpx.Request) -> httpx.Response:
+        posts.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(202, json={})
+
+    transport = httpx.MockTransport(_handle_request)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        published = await forwarder._publish_turn_identity(
+            client=client, session_id="conv", response_id="R1", already_published=None
+        )
+        assert published == "R1"
+        published = await forwarder._publish_turn_identity(
+            client=client, session_id="conv", response_id="R1", already_published=published
+        )
+        assert published == "R1"  # same turn: not re-announced
+        published = await forwarder._publish_turn_identity(
+            client=client, session_id="conv", response_id="R2", already_published=published
+        )
+        assert published == "R2"  # new turn: announced
+        published = await forwarder._publish_turn_identity(
+            client=client, session_id="conv", response_id=None, already_published=published
+        )
+        assert published == "R2"  # no active turn: no-op
+
+    running = [
+        p["data"]
+        for p in posts
+        if p["type"] == "external_session_status" and p["data"].get("status") == "running"
+    ]
+    assert [d["response_id"] for d in running] == ["R1", "R2"]
+
+
+@pytest.mark.asyncio
 async def test_forwarder_retries_user_item_on_ambiguous_post_failure(tmp_path: Path) -> None:
     """
     An ambiguous POST failure holds the cursor and re-posts the item.
