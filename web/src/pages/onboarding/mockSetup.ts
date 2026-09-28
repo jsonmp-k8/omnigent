@@ -23,6 +23,7 @@
 //   new + MDM ............... ?mock=1&managed=https://field-eng.example.com,https://corp.example.com
 //   returning + MDM ......... ?mock=1&installed=1&returning=1&managed=https://field-eng.example.com
 
+import { isLocalInstall } from "./ServerSelectStep";
 import type { ServerSelectorV2Setup } from "./ServerSelectorV2";
 
 /** Whether the mock is requested (`?mock=1`). */
@@ -115,7 +116,8 @@ export function maybeMockSetup(params: URLSearchParams): ServerSelectorV2Setup |
     onCopy: (text) => log("onCopy", text),
     onCheckServer: async (url) => {
       log("onCheckServer", url);
-      return { status: "ok" as const };
+      // The local install is down unless localRunning=1; everything else is up.
+      return { status: isLocalInstall(url) && !localServerRunning ? "unreachable" : "ok" };
     },
     onCloudSetup: () => log("onCloudSetup"),
     onSwitchToLegacy: () => log("onSwitchToLegacy"),

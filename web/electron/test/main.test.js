@@ -1271,6 +1271,13 @@ describe("recent-server startup wiring (src/main.js)", () => {
       /ipcMain\.handle\("omnigent:get-setup-capabilities"[\s\S]{0,400}connectedBefore:\s*normalizeRecentServers\(loadSettings\(\)\.recent_servers\)\.length > 0/,
     );
   });
+
+  it("reports the local server as running only when start-local would reuse it", () => {
+    assert.match(
+      liveCode,
+      /ipcMain\.handle\("omnigent:get-cli-status"[\s\S]{0,900}localServerRunning:\s*\(await omnigentCli\.localServerHealthy\(\)\) !== null/,
+    );
+  });
 });
 
 // Guard for the deep-link path join in createWindow. A basename-less SPA path

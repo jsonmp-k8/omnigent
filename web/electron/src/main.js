@@ -3254,9 +3254,8 @@ function registerIpc() {
       // In-app install is macOS-only; the renderer must not route connect/local
       // through an install step on platforms where it can't run.
       installSupported: process.platform === "darwin",
-      // Advisory (pidfile liveness, instant): picks "Open" vs "Start Omnigent";
-      // start-local still health-checks before reusing it.
-      localServerRunning: omnigentCli.localServerStatus() !== null,
+      // start-local's own reuse test, so "Open" vs "Start Omnigent" matches it.
+      localServerRunning: (await omnigentCli.localServerHealthy()) !== null,
     };
   });
 

@@ -77,50 +77,92 @@ describe("ServerSelectorV2", () => {
     expect(screen.getByLabelText("Server URL")).toBeInTheDocument();
   });
 
-  it("the stopped local install reads 'Start Omnigent' and boots the local server", () => {
-    const onConnect = vi.fn().mockResolvedValue({});
-    render(
-      <ServerSelectorV2
-        setup={makeSetup({ installed: true, recentServers: ["http://localhost:6767/"], onConnect })}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Start Omnigent" }));
-    expect(screen.getByText(/starting the local server/i)).toBeInTheDocument();
-    expect(onConnect).not.toHaveBeenCalled();
-  });
-
-  it("a running local server reads 'Open Omnigent' but still goes through start-local", async () => {
-    // The hint is a load-time snapshot: if the server died since, start-local
-    // (health-checked reuse-or-boot) recovers where a direct connect would fail.
+  it("a local install that's down reads 'Start Omnigent' and boots it", async () => {
     const onConnect = vi.fn().mockResolvedValue({});
     const onStartLocal = vi.fn().mockResolvedValue({ ok: true });
     render(
       <ServerSelectorV2
         setup={makeSetup({
           installed: true,
-          localServerRunning: true,
+          onStartLocal,
+          // Both loopback spellings of the local install get probed.
+          recentServers: ["http://localhost:6767/", "http://127.0.0.1:6767/"],
+          onConnect,
+          onCheckServer: vi.fn().mockResolvedValue({ status: "unreachable" }),
+        })}
+      />,
+    );
+    expect(await screen.findAllByText("Not running")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Start Omnigent" }));
+    expect(screen.getByText(/starting the local server/i)).toBeInTheDocument();
+    await waitFor(() => expect(onStartLocal).toHaveBeenCalledOnce());
+    expect(onConnect).not.toHaveBeenCalled();
+  });
+
+  it("a local install that's up reads 'Open Omnigent' and opens the exact URL", async () => {
+    const onConnect = vi.fn().mockResolvedValue({});
+    const onStartLocal = vi.fn().mockResolvedValue({ ok: true });
+    render(
+      <ServerSelectorV2
+        setup={makeSetup({
+          installed: true,
           recentServers: ["http://localhost:6767/"],
           onConnect,
           onStartLocal,
         })}
       />,
     );
+    expect(await screen.findByText("Omnigent server")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" }));
-    expect(screen.getByText(/connecting to the local server/i)).toBeInTheDocument();
+    await waitFor(() => expect(onConnect).toHaveBeenCalledWith("http://localhost:6767/"));
+    expect(onStartLocal).not.toHaveBeenCalled();
+  });
+
+  it("re-checks on click: a local install that stopped since the list loaded is booted", async () => {
+    const onConnect = vi.fn().mockResolvedValue({});
+    const onStartLocal = vi.fn().mockResolvedValue({ ok: true });
+    const onCheckServer = vi
+      .fn()
+      .mockResolvedValueOnce({ status: "ok" })
+      .mockResolvedValue({ status: "unreachable" });
+    render(
+      <ServerSelectorV2
+        setup={makeSetup({
+          installed: true,
+          recentServers: ["http://localhost:6767/"],
+          onConnect,
+          onStartLocal,
+          onCheckServer,
+        })}
+      />,
+    );
+    expect(await screen.findByText("Omnigent server")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" }));
     await waitFor(() => expect(onStartLocal).toHaveBeenCalledOnce());
     expect(onConnect).not.toHaveBeenCalled();
   });
 
-  it("a user-run server on another loopback port connects directly", () => {
-    const onConnect = vi.fn().mockResolvedValue({});
-    render(
-      <ServerSelectorV2
-        setup={makeSetup({ installed: true, recentServers: ["http://localhost:8000/"], onConnect })}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" }));
-    expect(onConnect).toHaveBeenCalledWith("http://localhost:8000/");
-  });
+  it.each(["http://localhost:8000/", "https://localhost:6767/team"])(
+    "any other loopback URL (%s) connects to that exact URL, even when down",
+    async (url) => {
+      const onConnect = vi.fn().mockResolvedValue({});
+      const onStartLocal = vi.fn().mockResolvedValue({ ok: true });
+      render(
+        <ServerSelectorV2
+          setup={makeSetup({
+            installed: true,
+            recentServers: [url],
+            onConnect,
+            onStartLocal,
+            onCheckServer: vi.fn().mockResolvedValue({ status: "unreachable" }),
+          })}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" }));
+      await waitFor(() => expect(onConnect).toHaveBeenCalledWith(url));
+      expect(onStartLocal).not.toHaveBeenCalled();
+    },
+  );
 
   it("the local intro reads 'Start' when stopped and 'Open' when running", () => {
     const { unmount } = render(<ServerSelectorV2 setup={makeSetup({ installed: true })} />);
@@ -131,6 +173,27 @@ describe("ServerSelectorV2", () => {
     fireEvent.click(screen.getByRole("button", { name: /get started locally/i }));
     fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" }));
     expect(screen.getByText(/connecting to the local server/i)).toBeInTheDocument();
+  });
+
+  it("Back from a failed start opened via 'Add server…' returns to the list, not the URL input", async () => {
+    render(
+      <ServerSelectorV2
+        setup={makeSetup({
+          installed: true,
+          managedServers: ["https://field-eng-omni.aws.databricksapps.com"],
+          onCheckServer: vi.fn().mockResolvedValue({ status: "unreachable" }),
+          onStartLocal: vi.fn().mockResolvedValue({ ok: false, error: "boom" }),
+        })}
+      />,
+    );
+    fireEvent.pointerDown(screen.getByRole("button", { name: /choose team url/i }), { button: 0 });
+    fireEvent.click(screen.getByRole("menuitem", { name: /add server/i }));
+    fireEvent.change(screen.getByLabelText("Server URL"), { target: { value: "localhost:6767" } });
+    fireEvent.click(screen.getByRole("button", { name: "Join" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Start Omnigent" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Back" }));
+    expect(screen.getByText(/preset \(by your organization\)/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Server URL")).not.toBeInTheDocument();
   });
 
   it("'Add server…' in the preset dropdown opens the URL input; Back returns to the landing", () => {

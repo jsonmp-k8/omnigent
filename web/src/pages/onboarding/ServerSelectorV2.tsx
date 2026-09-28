@@ -56,8 +56,8 @@ export interface ServerSelectorV2Setup {
   /** Has connected to any server before (returning user). The shell counts MDM
    *  presets too, which `recentServers` excludes, so it outlives the list. */
   connectedBefore?: boolean;
-  /** Advisory: the CLI's local server looked up at load → local actions read
-   *  "Open" rather than "Start". Labels only; start-local re-checks health. */
+  /** start-local would reuse a healthy server (checked at load) → the local
+   *  intro and its terminal read "Open"/"Opening" rather than "Start". */
   localServerRunning?: boolean;
   /** Mocks only: route Join / Install actions to the terminal step (which runs
    *  the mocked local-server flow) instead of the no-op connect, so the install
@@ -143,9 +143,10 @@ export function ServerSelectorV2({ setup }: { setup: ServerSelectorV2Setup }) {
   // The preset server picked from the landing split button (drives the detail step).
   const [detailUrl, setDetailUrl] = useState<string | null>(null);
   // What the terminal step should run after any install: start the local server
-  // (Back → the step that launched it), or connect to a remote URL.
+  // (Back → the step that launched it), or connect to a remote URL. A picked
+  // local install carries its `url`: opened as-is when up, else started.
   const [terminalTarget, setTerminalTarget] = useState<
-    { kind: "local"; back: Step } | { kind: "connect"; url: string }
+    { kind: "local"; back: Step; url?: string } | { kind: "connect"; url: string }
   >({ kind: "local", back: "local" });
   // Install runs in the terminal step only when the CLI is missing AND in-app
   // install is actually offered (macOS — onInstallCli is present). An installed
@@ -159,10 +160,9 @@ export function ServerSelectorV2({ setup }: { setup: ServerSelectorV2Setup }) {
   // ConnectResult so the list can still show a connect error when connecting
   // directly.
   const connect = async (url: string): Promise<ConnectResult> => {
-    // The local install always goes through start-local, which reuses a healthy
-    // server or boots one — the running hint only picks the label.
+    // The local install is checked in the terminal step, so a stopped one starts.
     if (isLocalInstall(url)) {
-      setTerminalTarget({ kind: "local", back: "server" });
+      setTerminalTarget({ kind: "local", back: "server", url });
       setStep("terminal");
       return {};
     }
@@ -172,6 +172,20 @@ export function ServerSelectorV2({ setup }: { setup: ServerSelectorV2Setup }) {
       return {};
     }
     return setup.onConnect(url);
+  };
+  // Connect from the terminal: success navigates away, a rejection shows there.
+  const connectInTerminal = async (url: string) => {
+    const result = await setup.onConnect(url);
+    return { ok: result.error === undefined, error: result.error };
+  };
+  // Checked at run time (Retry re-checks): a picked local install that's up opens
+  // that exact URL; one that's down starts like "Get started locally".
+  const runTerminal = async () => {
+    const t = terminalTarget;
+    if (t.kind === "connect") return connectInTerminal(t.url);
+    if (t.url !== undefined && (await setup.onCheckServer(t.url)).status !== "unreachable")
+      return connectInTerminal(t.url);
+    return setup.onStartLocal();
   };
   // Whether the server step is showing its URL-input ("add") view vs the list —
   // reported up so the band can show the hero icons only in the add view.
@@ -286,21 +300,14 @@ export function ServerSelectorV2({ setup }: { setup: ServerSelectorV2Setup }) {
           <SetupTerminalStep
             onInstallCli={needsInstall ? setup.onInstallCli : undefined}
             onInstallLog={setup.onInstallLog}
-            onRun={
-              terminalTarget.kind === "connect"
-                ? async () => {
-                    const url = terminalTarget.url;
-                    const result = await setup.onConnect(url);
-                    // Success navigates the window away; a rejection surfaces as
-                    // an error here.
-                    return { ok: result.error === undefined, error: result.error };
-                  }
-                : setup.onStartLocal
-            }
+            onRun={runTerminal}
             onSetupLog={setup.onSetupLog}
-            onBack={() =>
-              setStep(terminalTarget.kind === "connect" ? "server" : terminalTarget.back)
-            }
+            onBack={() => {
+              const back = terminalTarget.kind === "connect" ? "server" : terminalTarget.back;
+              // Back to the list itself, not the add view it may have opened on.
+              if (back === "server") openServers(false);
+              else setStep(back);
+            }}
             runningLabel={
               terminalTarget.kind === "connect"
                 ? "Connecting"
@@ -324,7 +331,6 @@ export function ServerSelectorV2({ setup }: { setup: ServerSelectorV2Setup }) {
             recentServers={setup.recentServers}
             managedServers={setup.managedServers}
             installed={setup.installed}
-            localServerRunning={setup.localServerRunning}
             startInAdd={serverStartInAdd}
             onBack={() => setStep("landing")}
             onConnect={connect}
