@@ -82,6 +82,8 @@ from omnigent.host.frames import (
     HostListDirResultFrame,
     HostListWorktreesFrame,
     HostListWorktreesResultFrame,
+    HostMcpServersFrame,
+    HostMcpServersResultFrame,
     HostModelOptionsFrame,
     HostModelOptionsResultFrame,
     HostRemoveWorktreeFrame,
@@ -1111,6 +1113,9 @@ class HostProcess:
         from omnigent.host.skills import HostSkillDiscovery
 
         self._skill_discovery = HostSkillDiscovery(self._fetch_skill_bundle)
+        from omnigent.host.mcp_inventory import HostMcpInventory
+
+        self._mcp_inventory = HostMcpInventory()
         # Retain the host's refreshable auth context after the first tunnel
         # handshake so runner launches can reuse its warm bearer. Failed or
         # unavailable resolution is not latched, allowing a later reconnect
@@ -1299,7 +1304,7 @@ class HostProcess:
                 self._reap_orphans_once(child_pids)
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 — a reaper must never die on a stray error
+            except Exception:
                 _logger.debug("orphan reaper sweep failed", exc_info=True)
 
     def _reap_orphans_once(self, child_pids: Iterable[int] | None = None) -> int:
@@ -2131,7 +2136,7 @@ class HostProcess:
         )
         try:
             await self._stop_runner_and_trigger(proc, "runner_spawn_abandoned")
-        except Exception:  # noqa: BLE001 — detached cleanup must be observed
+        except Exception:
             _logger.warning(
                 "Failed to stop abandoned runner pid=%s",
                 proc.pid,
@@ -2198,7 +2203,7 @@ class HostProcess:
                     runner_id,
                     session_id,
                 )
-            except Exception:  # noqa: BLE001 — must never die unobserved
+            except Exception:
                 _logger.warning(
                     "Failed to stop superseded runner %s for session %s; "
                     "the process may linger until it exits on its own",
@@ -2432,7 +2437,7 @@ class HostProcess:
             try:
                 await ws.send(frame)
                 return
-            except Exception:  # noqa: BLE001 — any send failure parks the report
+            except Exception:
                 _logger.debug(
                     "Could not send runner_exited for %s; queueing for reconnect",
                     runner_id,
@@ -3145,6 +3150,21 @@ class HostProcess:
                 error="skill discovery failed; see the host log",
             )
 
+    def _handle_mcp_servers(self, frame: HostMcpServersFrame) -> HostMcpServersResultFrame:
+        """List user-level MCP servers in a worker thread."""
+        try:
+            servers = self._mcp_inventory.discover()
+        except Exception:
+            _logger.exception("MCP inventory failed")
+            return HostMcpServersResultFrame(
+                request_id=frame.request_id,
+                status="failed",
+                error="MCP inventory failed; see the host log",
+            )
+        return HostMcpServersResultFrame(
+            request_id=frame.request_id, status="ok", mcp_servers=servers
+        )
+
     def _fetch_skill_bundle(self, frame: HostSkillsFrame) -> httpx.Response:
         """Read the bound session bundle using this host's existing credentials."""
         from urllib.parse import quote
@@ -3205,7 +3225,7 @@ class HostProcess:
 
         try:
             rows = await codex_launch_catalog()
-        except Exception:  # noqa: BLE001 — no catalog, never a crash
+        except Exception:
             _logger.warning("Codex model catalog unavailable", exc_info=True)
             return None
         if rows is None:
@@ -3232,7 +3252,7 @@ class HostProcess:
         try:
             config = await asyncio.to_thread(resolve_native_claude_config, spec=None)
             rows = await claude_launch_catalog(config)
-        except Exception:  # noqa: BLE001 — no catalog, never a crash
+        except Exception:
             _logger.warning("Claude model catalog unavailable", exc_info=True)
             return None
         if rows is None:
@@ -3278,7 +3298,7 @@ class HostProcess:
                 from omnigent.harnesses.pi_native.credentials import pi_native_model_options
 
                 pi_models = await asyncio.to_thread(pi_native_model_options)
-            except Exception:  # noqa: BLE001 — no catalog, never a crash
+            except Exception:
                 _logger.warning("Pi model catalog unavailable", exc_info=True)
                 return HostModelOptionsResultFrame(
                     request_id=frame.request_id,
@@ -3308,7 +3328,7 @@ class HostProcess:
                     status="failed",
                     error=str(exc),
                 )
-            except Exception:  # noqa: BLE001 — no catalog, never a crash
+            except Exception:
                 _logger.warning("Devin model catalog unavailable", exc_info=True)
                 return HostModelOptionsResultFrame(
                     request_id=frame.request_id,
@@ -4334,7 +4354,7 @@ class HostProcess:
                     self._auth_token_factory_resolved = True
             if self._auth_token_factory is not None:
                 return self._auth_token_factory()
-        except Exception:  # noqa: BLE001
+        except Exception:
             _logger.debug("Could not obtain auth token", exc_info=True)
         return None
 
@@ -4673,6 +4693,9 @@ class HostProcess:
         elif isinstance(frame, HostSkillsFrame):
             skills_result = await asyncio.to_thread(self._handle_skills, frame)
             await ws.send(encode_host_frame(skills_result))
+        elif isinstance(frame, HostMcpServersFrame):
+            mcp_result = await asyncio.to_thread(self._handle_mcp_servers, frame)
+            await ws.send(encode_host_frame(mcp_result))
         elif isinstance(frame, HostModelOptionsFrame):
             # Every dispatched frame already runs on its own task (see
             # _start_frame_task), so a cold harness probe here cannot stall
