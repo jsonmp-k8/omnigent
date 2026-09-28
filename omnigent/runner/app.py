@@ -2170,6 +2170,11 @@ def mark_subagent_work_terminal(
     entry = _subagent_work_by_child.get(child_session_id)
     if entry is None:
         if child_session_id in _drained_delivered_subagent_children:
+            # Known limitation: once the parent has DRAINED a delivered
+            # cancellation the entry is gone, so a surviving child's later
+            # confirmed completion can no longer correct it — the parent already
+            # consumed and (likely) acted on the ``cancelled`` result. Correction
+            # only applies while the cancellation is still undrained in the inbox.
             return _SubagentDeliveryAck(
                 entry=None,
                 delivered=True,

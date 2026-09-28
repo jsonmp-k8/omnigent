@@ -413,8 +413,6 @@ class NativeInterruptRunner:
         outcome is decided by whichever arrives first: the harness's terminal
         edge (``external_session_status``) or the grace timer.
         """
-        if conv_id in self._pending_interrupts:
-            return
         # Capture the dispatch this interrupt is for so a delayed cancel can be
         # bound to it and never lands on a newer send that reused this session.
         work_id = (
@@ -422,6 +420,16 @@ class NativeInterruptRunner:
             if self._subagent_work_id_for_session is not None
             else None
         )
+        # Deduplicate only within the SAME dispatch. A pending record left by an
+        # earlier dispatch (e.g. one the launch reaper failed before its timer
+        # fired) must not suppress a new dispatch's own record and timer — that
+        # would leave the new dispatch with no cancellation fallback while the
+        # stale timer rejects itself as superseded. Replace the stale record.
+        if conv_id in self._pending_interrupts and self._pending_interrupts[conv_id] == work_id:
+            return
+        stale_timer = self._pending_interrupt_timers.pop(conv_id, None)
+        if stale_timer is not None:
+            stale_timer.cancel()
         self._pending_interrupts[conv_id] = work_id
         try:
             loop = asyncio.get_running_loop()

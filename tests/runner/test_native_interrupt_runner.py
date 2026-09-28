@@ -266,6 +266,41 @@ async def test_resolve_pending_interrupt_only_consumes_matching_dispatch(
 
 
 @pytest.mark.asyncio
+async def test_repeated_interrupt_on_reused_child_gives_new_dispatch_its_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale pending interrupt must not deny a new dispatch its cancellation.
+
+    Interrupt A and leave its pending record (its launch was reaped before the
+    timer fired). Reuse the child for B and interrupt it: B must get its OWN
+    pending record and grace timer — the earlier record for A is replaced, not
+    dedup-suppressed — so B still has a cancellation fallback and its parent is
+    not left waiting indefinitely.
+    """
+    import asyncio
+
+    import omnigent.harnesses.goose_native.bridge as goose_bridge
+    from omnigent.runner.native import interrupt as interrupt_mod
+
+    monkeypatch.setattr(goose_bridge, "bridge_dir_for_session_id", lambda conv: f"dir/{conv}")
+    monkeypatch.setattr(goose_bridge, "inject_interrupt", lambda bridge_dir, *, timeout_s: None)
+    monkeypatch.setattr(interrupt_mod, "_NATIVE_INTERRUPT_CANCEL_GRACE_S", 0.05)
+
+    runner, captured = _make_runner()
+    captured["current_work_id"] = "work_A"
+    await runner.interrupt("goose-native", "conv_g")  # A's pending (work_A) lingers
+    # The child is reused for dispatch B and interrupted before A's timer fires.
+    captured["current_work_id"] = "work_B"
+    await runner.interrupt("goose-native", "conv_g")  # must replace A with work_B
+
+    await asyncio.sleep(0.2)
+    # B receives its OWN grace-period cancellation (bound to work_B, delivered),
+    # rather than being suppressed by A's stale record.
+    assert captured["wakes"] == [("conv_g", "cancelled", None)]
+    assert captured["superseded"] == []
+
+
+@pytest.mark.asyncio
 async def test_grace_timer_skips_cancel_when_dispatch_unbound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
