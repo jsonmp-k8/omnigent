@@ -3722,6 +3722,11 @@ def create_runner_app(
                 "error": error,
             },
         )
+        # The turn is over (its terminal exited), so drop any interrupt still
+        # pending for it — otherwise its stale grace timer, or a reused child's
+        # next idle consuming that pending record, could mis-settle a later
+        # dispatch on this session.
+        _native_interrupt_runner.clear_pending_interrupt(event.session_id)
         _mark_subagent_terminal_and_wake(
             event.session_id,
             status="failed",
@@ -10515,11 +10520,17 @@ def create_runner_app(
                 # An unconfirmed idle following an interrupt settles the
                 # dispatch: the turn stopped early, so report ``cancelled``
                 # with whatever output the edge carried instead of guessing
-                # ``completed`` — or discarding a genuine result. Bind the cancel
-                # to the interrupted dispatch's ``work_id`` so it never settles a
-                # newer send that reused this child session.
+                # ``completed`` — or discarding a genuine result. Resolve the
+                # pending interrupt only when it belongs to the dispatch now
+                # registered: a stale record (its dispatch exited, or a new send
+                # reused this child) must not capture this idle — for a legacy
+                # harness that idle is the NEW dispatch's completion.
+                _current_entry = get_subagent_work(conversation_id)
                 interrupt_pending, interrupt_work_id = (
-                    _native_interrupt_runner.take_pending_interrupt(conversation_id)
+                    _native_interrupt_runner.resolve_pending_interrupt(
+                        conversation_id,
+                        _current_entry.work_id if _current_entry is not None else None,
+                    )
                 )
             ambiguous_idle = (
                 status == "idle"
@@ -10546,17 +10557,12 @@ def create_runner_app(
             else:
                 if status in ("idle", "failed"):
                     recovered_entry = await _ensure_subagent_work_entry(conversation_id)
-                if status == "idle" and interrupt_pending and interrupt_work_id is None:
-                    # The interrupt was never bound to a dispatch (no work entry
-                    # when it fired, e.g. after a runner restart). Settling now
-                    # could cancel a newer send that reused this child, so skip
-                    # and leave it for the recovery scan — never fall through to
-                    # ``completed``, since the turn was interrupted.
-                    pass
-                elif status == "idle" and interrupt_pending:
-                    # Interrupt with no confirming edge: an unconfirmed guess, so
-                    # a same-turn confirmed completion may still correct it. Bound
-                    # to the interrupted dispatch so it cannot cancel a newer send.
+                if status == "idle" and interrupt_pending:
+                    # Interrupt with no confirming edge, resolved to the CURRENT
+                    # dispatch (``resolve_pending_interrupt`` only reports pending
+                    # when the recorded ``work_id`` matches): an unconfirmed
+                    # guess, so a same-turn confirmed completion may still correct
+                    # it. Bound to that dispatch so it cannot cancel a newer send.
                     delivery_ack = _mark_subagent_terminal_and_wake(
                         conversation_id,
                         status="cancelled",

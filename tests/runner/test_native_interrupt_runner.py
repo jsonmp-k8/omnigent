@@ -232,6 +232,40 @@ async def test_grace_timer_does_not_cancel_superseded_dispatch(
 
 
 @pytest.mark.asyncio
+async def test_resolve_pending_interrupt_only_consumes_matching_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pending interrupt resolves only for its own dispatch, else is dropped.
+
+    An idle for a NEWER dispatch (the interrupted one exited or was superseded)
+    must not consume the stale pending — for a legacy harness that idle is the
+    new dispatch's completion. ``resolve_pending_interrupt`` reports pending
+    only on a work_id match; otherwise it drops the stale record and reports
+    not-pending so the caller handles the idle normally.
+    """
+    import omnigent.harnesses.goose_native.bridge as goose_bridge
+
+    monkeypatch.setattr(goose_bridge, "bridge_dir_for_session_id", lambda conv: f"dir/{conv}")
+    monkeypatch.setattr(goose_bridge, "inject_interrupt", lambda bridge_dir, *, timeout_s: None)
+
+    runner, captured = _make_runner()
+    captured["current_work_id"] = "work_A"
+    await runner.interrupt("goose-native", "conv_g")  # pending bound to work_A
+
+    # An idle arrives for a NEWER dispatch: the pending is stale and must be
+    # dropped, letting the idle be handled as work_B's own outcome.
+    resolved, work_id = runner.resolve_pending_interrupt("conv_g", "work_B")
+    assert (resolved, work_id) == (False, None)
+    assert runner.take_pending_interrupt("conv_g")[0] is False  # stale record dropped
+
+    # A matching dispatch's idle DOES resolve its interrupt.
+    captured["current_work_id"] = "work_C"
+    await runner.interrupt("goose-native", "conv_h")
+    resolved, work_id = runner.resolve_pending_interrupt("conv_h", "work_C")
+    assert (resolved, work_id) == (True, "work_C")
+
+
+@pytest.mark.asyncio
 async def test_grace_timer_skips_cancel_when_dispatch_unbound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

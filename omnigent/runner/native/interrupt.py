@@ -448,6 +448,36 @@ class NativeInterruptRunner:
             timer.cancel()
         return was_pending, work_id
 
+    def resolve_pending_interrupt(
+        self, conv_id: str, current_work_id: str | None
+    ) -> tuple[bool, str | None]:
+        """Consume a pending interrupt only when it belongs to the current dispatch.
+
+        A pending interrupt records the ``work_id`` it was raised for. When an
+        idle edge arrives for *conv_id*, it resolves that interrupt only if the
+        dispatch now registered is the same one; otherwise the pending record is
+        stale (its dispatch exited or was superseded by a new send that reused
+        the child) and must NOT capture this idle — for a legacy harness that
+        idle is the *new* dispatch's completion. The stale record is dropped and
+        ``(False, None)`` returned so the caller processes the idle normally.
+
+        :param conv_id: Session/conversation id, e.g. ``"conv_abc123"``.
+        :param current_work_id: ``work_id`` of the dispatch now registered for
+            *conv_id*, or ``None`` when none is tracked.
+        :returns: ``(resolved, work_id)`` — ``resolved`` is ``True`` only when a
+            pending interrupt for the current dispatch was consumed.
+        """
+        if conv_id not in self._pending_interrupts:
+            return False, None
+        pending_work_id = self._pending_interrupts.get(conv_id)
+        if current_work_id is None or pending_work_id != current_work_id:
+            # Stale (or unbindable) pending: drop it, but let the idle be
+            # handled as the current dispatch's own outcome.
+            self.clear_pending_interrupt(conv_id)
+            return False, None
+        self.take_pending_interrupt(conv_id)
+        return True, pending_work_id
+
     def clear_pending_interrupt(self, conv_id: str) -> None:
         """Drop any recorded interrupt whose outcome another path resolved."""
         self.take_pending_interrupt(conv_id)
