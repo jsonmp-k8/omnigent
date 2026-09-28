@@ -8983,7 +8983,7 @@
     },
     "/v1/agents": {
       "get": {
-        "description": "List built-in agents with cursor-based pagination.\n\nReturns only built-in agents \u2014 `agent_store.list()` filters\n`session_id IS NULL` \u2014 so session-scoped agents never appear.\n\n**Returns:** A `PaginatedList` of built-in agents.",
+        "description": "List built-in agents with cursor-based pagination.\n\nReturns only built-in agents \u2014 `agent_store.list()` filters\n`session_id IS NULL` \u2014 so session-scoped agents never appear.\n\nPackaged built-ins the deployment suppressed via\n`OMNIGENT_SEEDED_AGENTS` are filtered out. The filter runs after\nthe store page is read, so the cursor stays store-based and\n`has_more` / `last_id` remain correct \u2014 a filtered page can\nreturn fewer than `limit` rows, which the paginating client\nalready handles. Suppressing hides a row without deleting it, so a\nsession already bound to one keeps working.\n\n**Returns:** A `PaginatedList` of built-in agents.",
         "operationId": "list_builtin_agents_v1_agents_get",
         "parameters": [
           {
