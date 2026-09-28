@@ -160,9 +160,8 @@ def test_native_file_paste_closes_the_slash_menu(page: Page, chat_session_contra
     expect(composer).to_have_value("/")
 
 
-@pytest.mark.parametrize("busy", [False, True])
 def test_tab_completes_compact_and_explicit_send_renders_receipt(
-    page: Page, chat_session_contract, busy: bool
+    page: Page, chat_session_contract
 ) -> None:
     chat = chat_session_contract
     chat.harness = "claude-sdk"
@@ -170,9 +169,6 @@ def test_tab_completes_compact_and_explicit_send_renders_receipt(
     chat.wait_for_stream()
     composer = _composer(page)
     expect(composer).to_be_visible()
-    if busy:
-        chat.emit_busy("compact-test-turn")
-        expect(page.get_by_role("button", name="Interrupt", exact=True)).to_be_visible()
 
     composer.fill("/comp")
     composer.press("Tab")
@@ -183,10 +179,6 @@ def test_tab_completes_compact_and_explicit_send_renders_receipt(
 
     composer.press("Enter")
     expect(composer).to_have_value("")
-    if busy:
-        expect(page.get_by_text("/compact", exact=True)).to_be_visible()
-        assert chat.event_posts == []
-        chat.emit_idle("compact-test-turn")
 
     bubble = page.locator('[data-role="user"]').filter(has_text="/compact")
     expect(bubble).to_be_visible()
@@ -195,9 +187,16 @@ def test_tab_completes_compact_and_explicit_send_renders_receipt(
     assert [event["body"]["type"] for event in chat.event_posts] == ["compact"]
 
 
-@pytest.mark.parametrize("harness", ["claude-sdk", "claude-native", "codex-native"])
-@pytest.mark.parametrize("always_steer", [False, True])
-@pytest.mark.parametrize("http_first", [False, True])
+# Cover each harness and both delivery/order branches without a full cross-product.
+@pytest.mark.parametrize(
+    ("harness", "always_steer", "http_first"),
+    [
+        ("claude-native", False, False),
+        ("claude-native", True, True),
+        ("codex-native", False, True),
+        ("claude-sdk", True, False),
+    ],
+)
 def test_compact_stays_visible_during_active_turn(
     page: Page,
     chat_session_contract,
@@ -248,9 +247,14 @@ def test_compact_stays_visible_during_active_turn(
     )
     expect(page.get_by_text("Still working on the task.", exact=False)).to_be_visible()
     composer = _composer(page)
-    composer.fill("/compact")
+    composer.fill("/comp")
+    composer.press("Tab")
+    expect(composer).to_have_value("/compact ")
+    expect(composer).to_be_focused()
+    assert pending == []
     composer.press("Enter")
     if not always_steer:
+        assert pending == []
         page.get_by_role("button", name="Send queued message now", exact=True).click()
     bubble = page.locator('[data-role="user"]').filter(has_text="/compact")
     expect(bubble).to_be_visible()

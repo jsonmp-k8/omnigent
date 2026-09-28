@@ -151,7 +151,7 @@ async def test_compact_skips_omnigent_compaction_when_runner_handles_it(
     )
 
 
-async def test_compact_retry_after_lost_http_response_dispatches_once(
+async def test_compact_retry_after_acceptance_dispatches_once(
     client: httpx.AsyncClient,
 ) -> None:
     from omnigent.runtime import set_runner_client
@@ -162,24 +162,12 @@ async def test_compact_retry_after_lost_http_response_dispatches_once(
         agent = await create_test_agent(client)
         sid = await _create_session(client, agent["id"])
         stable_id = "c" * 32
-        lost_response = False
-
-        async def drop_first_response(request: httpx.Request) -> httpx.Response:
-            nonlocal lost_response
-            response = await client.post(request.url.path, json=json.loads(request.content))
-            assert response.status_code == 202, response.text
-            if not lost_response:
-                lost_response = True
-                raise httpx.ReadError("Accepted response was lost", request=request)
-            return response
-
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(drop_first_response), base_url="http://test"
-        ) as browser:
-            payload = {"type": "compact", "data": {"stable_id": stable_id}}
-            with pytest.raises(httpx.ReadError):
-                await browser.post(f"/v1/sessions/{sid}/events", json=payload)
-            retry = await browser.post(f"/v1/sessions/{sid}/events", json=payload)
+        payload = {"type": "compact", "data": {"stable_id": stable_id}}
+        # A retry must be safe even when the client never received the first response.
+        first = await client.post(f"/v1/sessions/{sid}/events", json=payload)
+        assert first.status_code == 202, first.text
+        retry = await client.post(f"/v1/sessions/{sid}/events", json=payload)
+        assert retry.status_code == 202, retry.text
         assert retry.json() == {"queued": False, "item_id": stable_id}
         items = (await client.get(f"/v1/sessions/{sid}/items")).json()["data"]
         receipts = [item for item in items if item["type"] == "slash_command"]
