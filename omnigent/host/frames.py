@@ -24,7 +24,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 from os import PathLike
-from typing import Any
+from typing import Any, NoReturn
 
 from omnigent.harness_availability import HarnessAvailability, is_harness_availability
 from omnigent.inner.native_attachments import CAP_FILESYSTEM_ATTACHMENTS
@@ -1703,10 +1703,12 @@ class ImportLocalSessionChunkAssembler:
     """Reassemble one import request's chunked sessions, in arrival order.
 
     The host streams sessions sequentially and one session's slices
-    contiguously, so a single buffer per request suffices. :meth:`add`
-    returns ``None`` while a session is incomplete and the reassembled
-    session once its last slice lands. The buffer resets after every final
-    slice, so one assembler serves all of a request's sessions.
+    contiguously, so a single buffer per request suffices: ``seq == 0`` opens
+    a session and its ``last`` slice completes it. A session that turns out
+    unusable fails once, on the offending slice, and its remaining slices are
+    skipped so the next session still assembles. A session whose final slice
+    never arrives stays ``in_progress`` until the next session's first slice
+    or the request's done frame, where the caller counts it as failed.
     """
 
     def __init__(self, max_chars: int = IMPORT_SESSION_MAX_REASSEMBLED_CHARS) -> None:
@@ -1714,7 +1716,8 @@ class ImportLocalSessionChunkAssembler:
         self._parts: list[str] = []
         self._chars = 0
         self._next_seq = 0
-        self._corrupt: str | None = None
+        # The current session already failed; ignore its remaining slices.
+        self._skipping = False
 
     @property
     def buffered_chars(self) -> int:
@@ -1723,37 +1726,67 @@ class ImportLocalSessionChunkAssembler:
 
     @property
     def in_progress(self) -> bool:
-        """Whether a session started but has not received its final slice."""
-        return bool(self._parts or self._corrupt is not None or self._next_seq)
+        """Whether a session started and has neither completed nor failed."""
+        return self._next_seq > 0 and not self._skipping
 
-    def add(self, frame: HostImportLocalSessionChunkFrame) -> HostImportedLocalSession | None:
+    def opens_new_session(self, frame: HostImportLocalSessionChunkFrame) -> bool:
+        """Whether *frame* starts a session while the previous one is still incomplete."""
+        return frame.seq == 0 and self.in_progress
+
+    def _reset(self) -> None:
+        self._parts = []
+        self._chars = 0
+        self._next_seq = 0
+        self._skipping = False
+
+    def _fail(self, reason: str, frame: HostImportLocalSessionChunkFrame) -> NoReturn:
+        # Free the buffer now; skip the rest of this session unless this was its final slice.
+        if frame.last:
+            self._reset()
+        else:
+            self._parts = []
+            self._chars = 0
+            self._skipping = True
+        raise ValueError(reason)
+
+    def add(
+        self,
+        frame: HostImportLocalSessionChunkFrame,
+        *,
+        budget: int | None = None,
+    ) -> HostImportedLocalSession | None:
         """Fold in one slice; return the session on its final slice.
 
-        :raises ValueError: On the final slice when the sequence had a gap,
-            grew past the size cap, or did not reassemble into a valid
-            session object. The buffered data is discarded either way, so the
-            caller can count one failed session and keep the stream alive.
+        :param budget: Characters this session may still buffer before the
+            connection-wide cap is reached; ``None`` applies only the
+            per-session cap.
+        :raises ValueError: Once per unusable session: on the slice that is
+            out of order, non-ASCII, or over a cap, or on the final slice when
+            the slices do not reassemble into a valid session object. The
+            caller counts one failed session and keeps the stream alive.
         """
-        if self._corrupt is None:
-            if frame.seq != self._next_seq:
-                self._corrupt = f"slice out of order (got seq {frame.seq}, want {self._next_seq})"
-                self._parts.clear()
-                self._chars = 0
-            else:
-                self._next_seq += 1
-                self._chars += len(frame.data)
-                if self._chars > self._max_chars:
-                    self._corrupt = f"chunked session exceeds {self._max_chars} characters"
-                    self._parts.clear()
-                    self._chars = 0
-                else:
-                    self._parts.append(frame.data)
+        if frame.seq == 0:
+            self._reset()
+        elif self._skipping:
+            if frame.last:
+                self._reset()
+            return None
+        if frame.seq != self._next_seq:
+            self._fail(f"slice out of order (got seq {frame.seq}, want {self._next_seq})", frame)
+        # Slices are json.dumps output, so they are ASCII; anything else would let
+        # the character counts below understate the bytes buffered by up to 4x.
+        if not frame.data.isascii():
+            self._fail("slice contains non-ASCII text", frame)
+        limit = self._max_chars if budget is None else min(self._max_chars, budget)
+        if self._chars + len(frame.data) > limit:
+            self._fail(f"chunked session exceeds {limit} characters", frame)
+        self._next_seq += 1
+        self._chars += len(frame.data)
+        self._parts.append(frame.data)
         if not frame.last:
             return None
-        parts, corrupt = self._parts, self._corrupt
-        self._parts, self._chars, self._next_seq, self._corrupt = [], 0, 0, None
-        if corrupt is not None:
-            raise ValueError(corrupt)
+        parts = self._parts
+        self._reset()
         try:
             raw = json.loads("".join(parts))
         except (json.JSONDecodeError, RecursionError) as exc:

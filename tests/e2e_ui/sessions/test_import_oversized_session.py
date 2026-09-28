@@ -47,13 +47,6 @@ pytestmark = pytest.mark.min_server_version("0.16.0")
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
-# Claude Code source session ids seeded on the host, oldest → newest. The
-# oversized one sits in the middle so a batch import has real sessions on
-# both sides of the failure.
-_OLD_SESSION_ID = "8c1d0e0a-aaaa-4aaa-8aaa-000000000001"
-_GIANT_SESSION_ID = "8c1d0e0a-bbbb-4bbb-8bbb-000000000002"
-_NEW_SESSION_ID = "8c1d0e0a-cccc-4ccc-8ccc-000000000003"
-
 # First-user-message texts double as the imported sessions' synthesized
 # titles, which the import panel's result list renders.
 _OLD_TITLE = "inspect oversized-import OLD.md"
@@ -144,23 +137,31 @@ class _ImportHost:
     host_name: str
     proc: subprocess.Popen[bytes]
     daemon_log: Path
+    giant_session_id: str
 
 
-def _seed_claude_home(home: Path) -> None:
-    """Seed ``home/.claude`` with old-small, giant, new-small sessions."""
+def _seed_claude_home(home: Path) -> str:
+    """Seed ``home/.claude`` with old-small, giant, new-small sessions.
+
+    Session ids are fresh per run: a server that already holds them would
+    count them as already imported and never list them. Returns the
+    oversized session's id.
+    """
     projects = home / ".claude" / "projects" / "-repo"
-    old = projects / f"{_OLD_SESSION_ID}.jsonl"
-    giant = projects / f"{_GIANT_SESSION_ID}.jsonl"
-    new = projects / f"{_NEW_SESSION_ID}.jsonl"
-    _write_transcript(old, _small_session_records(_OLD_SESSION_ID, _OLD_TITLE))
-    _write_giant_transcript(giant, _GIANT_SESSION_ID)
-    _write_transcript(new, _small_session_records(_NEW_SESSION_ID, _NEW_TITLE))
+    old_id, giant_id, new_id = (str(uuid.uuid4()) for _ in range(3))
+    old = projects / f"{old_id}.jsonl"
+    giant = projects / f"{giant_id}.jsonl"
+    new = projects / f"{new_id}.jsonl"
+    _write_transcript(old, _small_session_records(old_id, _OLD_TITLE))
+    _write_giant_transcript(giant, giant_id)
+    _write_transcript(new, _small_session_records(new_id, _NEW_TITLE))
     # Recency (mtime) drives enumeration order; the host streams oldest
-    # first, so the giant session fails between the two small ones.
+    # first, so the giant session sits between the two small ones.
     now = time.time()
     os.utime(old, (now - 300, now - 300))
     os.utime(giant, (now - 200, now - 200))
     os.utime(new, (now - 100, now - 100))
+    return giant_id
 
 
 def _wait_for_host_online(live_server: str, host_id: str, timeout: float = 60.0) -> None:
@@ -189,7 +190,7 @@ def import_host(
 ) -> Iterator[_ImportHost]:
     """Spawn a real host daemon with the seeded Claude transcripts as $HOME."""
     home = tmp_path_factory.mktemp("oversized_import_host_home")
-    _seed_claude_home(home)
+    giant_session_id = _seed_claude_home(home)
 
     host_id = uuid.uuid4().hex
     host_name = f"oversized-import-host-{uuid.uuid4().hex[:8]}"
@@ -222,7 +223,13 @@ def import_host(
         proc.wait(timeout=10)
         raise RuntimeError(f"{exc}; daemon log tail: {daemon_log.read_text()[-2000:]}") from exc
 
-    yield _ImportHost(host_id=host_id, host_name=host_name, proc=proc, daemon_log=daemon_log)
+    yield _ImportHost(
+        host_id=host_id,
+        host_name=host_name,
+        proc=proc,
+        daemon_log=daemon_log,
+        giant_session_id=giant_session_id,
+    )
 
     proc.send_signal(signal.SIGTERM)
     try:
@@ -280,8 +287,9 @@ def test_recent_import_continues_past_oversized_session(
             f"session (after {elapsed:.0f}s): {error.inner_text()!r}"
         )
 
-    # The oversized session itself and the session after it both imported;
-    # neither silent omission nor batch abortion can satisfy this assertion.
+    # Every seeded session imported: the oversized one and the one after it;
+    # neither silent omission nor batch abortion can satisfy these assertions.
+    expect(result).to_contain_text("Imported 3")
     expect(page.get_by_test_id("import-result-sessions")).to_contain_text(_GIANT_TITLE)
     expect(page.get_by_test_id("import-result-sessions")).to_contain_text(_NEW_TITLE)
 
@@ -305,7 +313,7 @@ def test_import_by_id_handles_super_large_session(
     _open_import_panel(page, live_server, import_host)
     page.get_by_test_id("import-mode-select").click()
     page.get_by_role("option", name="Session by ID").click()
-    page.get_by_test_id("import-session-id").fill(_GIANT_SESSION_ID)
+    page.get_by_test_id("import-session-id").fill(import_host.giant_session_id)
 
     started = time.monotonic()
     page.get_by_test_id("import-submit").click()

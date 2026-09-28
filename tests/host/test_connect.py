@@ -7820,7 +7820,6 @@ async def test_handle_import_local_slices_oversized_session_into_chunks(
     host connection, killing the oversized session's import and the rest of
     the batch with it.
     """
-    import omnigent.host.frames as frames_module
     from omnigent.host.frames import (
         HostImportLocalDoneFrame,
         HostImportLocalSessionChunkFrame,
@@ -7830,7 +7829,7 @@ async def test_handle_import_local_slices_oversized_session_into_chunks(
     )
 
     host = _make_host_process()
-    monkeypatch.setattr(frames_module, "IMPORT_SESSION_CHUNK_CHARS", 256)
+    monkeypatch.setattr("omnigent.host.frames.IMPORT_SESSION_CHUNK_CHARS", 256)
 
     def _fake_across(*, limit: int) -> list[tuple[str, str]]:
         return [("claude", "small"), ("claude", "giant")]
@@ -7896,7 +7895,6 @@ async def test_handle_import_local_legacy_server_skips_only_unsafe_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Without negotiated chunks, an over-limit session cannot drop the batch."""
-    import omnigent.host.frames as frames_module
     from omnigent.host.frames import (
         HostImportLocalDoneFrame,
         HostImportLocalSessionFrame,
@@ -7904,8 +7902,8 @@ async def test_handle_import_local_legacy_server_skips_only_unsafe_session(
     )
 
     host = _make_host_process()
-    monkeypatch.setattr(frames_module, "IMPORT_SESSION_CHUNK_CHARS", 64)
-    monkeypatch.setattr(frames_module, "RUNNER_TUNNEL_MAX_MESSAGE_BYTES", 512)
+    monkeypatch.setattr("omnigent.host.frames.IMPORT_SESSION_CHUNK_CHARS", 64)
+    monkeypatch.setattr("omnigent.host.frames.RUNNER_TUNNEL_MAX_MESSAGE_BYTES", 512)
 
     def _fake_across(*, limit: int) -> list[tuple[str, str]]:
         return [("claude", "small"), ("claude", "giant")]

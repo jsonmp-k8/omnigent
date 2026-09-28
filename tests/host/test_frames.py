@@ -52,6 +52,7 @@ from omnigent.host.frames import (
     HostStoreSecretFrame,
     HostStoreSecretResultFrame,
     ImportLocalSessionChunkAssembler,
+    ImportSessionChunkingUnsupportedError,
     classify_launch_refusal,
     decode_host_frame,
     encode_host_frame,
@@ -268,12 +269,10 @@ def test_encode_import_local_session_frames_rejects_unsafe_legacy_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A session beyond an older server's cap fails before dropping the tunnel."""
-    import omnigent.host.frames as frames_module
+    monkeypatch.setattr("omnigent.host.frames.IMPORT_SESSION_CHUNK_CHARS", 64)
+    monkeypatch.setattr("omnigent.host.frames.RUNNER_TUNNEL_MAX_MESSAGE_BYTES", 128)
 
-    monkeypatch.setattr(frames_module, "IMPORT_SESSION_CHUNK_CHARS", 64)
-    monkeypatch.setattr(frames_module, "RUNNER_TUNNEL_MAX_MESSAGE_BYTES", 128)
-
-    with pytest.raises(frames_module.ImportSessionChunkingUnsupportedError):
+    with pytest.raises(ImportSessionChunkingUnsupportedError):
         list(
             encode_import_local_session_frames(
                 "req_legacy", 1, _session_with_payload("x" * 500), allow_chunks=False
@@ -285,9 +284,7 @@ def test_encode_import_local_session_frames_slices_oversized_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An oversized session is sliced into ordered chunk frames that reassemble."""
-    import omnigent.host.frames as frames_module
-
-    monkeypatch.setattr(frames_module, "IMPORT_SESSION_CHUNK_CHARS", 64)
+    monkeypatch.setattr("omnigent.host.frames.IMPORT_SESSION_CHUNK_CHARS", 64)
     session = _session_with_payload("x" * 500)
 
     frames = [
@@ -310,24 +307,9 @@ def test_encode_import_local_session_frames_slices_oversized_session(
     assert reassembled[-1] == session
 
 
-def test_chunk_assembler_recovers_after_corrupt_sequence() -> None:
-    """A slice gap fails that one session, then the next session assembles."""
-    assembler = ImportLocalSessionChunkAssembler()
-    assert (
-        assembler.add(
-            HostImportLocalSessionChunkFrame(request_id="r", total=1, seq=1, last=False, data="{}")
-        )
-        is None
-    )
-    with pytest.raises(ValueError, match="out of order"):
-        assembler.add(
-            HostImportLocalSessionChunkFrame(request_id="r", total=1, seq=2, last=True, data="")
-        )
-
-    # The buffer reset on the failed final slice, so a following well-formed
-    # chunked session on the same request still assembles.
-    session = _session_with_payload("ok")
-    session_json = json.dumps(
+def _session_json(session: HostImportedLocalSession) -> str:
+    """The wire ``session`` object a chunked stream reassembles into."""
+    return json.dumps(
         {
             "external_session_id": session.external_session_id,
             "workspace": session.workspace,
@@ -336,6 +318,26 @@ def test_chunk_assembler_recovers_after_corrupt_sequence() -> None:
             "source": session.source,
         }
     )
+
+
+def test_chunk_assembler_fails_corrupt_sequence_once_then_recovers() -> None:
+    """A slice gap fails that session as soon as it is seen; the next session assembles."""
+    assembler = ImportLocalSessionChunkAssembler()
+    with pytest.raises(ValueError, match="out of order"):
+        assembler.add(
+            HostImportLocalSessionChunkFrame(request_id="r", total=1, seq=1, last=False, data="{}")
+        )
+    # Already reported once: the failed session's remaining slices are skipped.
+    assert assembler.in_progress is False
+    assert (
+        assembler.add(
+            HostImportLocalSessionChunkFrame(request_id="r", total=1, seq=2, last=True, data="")
+        )
+        is None
+    )
+
+    session = _session_with_payload("ok")
+    session_json = _session_json(session)
     half = len(session_json) // 2
     assert (
         assembler.add(
@@ -353,6 +355,74 @@ def test_chunk_assembler_recovers_after_corrupt_sequence() -> None:
         )
         == session
     )
+
+
+def test_chunk_assembler_starts_new_session_after_truncated_one() -> None:
+    """A first slice arriving mid-session flags the unfinished predecessor and starts fresh."""
+    assembler = ImportLocalSessionChunkAssembler()
+    session = _session_with_payload("ok")
+    session_json = _session_json(session)
+    half = len(session_json) // 2
+    opening = HostImportLocalSessionChunkFrame(
+        request_id="r", total=2, seq=0, last=False, data=session_json[:half]
+    )
+    assert assembler.add(opening) is None
+    assert assembler.in_progress is True
+
+    # The predecessor never sent its final slice; the caller counts it as failed.
+    assert assembler.opens_new_session(opening) is True
+    assert assembler.add(opening) is None
+    assert assembler.buffered_chars == half
+    assert (
+        assembler.add(
+            HostImportLocalSessionChunkFrame(
+                request_id="r", total=2, seq=1, last=True, data=session_json[half:]
+            )
+        )
+        == session
+    )
+
+    # A session that already failed is not flagged again at the next boundary.
+    with pytest.raises(ValueError, match="out of order"):
+        assembler.add(
+            HostImportLocalSessionChunkFrame(request_id="r", total=2, seq=3, last=False, data="{")
+        )
+    assert assembler.opens_new_session(opening) is False
+
+
+def test_chunk_assembler_rejects_non_ascii_slice() -> None:
+    """Slices are json.dumps output, so a non-ASCII slice fails the session unbuffered."""
+    assembler = ImportLocalSessionChunkAssembler()
+    with pytest.raises(ValueError, match="non-ASCII"):
+        assembler.add(
+            HostImportLocalSessionChunkFrame(
+                request_id="r", total=1, seq=0, last=False, data='{"title": "café"'
+            )
+        )
+    assert assembler.buffered_chars == 0
+    assert assembler.in_progress is False
+
+
+def test_chunk_assembler_enforces_connection_budget() -> None:
+    """A slice that would push the connection past its shared cap fails the session."""
+    assembler = ImportLocalSessionChunkAssembler(max_chars=100)
+    assert (
+        assembler.add(
+            HostImportLocalSessionChunkFrame(
+                request_id="r", total=1, seq=0, last=False, data="x" * 8
+            ),
+            budget=10,
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match="exceeds"):
+        assembler.add(
+            HostImportLocalSessionChunkFrame(
+                request_id="r", total=1, seq=1, last=False, data="x" * 8
+            ),
+            budget=10,
+        )
+    assert assembler.buffered_chars == 0
 
 
 def test_chunk_assembler_enforces_size_cap() -> None:

@@ -551,7 +551,6 @@ async def _receive_loop(
     # Per-request reassembly of chunked import sessions; buffers die with the
     # connection, so a tunnel drop can never leak a partial session.
     import_chunk_assemblers: dict[str, ImportLocalSessionChunkAssembler] = {}
-    discarding_chunk_requests: set[str] = set()
     while True:
         message = await ws.receive()
         if message["type"] == "websocket.disconnect":
@@ -836,7 +835,6 @@ async def _receive_loop(
             if queue is None:
                 # Never allocate memory for an unsolicited or expired request.
                 import_chunk_assemblers.pop(frame.request_id, None)
-                discarding_chunk_requests.discard(frame.request_id)
                 continue
 
             # Every slice proves the host is making progress. Feed the request
@@ -844,32 +842,28 @@ async def _receive_loop(
             # inter-session timeout while chunks are actively arriving.
             queue.put_nowait(("progress", {}))
 
-            if frame.request_id in discarding_chunk_requests:
-                if frame.last:
-                    discarding_chunk_requests.discard(frame.request_id)
-                continue
-
-            buffered = sum(
-                candidate.buffered_chars for candidate in import_chunk_assemblers.values()
-            )
-            if buffered + len(frame.data) > IMPORT_SESSION_MAX_CONNECTION_REASSEMBLED_CHARS:
-                _logger.warning(
-                    "Host %s exceeded the aggregate chunked-import buffer cap",
-                    host_id,
-                )
-                import_chunk_assemblers.pop(frame.request_id, None)
-                if not frame.last:
-                    discarding_chunk_requests.add(frame.request_id)
-                # Count the rejected session once, then ignore its remaining
-                # slices until ``last`` before accepting the next session.
-                queue.put_nowait(("session", {"total": frame.total}))
-                continue
-
             assembler = import_chunk_assemblers.setdefault(
                 frame.request_id, ImportLocalSessionChunkAssembler()
             )
+            if assembler.opens_new_session(frame):
+                # The previous session never sent its final slice: count it as
+                # failed on its own so this one still assembles.
+                _logger.warning(
+                    "Host %s started a chunked import session before finishing the previous one",
+                    host_id,
+                )
+                queue.put_nowait(("session", {"total": frame.total}))
+            # Every in-flight request on this connection shares one buffer cap.
+            buffered_elsewhere = sum(
+                candidate.buffered_chars
+                for request_id, candidate in import_chunk_assemblers.items()
+                if request_id != frame.request_id
+            )
             try:
-                session = assembler.add(frame)
+                session = assembler.add(
+                    frame,
+                    budget=IMPORT_SESSION_MAX_CONNECTION_REASSEMBLED_CHARS - buffered_elsewhere,
+                )
             except ValueError as exc:
                 _logger.warning(
                     "Host %s sent an unusable chunked import session: %s",
@@ -888,7 +882,6 @@ async def _receive_loop(
         if isinstance(frame, HostImportLocalDoneFrame):
             queue = conn.pending_import_local.get(frame.request_id)
             assembler = import_chunk_assemblers.pop(frame.request_id, None)
-            discarding_chunk_requests.discard(frame.request_id)
             if queue is not None and assembler is not None and assembler.in_progress:
                 # A stream that ends before the final slice must count the
                 # partial session as failed instead of silently dropping it.
