@@ -1,24 +1,6 @@
-"""E2E: a wiped agent-cache entry must not brick a session.
+"""A wiped agent-cache entry must not brick a session after a server restart.
 
-Journey (all user-observable):
-
-1. Create a session on a bundled agent and exchange a turn — works.
-2. The server's on-disk agent cache entry loses its ``config.yaml``
-   (what a tmp cleaner does to ``/tmp``-hosted caches; the bundle
-   tarball in the ArtifactStore stays intact).
-3. The server restarts (routine deploy/restart — empties the in-memory
-   spec tier, so the next spec load hits the poisoned disk tier).
-4. The user reopens the session and sends another message.
-
-Expected: the server re-materializes the spec from the ArtifactStore
-(the source of truth still holds the bundle) and the turn completes.
-
-Observed (bug): ``AgentCache.load`` treats ``workdir.is_dir()`` as a
-disk-cache hit and ``load_spec`` raises ``FileNotFoundError:
-config.yaml not found in <cache dir>``, which escapes as an unhandled
-500 from every session request that resolves the spec — the session is
-permanently bricked even though the bundle is still in the store.
-"""
+Chat once, delete the extracted config.yaml, restart the server, then chat again."""
 
 from __future__ import annotations
 
@@ -72,11 +54,7 @@ def _server_tmp_dir() -> Path:
 def _agent_cache_dir_for(marker: str) -> Path:
     """Find the server's extracted agent-cache dir whose config.yaml carries *marker*.
 
-    The AgentCache extracts each agent bundle to
-    ``<artifact-location>/.cache/<agent_id>/`` (see ``omnigent/cli.py``:
-    ``AgentCache(cache_dir=Path(art_loc) / ".cache")``). The bundled test
-    agent's model name is unique per run, so it identifies the entry.
-    """
+    The bundled test agent's model name is unique per run, so it identifies the entry."""
     cache_root = _server_tmp_dir() / "artifacts" / ".cache"
     matches = [
         entry
@@ -93,12 +71,9 @@ def _agent_cache_dir_for(marker: str) -> Path:
 
 
 def _config_not_found_log_lines() -> list[str]:
-    """Server-log lines showing the unhandled config.yaml spec-load failure.
+    """Server-log lines showing the config.yaml spec-load failure.
 
-    The fixture's ``server.log`` captures the process stdout/stderr, whose
-    boot banner names the *real* structured log file (``  log: <path>``) —
-    one per spawn, so a restarted server adds a second path. Search them all.
-    """
+    The ``server.log`` boot banner names each spawn's structured log file; search them all."""
     banner_path = _server_tmp_dir() / "server.log"
     if not banner_path.exists():
         return []
@@ -159,10 +134,7 @@ def test_session_survives_wiped_agent_cache_after_restart(
 ) -> None:
     """A session must keep serving requests after its disk cache entry is wiped.
 
-    The agent bundle is still in the ArtifactStore (source of truth); losing
-    the extracted ``config.yaml`` from the disk cache plus a server restart
-    must not turn every session request into an unhandled 500.
-    """
+    The bundle is still in the ArtifactStore, so the wipe plus a restart must not break it."""
     respawned_runner = _ensure_runner_online(live_server, tmp_path_factory)
     restart = _server_state.get("restart_server")
     if not callable(restart):
@@ -201,13 +173,9 @@ def test_session_survives_wiped_agent_cache_after_restart(
         #    so the next spec load hits the poisoned disk tier.
         restart_server()
 
-        # 4. The user comes back to the session and sends another message.
-        #    The server must recover the spec from the ArtifactStore and
-        #    complete the turn instead of 500ing every session request.
-        #    Right after a restart the SPA can still be re-establishing its
-        #    session stream, and a Send click in that window may never POST;
-        #    retry the send. The bug under test denies every send, so
-        #    retries cannot mask it.
+        # 4. The user returns and sends again; the server must recover the spec from the
+        #    ArtifactStore. Retry the send: right after a restart the SPA may still be
+        #    re-establishing its stream; the bug denies every send, so retries cannot mask it.
         try:
             page.reload()
             composer = page.get_by_placeholder("Send a message…")

@@ -1,15 +1,6 @@
-"""A damaged server disk-cache entry must not break an agent whose stored bundle is intact.
+"""A damaged disk-cache entry must not break an agent whose stored bundle is intact.
 
-Journey: a user chats with a custom agent (the server extracts its bundle to
-the disk cache), the extracted ``config.yaml`` is later lost or corrupted on
-disk, and the server restarts with a fresh ``AgentCache``. The user returns to
-the same session and sends another message. The intact bundle still lives in
-the artifact store, so the turn must succeed and the agent must stay usable.
-A regression treats the damaged directory as a cache hit and fails every spec
-load, which surfaces as one of two user-visible failures: the session no
-longer hydrates ("Conversation not found"), or the input-policy phase denies
-the message with "Denied by policy (policy evaluation error)".
-"""
+Chat once, damage the extracted config.yaml, restart the server, then chat again."""
 
 from __future__ import annotations
 

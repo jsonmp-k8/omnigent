@@ -189,12 +189,7 @@ def test_load_reextracts_when_disk_entry_lost_config(
     cache_dir: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """
-    A disk entry whose ``config.yaml`` was wiped (e.g. by a tmp
-    cleaner) is a cache miss: ``load()`` re-extracts the bundle from
-    the artifact store instead of raising ``FileNotFoundError`` on
-    every request that resolves the spec.
-    """
+    """A wiped ``config.yaml`` is a cache miss: ``load()`` re-extracts the stored bundle."""
     loc = "agent-wiped/abc123"
     _store_bundle(artifact_store, loc)
 
@@ -292,11 +287,7 @@ def test_load_poisoned_disk_entry_with_missing_bundle_raises(
     cache_dir: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """
-    When the disk entry is poisoned AND the bundle is gone from the
-    artifact store, the store miss surfaces as ``KeyError`` — the
-    fallback never invents a spec.
-    """
+    """A poisoned entry whose bundle is also gone surfaces the store miss as ``KeyError``."""
     loc = "agent-gone/abc123"
     _store_bundle(artifact_store, loc)
 
