@@ -150,3 +150,36 @@ def test_native_file_paste_closes_the_slash_menu(page: Page, chat_session_contra
     expect(page.get_by_text("notes.txt")).to_be_visible()
     expect(page.locator(_ROWS)).to_have_count(0)
     expect(composer).to_have_value("/")
+
+
+@pytest.mark.parametrize("busy", [False, True])
+def test_tab_completes_compact_and_explicit_send_renders_receipt(
+    page: Page, chat_session_contract, busy: bool
+) -> None:
+    chat = chat_session_contract
+    chat.harness = "claude-sdk"
+    page.goto(chat.url)
+    chat.wait_for_stream()
+    composer = _composer(page)
+    expect(composer).to_be_visible()
+    if busy:
+        chat.emit_busy("compact-test-turn")
+        expect(page.get_by_role("button", name="Interrupt", exact=True)).to_be_visible()
+
+    composer.fill("/comp")
+    composer.press("Tab")
+    expect(composer).to_have_value("/compact ")
+    expect(composer).to_be_focused()
+    assert chat.event_posts == []
+    expect(page.get_by_test_id("slash-command-card")).to_have_count(0)
+
+    composer.press("Enter")
+    expect(composer).to_have_value("")
+    if busy:
+        expect(page.get_by_text("/compact", exact=True)).to_be_visible()
+        assert chat.event_posts == []
+        chat.emit_idle("compact-test-turn")
+
+    expect(page.get_by_test_id("slash-command-card")).to_contain_text("compact")
+    expect(page.get_by_test_id("slash-command-card")).to_have_count(1)
+    assert [event["body"]["type"] for event in chat.event_posts] == ["compact"]

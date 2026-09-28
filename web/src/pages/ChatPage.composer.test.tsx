@@ -845,6 +845,39 @@ describe("Composer slash-command menu", () => {
     expect(ta.value).toBe("/deslop ");
   });
 
+  it.each([false, true])(
+    "Tab completes /compact without dispatching while working=%s, then Enter submits it",
+    (isWorking) => {
+      const compact = vi.spyOn(useChatStore.getState(), "compact").mockResolvedValue();
+      const onSend = vi.fn();
+      render(<Composer {...composerProps({ isNativeWrapper: true, isWorking, onSend })} />);
+      const ta = textarea();
+      fireEvent.change(ta, { target: { value: "/comp" } });
+
+      fireEvent.keyDown(ta, { key: "Tab" });
+
+      expect(ta).toHaveValue("/compact ");
+      expect(ta).toHaveFocus();
+      expect(activeRow()).toBeNull();
+      expect(compact).not.toHaveBeenCalled();
+      expect(onSend).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(ta, { key: "Enter" });
+
+      expect(compact).toHaveBeenCalledOnce();
+      expect(ta).toHaveValue("");
+      expect(onSend).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["/context", "/help"])("Tab only fills the %s built-in", (command) => {
+    render(<Composer {...composerProps()} />);
+    fireEvent.change(textarea(), { target: { value: command } });
+    fireEvent.keyDown(textarea(), { key: "Tab" });
+    expect(textarea()).toHaveValue(command + " ");
+    expect(screen.queryByText("No usage data yet — send a message first.")).toBeNull();
+  });
+
   it("Tab completes a match found only mid-name (exercises menuMatches, not just the render filter)", () => {
     render(<Composer {...composerProps()} />);
     const ta = textarea();

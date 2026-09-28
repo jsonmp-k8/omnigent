@@ -91,10 +91,10 @@ import { modelConfigurationSourceRows } from "@/lib/modelConfigurationSource";
 import {
   composerAttachmentKey,
   consumePendingInitialPrompt,
+  shouldQueueSend,
   isStaleTempConvId,
   isTempConvId,
   type PendingInitialPrompt,
-  type QueuedMessage,
   useChatStore,
 } from "@/store/chatStore";
 import {
@@ -340,48 +340,7 @@ export function splitSlashCommand(
   return { before, token, after: value.slice(before.length + token.length) };
 }
 
-/**
- * Whether a submitted message should be queued rather than POSTed now.
- *
- * Queue when busy, or when this conversation already has a queued message even
- * if it reads idle: the direct-send and queue-drain paths aren't ordered, so a
- * later direct send could overtake a still-queued earlier one when status
- * flickers idle mid-queue (cursor-native). A new chat always sends.
- *
- * ``waiting`` is NOT busy for queueing: it means the turn already ended and the
- * agent loop is only parked on background work (background shells / sub-agents)
- * — the server's turn gate is already free, so a new message starts a fresh
- * turn immediately instead of stalling behind that background work. (The
- * "Working…" spinner and sidebar dot still treat ``waiting`` as active — those
- * reflect background activity, which is a separate concern from send gating.)
- *
- * ``alwaysSteer`` (a per-device preference) drops the busy gate entirely: a
- * follow-up sent mid-turn is POSTed now — steered into the running turn —
- * instead of parking in the queue strip. The ``hasQueued`` guard still holds:
- * once this conversation has a queued message it must drain in order, or a
- * direct send could overtake a still-queued earlier one on an idle flicker.
- *
- * ``opensSideChat`` (a codex ``/side`` command) always POSTs now. A side chat is
- * forked onto its own thread and is non-interrupting by design — asking while
- * the agent works is the whole point — so it must not park in the queue behind
- * the parent's active turn. It shares no ordering with main-thread sends, so it
- * bypasses ``hasQueued`` too.
- */
-export function shouldQueueSend(
-  conversationId: string | null,
-  status: "idle" | "streaming",
-  sessionStatus: SessionStatus,
-  queuedMessages: QueuedMessage[],
-  alwaysSteer = false,
-  opensSideChat = false,
-): boolean {
-  if (conversationId === null) return false;
-  if (opensSideChat) return false;
-  const hasQueued = queuedMessages.some((m) => m.conversationId === conversationId);
-  if (alwaysSteer) return hasQueued;
-  const isBusy = status === "streaming" || sessionStatus === "running";
-  return isBusy || hasQueued;
-}
+export { shouldQueueSend } from "@/store/chatStore";
 
 // Iterate code points (not UTF-16 units) so emoji aren't cut mid-surrogate;
 // prefer the last word boundary within 10 chars of the limit so we don't
@@ -3105,12 +3064,16 @@ function ComposerImpl(
     }
   };
 
-  // Skills insert at the caret; standalone no-argument built-ins execute immediately.
+  const completeMenuSelection = (cmd: string) => {
+    const completion = slashCompletion.complete(cmd);
+    setValue(completion.text);
+    dirtyRef.current = true;
+  };
+
+  // Skills insert at the caret; Enter/click executes standalone no-argument built-ins.
   const applyMenuSelection = (cmd: string) => {
     if (slashCompletion.inline || slashCommandsWithArgs.has(cmd)) {
-      const completion = slashCompletion.complete(cmd);
-      setValue(completion.text);
-      dirtyRef.current = true;
+      completeMenuSelection(cmd);
     } else {
       // Execute immediately — no argument needed.
       setValue("");
@@ -3138,6 +3101,7 @@ function ComposerImpl(
     escapeClearsOnlyWithContent: true,
     allowOpen: inputFocused && draft.quotes.length === 0 && files.length === 0,
     onSelect: applyMenuSelection,
+    onTabComplete: completeMenuSelection,
     clearText: () => setValue(""),
   });
 

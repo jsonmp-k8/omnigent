@@ -147,9 +147,12 @@ import {
 import { getSessionHost } from "@/lib/sessionHost";
 import { isSystemUserContent, taskNotificationMarkerContent } from "@/lib/systemMessage";
 import { isNativeTerminalSession as isNativeTerminalSessionFn } from "@/lib/nativeCodingAgents";
+import { readAlwaysSteer } from "@/lib/alwaysSteerPreferences";
 import type { StoredReplyDraft } from "@/lib/replyDraft";
 
 export interface SendOptions {
+  /** Dispatch a control event through the message queue. */
+  command?: "compact";
   /** Client-only quote provenance, retained if the composer needs to retry. */
   replyDraft?: StoredReplyDraft;
   /**
@@ -542,6 +545,8 @@ export interface PendingUserMessage {
  * directly (no serialization concern).
  */
 export interface QueuedMessage {
+  /** Control event to dispatch instead of a plaintext message. */
+  command?: "compact";
   /** Client-only id, e.g. `q_1`. */
   queueId: string;
   /** Fully-assembled message text (mentions/quotes already applied). */
@@ -1066,7 +1071,12 @@ export interface ChatActions {
    * while the agent is busy. The head is flushed automatically (FIFO, one per
    * turn) when the session next goes idle — see the `session_status` handler.
    */
-  enqueueMessage: (text: string, files?: File[], replyDraft?: StoredReplyDraft) => void;
+  enqueueMessage: (
+    text: string,
+    files?: File[],
+    replyDraft?: StoredReplyDraft,
+    command?: "compact",
+  ) => void;
   /** Remove a queued message by id (the strip's per-row delete). */
   dequeueMessage: (queueId: string) => void;
   /**
@@ -1222,9 +1232,8 @@ export interface ChatActions {
    *  successful `launchRunner` for the open session. */
   markRunnerLaunched: () => void;
   /**
-   * Compact the active session's context. Posts a ``compact`` event to the
-   * server, which summarises the conversation history in-place. No-ops when
-   * there is no active conversation.
+   * Compact the active session's context using the normal send/queue preference.
+   * Dispatches a ``compact`` control event. No-ops without an active conversation.
    */
   compact: () => Promise<void>;
   /**
@@ -1822,7 +1831,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   abortController: null,
   historyGeneration: 0,
 
-  enqueueMessage: (text, files, replyDraft) => {
+  enqueueMessage: (text, files, replyDraft, command) => {
     const { conversationId, boundAgentId } = get();
     if (conversationId === null) return;
     queueSeq += 1;
@@ -1834,6 +1843,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         {
           queueId,
           text,
+          ...(command ? { command } : {}),
           stableId,
           conversationId,
           ...(boundAgentId !== null ? { agentId: boundAgentId } : {}),
@@ -2026,6 +2036,10 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // the next trigger backs off instead of hammering a failing runner.
       void (async () => {
         await waitForPrior();
+        if (head.command === "compact") {
+          await postEvent(conversationId, { type: "compact", data: {} });
+          return;
+        }
         // Reuse prior successful uploads so cooldown-paced retries do not
         // orphan blobs that already landed.
         const fileBlocks = await uploadFileBlocks(conversationId, head.files ?? []);
@@ -2084,6 +2098,17 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     });
   },
   send: async (text, agentId, files, opts) => {
+    if (opts?.command === "compact") {
+      const conversationId = opts.pinnedConversationId ?? get().conversationId;
+      if (!conversationId) return;
+      try {
+        await sendCompact(conversationId);
+      } catch (err) {
+        if (!opts.onError) throw err;
+        opts.onError(describeSendFailure(err).message);
+      }
+      return;
+    }
     if (!agentId) {
       throw new Error("chatStore.send: no agentId");
     }
@@ -2837,9 +2862,21 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   markRunnerLaunched: () => setActive({ runnerLaunchedAt: Date.now() }),
 
   compact: async () => {
-    const { conversationId } = get();
-    if (!conversationId) return;
-    await postEvent(conversationId, { type: "compact", data: {} });
+    const s = get();
+    if (!s.conversationId) return;
+    if (
+      shouldQueueSend(
+        s.conversationId,
+        s.status,
+        s.sessionStatus,
+        s.queuedMessages,
+        readAlwaysSteer(),
+      )
+    ) {
+      s.enqueueMessage("/compact", undefined, undefined, "compact");
+      return;
+    }
+    await sendCompact(s.conversationId);
   },
 
   refreshSessionState: async (conversationId) => {
@@ -3143,12 +3180,99 @@ function setActive(partial: Partial<ChatState> | ((state: ChatState) => Partial<
 
 // ── Internal helpers ─────────────────────────────────────
 
+async function sendCompact(conversationId: string): Promise<void> {
+  const itemId = `compact_pending_${randomUUID()}`;
+  const set = setterFor(conversationId);
+  set((s) => ({
+    blocks: [
+      ...s.blocks,
+      {
+        type: "slash_command",
+        kind: "command",
+        name: "compact",
+        arguments: "",
+        output: null,
+        ctx: {
+          itemId,
+          responseId: "",
+          agent: "omnigent",
+          depth: 0,
+          turn: 0,
+          timestamp: 0,
+          createdAtS: Math.floor(Date.now() / 1000),
+        },
+      },
+    ],
+  }));
+  const { waitForPrior, releaseSend } = enterSendChain(conversationId);
+  try {
+    await waitForPrior();
+    const result = await postEvent(conversationId, { type: "compact", data: {} });
+    set((s) => ({
+      blocks: s.blocks.flatMap((block) => {
+        if (block.ctx.itemId !== itemId) return [block];
+        if (result.itemId && s.blocks.some((b) => b.ctx.itemId === result.itemId)) return [];
+        return [{ ...block, ctx: { ...block.ctx, itemId: result.itemId ?? itemId } }];
+      }),
+    }));
+  } catch (err) {
+    set((s) => ({ blocks: s.blocks.filter((block) => block.ctx.itemId !== itemId) }));
+    throw err;
+  } finally {
+    releaseSend();
+  }
+}
+
+/**
+ * Whether a submitted message should be queued rather than POSTed now.
+ *
+ * Queue when busy, or when this conversation already has a queued message even
+ * if it reads idle: the direct-send and queue-drain paths aren't ordered, so a
+ * later direct send could overtake a still-queued earlier one when status
+ * flickers idle mid-queue (cursor-native). A new chat always sends.
+ *
+ * ``waiting`` is NOT busy for queueing: it means the turn already ended and the
+ * agent loop is only parked on background work (background shells / sub-agents)
+ * — the server's turn gate is already free, so a new message starts a fresh
+ * turn immediately instead of stalling behind that background work. (The
+ * "Working…" spinner and sidebar dot still treat ``waiting`` as active — those
+ * reflect background activity, which is a separate concern from send gating.)
+ *
+ * ``alwaysSteer`` (a per-device preference) drops the busy gate entirely: a
+ * follow-up sent mid-turn is POSTed now — steered into the running turn —
+ * instead of parking in the queue strip. The ``hasQueued`` guard still holds:
+ * once this conversation has a queued message it must drain in order, or a
+ * direct send could overtake a still-queued earlier one on an idle flicker.
+ *
+ * ``opensSideChat`` (a codex ``/side`` command) always POSTs now. A side chat is
+ * forked onto its own thread and is non-interrupting by design — asking while
+ * the agent works is the whole point — so it must not park in the queue behind
+ * the parent's active turn. It shares no ordering with main-thread sends, so it
+ * bypasses ``hasQueued`` too.
+ */
+export function shouldQueueSend(
+  conversationId: string | null,
+  status: "idle" | "streaming",
+  sessionStatus: SessionStatus,
+  queuedMessages: QueuedMessage[],
+  alwaysSteer = false,
+  opensSideChat = false,
+): boolean {
+  if (conversationId === null) return false;
+  if (opensSideChat) return false;
+  const hasQueued = queuedMessages.some((m) => m.conversationId === conversationId);
+  if (alwaysSteer) return hasQueued;
+  const isBusy = status === "streaming" || sessionStatus === "running";
+  return isBusy || hasQueued;
+}
+
 function queuedSendOptions(
   message: QueuedMessage,
   batchOrder?: ReadonlyMap<string, number>,
 ): SendOptions {
   const stableId = message.stableId ?? randomUUID().replace(/-/g, "");
   return {
+    ...(message.command ? { command: message.command } : {}),
     replyDraft: message.replyDraft,
     stableId,
     pinnedConversationId: message.conversationId,
@@ -6853,6 +6977,8 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       });
       return;
     case "slash_command":
+      // Control receipts acknowledge their own optimistic command card.
+      if (event.kind === "command" && event.agentName === "omnigent") return;
       // Claude-native: a `/skill-name` or surfaced CLI command typed
       // in the web composer round-trips through tmux → Claude TUI →
       // transcript → `external_conversation_item` (type=slash_command)

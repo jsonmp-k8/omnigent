@@ -132,7 +132,18 @@ async def test_compact_skips_omnigent_compaction_when_runner_handles_it(
     # handled it, Omnigent returned without running (or raising from) its own
     # compaction.
     assert resp.status_code == 202, resp.text
-    assert resp.json() == {"queued": False}, resp.text
+    assert resp.json()["queued"] is False, resp.text
+    assert resp.json()["item_id"], resp.text
+    items_resp = await client.get(f"/v1/sessions/{sid}/items")
+    assert items_resp.status_code == 200, items_resp.text
+    receipts = [item for item in items_resp.json()["data"] if item["type"] == "slash_command"]
+    assert len(receipts) == 1
+    assert receipts[0]["id"] == resp.json()["item_id"]
+    assert receipts[0]["kind"] == "command"
+    assert receipts[0]["name"] == "compact"
+    assert receipts[0]["model"] == "omnigent"
+    assert not any(item["type"] == "message" for item in items_resp.json()["data"])
+
     # Exactly one compact control was forwarded to the runner.
     assert captured == [{"type": "compact"}], (
         f"AP server must forward exactly one compact control to the runner; got {captured!r}."

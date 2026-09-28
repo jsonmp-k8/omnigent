@@ -1,3 +1,4 @@
+import { writeAlwaysSteer } from "@/lib/alwaysSteerPreferences";
 // Vitest cases for the chat store.
 //
 // `switchTo` opens the session SSE stream and hydrates session
@@ -15391,5 +15392,161 @@ describe("chatStore — one error card per failed turn", () => {
       error: { code: "runner_error", message: error.message },
     });
     expect(errorBlocks()).toHaveLength(2);
+  });
+});
+
+describe("chatStore compact dispatch", () => {
+  const compactPosts = () =>
+    fetchMock.mock.calls.filter(
+      ([url, init]) =>
+        String(url).endsWith("/events") &&
+        (init as RequestInit | undefined)?.method === "POST" &&
+        JSON.parse((init as RequestInit).body as string).type === "compact",
+    );
+
+  beforeEach(() => {
+    writeAlwaysSteer(false);
+    useChatStore.setState({ conversationId: "conv_compact", boundAgentId: "agent_xyz" });
+  });
+  afterEach(() => writeAlwaysSteer(false));
+
+  it("renders a compact receipt immediately when idle and posts the control event", async () => {
+    const promise = useChatStore.getState().compact();
+    expect(useChatStore.getState().blocks).toEqual([
+      expect.objectContaining({ type: "slash_command", kind: "command", name: "compact" }),
+    ]);
+    await promise;
+    expect(compactPosts()).toHaveLength(1);
+    expect(useChatStore.getState().queuedMessages).toEqual([]);
+    expect(useChatStore.getState().pendingUserMessages).toEqual([]);
+    expect(useChatStore.getState().status).toBe("idle");
+  });
+
+  it.each(["flush", "steer"])(
+    "queues while busy and dispatches a control event on %s",
+    async (mode) => {
+      useChatStore.setState({ sessionStatus: "running" });
+      await useChatStore.getState().compact();
+      expect(compactPosts()).toHaveLength(0);
+      const [queued] = useChatStore.getState().queuedMessages;
+      expect(queued).toMatchObject({
+        text: "/compact",
+        command: "compact",
+        conversationId: "conv_compact",
+      });
+
+      if (mode === "flush") {
+        useChatStore.setState({ sessionStatus: "idle" });
+        useChatStore.getState().maybeFlushQueuedHead();
+      } else {
+        useChatStore.getState().steerMessage(queued!.queueId);
+      }
+      await tick();
+      expect(compactPosts()).toHaveLength(1);
+      expect(useChatStore.getState().queuedMessages).toEqual([]);
+      expect(useChatStore.getState().pendingUserMessages).toEqual([]);
+    },
+  );
+
+  it("reconciles the immediate card with a receipt that arrived over the stream", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/events") && init?.method === "POST") {
+        const state = useChatStore.getState();
+        const optimistic = state.blocks.find((block) => block.type === "slash_command")!;
+        useChatStore.setState({
+          blocks: [
+            ...state.blocks,
+            { ...optimistic, ctx: { ...optimistic.ctx, itemId: "compact_receipt" } },
+          ],
+        });
+        return mockResponse({ queued: false, item_id: "compact_receipt" });
+      }
+      return defaultFetchHandler(input, init);
+    });
+    await useChatStore.getState().compact();
+    expect(useChatStore.getState().blocks).toEqual([
+      expect.objectContaining({
+        type: "slash_command",
+        ctx: expect.objectContaining({ itemId: "compact_receipt" }),
+      }),
+    ]);
+  });
+
+  it("does not acknowledge an unrelated pending message when a compact receipt arrives", () => {
+    const pending = {
+      tempId: "other",
+      content: [{ type: "input_text" as const, text: "next prompt" }],
+      createdAtS: 1,
+    };
+    useChatStore.setState({ pendingUserMessages: [pending] });
+    handleSessionEvent({
+      type: "slash_command",
+      kind: "command",
+      name: "compact",
+      arguments: "",
+      output: null,
+      agentName: "omnigent",
+      itemId: "receipt",
+      responseId: "compact_turn",
+    });
+    expect(useChatStore.getState().pendingUserMessages).toEqual([pending]);
+  });
+
+  it("respects always-steer while busy", async () => {
+    writeAlwaysSteer(true);
+    useChatStore.setState({ sessionStatus: "running" });
+    await useChatStore.getState().compact();
+    expect(compactPosts()).toHaveLength(1);
+    expect(useChatStore.getState().queuedMessages).toEqual([]);
+    expect(useChatStore.getState().sessionStatus).toBe("running");
+  });
+
+  it("keeps compact behind earlier queued messages even with always-steer enabled", async () => {
+    writeAlwaysSteer(true);
+    useChatStore.setState({ sessionStatus: "running" });
+    useChatStore.getState().enqueueMessage("first");
+    await useChatStore.getState().compact();
+    expect(useChatStore.getState().queuedMessages.map((m) => m.text)).toEqual([
+      "first",
+      "/compact",
+    ]);
+    expect(compactPosts()).toHaveLength(0);
+  });
+
+  it("dispatches the control event to its original conversation after navigating away", async () => {
+    useChatStore.setState({ sessionStatus: "running" });
+    await useChatStore.getState().compact();
+    seedConversationsCache([conv("conv_compact", "idle"), conv("conv_other", "running")]);
+    useChatStore.setState({ conversationId: "conv_other" });
+    useChatStore.getState().flushBackgroundQueues();
+    await tick();
+    expect(compactPosts()).toHaveLength(1);
+    expect(String(compactPosts()[0]![0])).toContain("/conv_compact/events");
+    expect(useChatStore.getState().queuedMessages).toEqual([]);
+  });
+
+  it("retains a failed queued compact for an explicit retry", async () => {
+    useChatStore.setState({ sessionStatus: "running" });
+    await useChatStore.getState().compact();
+    const [queued] = useChatStore.getState().queuedMessages;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/events") && init?.method === "POST") {
+        return mockResponse({ detail: "runner unavailable" }, { ok: false, status: 503 });
+      }
+      return defaultFetchHandler(input, init);
+    });
+    useChatStore.setState({ sessionStatus: "idle" });
+    useChatStore.getState().maybeFlushQueuedHead();
+    await tick();
+    expect(useChatStore.getState().queuedMessages).toEqual([{ ...queued, requiresRetry: true }]);
+    expect(useChatStore.getState().blocks.some((block) => block.type === "slash_command")).toBe(
+      false,
+    );
+
+    fetchMock.mockImplementation(defaultFetchHandler);
+    useChatStore.getState().steerMessage(queued!.queueId);
+    await tick();
+    expect(compactPosts()).toHaveLength(2);
+    expect(useChatStore.getState().queuedMessages).toEqual([]);
   });
 });

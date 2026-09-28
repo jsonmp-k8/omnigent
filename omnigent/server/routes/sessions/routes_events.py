@@ -30,6 +30,7 @@ from omnigent.entities import (
     NewConversationItem,
 )
 from omnigent.entities.conversation import (
+    SlashCommandData,
     parse_item_data,
 )
 from omnigent.errors import ErrorCode, OmnigentError
@@ -177,6 +178,7 @@ from omnigent.server.routes._sessions.helpers import (
     _publish_compaction_failed,
     _publish_compaction_in_progress,
     _publish_elicitation_request_to_ancestors,
+    _publish_external_conversation_item,
     _publish_external_output_reasoning_delta,
     _publish_external_output_text_delta,
     _publish_external_tool_output_delta,
@@ -1348,6 +1350,23 @@ def register_events_routes(
             )
             return {"queued": False, "elicitation_id": elicit_id}
         if body.type == _COMPACT_TYPE:
+
+            async def record_compact() -> dict[str, Any]:
+                receipt = NewConversationItem(
+                    type="slash_command",
+                    response_id=f"compact_{secrets.token_hex(16)}",
+                    data=SlashCommandData(
+                        agent="omnigent",
+                        kind="command",
+                        name="compact",
+                        arguments="",
+                    ),
+                    created_by=created_by,
+                )
+                items = await asyncio.to_thread(conversation_store.append, session_id, [receipt])
+                _publish_external_conversation_item(session_id, items[0])
+                return {"queued": False, "item_id": items[0].id}
+
             # Unified control dispatch (designs/CLAUDE_NATIVE.md
             # "Control events dispatch on the runner"): forward /compact
             # to the bound runner first, regardless of harness. The
@@ -1366,7 +1385,7 @@ def register_events_routes(
                 timeout_s=_TUI_INJECT_FORWARD_TIMEOUT_S,
             )
             if runner_result is not None and runner_result.status_code == 200:
-                return {"queued": False}
+                return await record_compact()
             if runner_result is not None and runner_result.status_code != 204:
                 raise OmnigentError(
                     f"Compaction failed: runner returned {runner_result.status_code}",
@@ -1396,7 +1415,7 @@ def register_events_routes(
                         timeout_s=_TUI_INJECT_FORWARD_TIMEOUT_S,
                     )
                     if runner_result is not None and runner_result.status_code == 200:
-                        return {"queued": False}
+                        return await record_compact()
                     if runner_result is not None and runner_result.status_code != 204:
                         raise OmnigentError(
                             f"Compaction failed: runner returned {runner_result.status_code}",
