@@ -256,12 +256,14 @@ async def test_settled_outcome_is_redelivered_on_retried_quiescence_idle(
 
 @pytest.mark.asyncio
 async def test_confirmed_completion_corrects_delivered_cancelled() -> None:
-    """A harness-confirmed completion replaces a delivered ``cancelled`` guess.
+    """A harness-confirmed same-turn completion replaces a delivered ``cancelled``.
 
     The grace-timer ``cancelled`` is a fallback, not a fact; when the agent
     survives and its forwarder later confirms the finished turn, the real
     result must be re-delivered rather than discarded as ALREADY_DELIVERED.
-    An unconfirmed completion must keep losing to the delivered status.
+    The correction requires a POSITIVE same-turn match: the cancellation records
+    its turn id, and the completion carries the same one. An unconfirmed
+    completion must keep losing to the delivered status.
     """
     from omnigent.runner import app as runner_app
 
@@ -276,16 +278,23 @@ async def test_confirmed_completion_corrects_delivered_cancelled() -> None:
         title="cite-check",
     )
     try:
-        ack = runner_app.mark_subagent_work_terminal(child_id, status="cancelled", output=None)
+        # The interrupt-guess cancel records the turn it settled (``resp1``).
+        ack = runner_app.mark_subagent_work_terminal(
+            child_id, status="cancelled", output=None, response_id="resp1"
+        )
         assert ack.delivered_now
 
         unconfirmed = runner_app.mark_subagent_work_terminal(
-            child_id, status="completed", output="stale guess"
+            child_id, status="completed", output="stale guess", response_id="resp1"
         )
         assert not unconfirmed.delivered_now
 
         confirmed = runner_app.mark_subagent_work_terminal(
-            child_id, status="completed", output="the verdict", turn_confirmed=True
+            child_id,
+            status="completed",
+            output="the verdict",
+            turn_confirmed=True,
+            response_id="resp1",
         )
         assert confirmed.delivered_now
 
@@ -294,6 +303,60 @@ async def test_confirmed_completion_corrects_delivered_cancelled() -> None:
             item = inbox.get_nowait()
             statuses.append((item["status"], item["output"]))
         assert statuses == [("cancelled", ""), ("completed", "the verdict")]
+    finally:
+        runner_app.unregister_subagent_work(child_id)
+        runner_app._session_inboxes_ref.pop(parent_id, None)
+
+
+async def test_grace_timer_cancel_does_not_settle_reused_dispatch() -> None:
+    """A delayed cancel bound to an old dispatch never settles a newer send.
+
+    Interrupt A leaves a grace-timer cancel bound to A's ``work_id``. Before it
+    fires, a new send registers turn B on the same child session. The cancel
+    (``only_if_work_id`` = A) must be dropped as superseded, leaving B live so
+    it can still complete.
+    """
+    from omnigent.runner import app as runner_app
+
+    parent_id = uuid.uuid4().hex
+    child_id = uuid.uuid4().hex
+    inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    runner_app._session_inboxes_ref[parent_id] = inbox
+    try:
+        entry_a = runner_app.register_subagent_work(
+            parent_session_id=parent_id,
+            child_session_id=child_id,
+            agent="researcher",
+            title="turn-a",
+        )
+        work_id_a = entry_a.work_id
+
+        # The reused child session starts turn B (a fresh dispatch).
+        entry_b = runner_app.register_subagent_work(
+            parent_session_id=parent_id,
+            child_session_id=child_id,
+            agent="researcher",
+            title="turn-b",
+        )
+        assert entry_b.work_id != work_id_a
+
+        # A's delayed grace-timer cancel fires, still bound to A's work_id.
+        superseded = runner_app.mark_subagent_work_terminal(
+            child_id, status="cancelled", output=None, only_if_work_id=work_id_a
+        )
+        assert not superseded.delivered_now
+        assert runner_app.get_subagent_work(child_id).status == "launching"
+
+        # B completes normally and reaches the parent.
+        done = runner_app.mark_subagent_work_terminal(
+            child_id, status="completed", output="B result", turn_confirmed=True
+        )
+        assert done.delivered_now
+
+        statuses = []
+        while not inbox.empty():
+            statuses.append(inbox.get_nowait()["status"])
+        assert statuses == ["completed"]
     finally:
         runner_app.unregister_subagent_work(child_id)
         runner_app._session_inboxes_ref.pop(parent_id, None)

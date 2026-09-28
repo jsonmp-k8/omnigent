@@ -48,7 +48,15 @@ class _FakeResourceRegistry:
 
 def _make_runner(**overrides: Any) -> tuple[NativeInterruptRunner, dict[str, Any]]:
     """Build a runner with recording fakes; return it plus a capture dict."""
-    captured: dict[str, Any] = {"published": [], "wakes": [], "wake_calls": []}
+    captured: dict[str, Any] = {
+        "published": [],
+        "wakes": [],
+        "wake_calls": [],
+        "superseded": [],
+        # The work_id the runner's ``subagent_work_id_for_session`` callback
+        # reports; flip it to simulate a newer send replacing the dispatch.
+        "current_work_id": None,
+    }
 
     def _publish(conv_id: str, event: dict[str, Any]) -> None:
         captured["published"].append((conv_id, event))
@@ -60,7 +68,12 @@ def _make_runner(**overrides: Any) -> tuple[NativeInterruptRunner, dict[str, Any
         output: str | None,
         cancel_confirmed: bool = False,
         response_id: str | None = None,
+        only_if_work_id: str | None = None,
     ) -> _FakeAck:
+        if only_if_work_id is not None and only_if_work_id != captured["current_work_id"]:
+            # A newer dispatch replaced the entry: drop the delayed op untouched.
+            captured["superseded"].append((child_session_id, status, only_if_work_id))
+            return _FakeAck(delivered=False, reason="superseded_dispatch")
         captured["wakes"].append((child_session_id, status, output))
         captured["wake_calls"].append(
             {
@@ -69,6 +82,7 @@ def _make_runner(**overrides: Any) -> tuple[NativeInterruptRunner, dict[str, Any
                 "output": output,
                 "cancel_confirmed": cancel_confirmed,
                 "response_id": response_id,
+                "only_if_work_id": only_if_work_id,
             }
         )
         return _FakeAck()
@@ -79,6 +93,9 @@ def _make_runner(**overrides: Any) -> tuple[NativeInterruptRunner, dict[str, Any
     def _client_safe(exc: BaseException, *, context: str) -> str:
         return f"safe:{context}"
 
+    def _work_id_for_session(conv_id: str) -> str | None:
+        return captured["current_work_id"]
+
     kwargs: dict[str, Any] = {
         "server_client": SimpleNamespace(),
         "resource_registry": _FakeResourceRegistry(),
@@ -88,6 +105,7 @@ def _make_runner(**overrides: Any) -> tuple[NativeInterruptRunner, dict[str, Any
         "codex_bridge_state_for_session": _codex_bridge_state,
         "client_safe_error_detail": _client_safe,
         "logger": logging.getLogger("test.interrupt"),
+        "subagent_work_id_for_session": _work_id_for_session,
     }
     kwargs.update(overrides)
     return NativeInterruptRunner(**kwargs), captured
@@ -149,9 +167,9 @@ async def test_uniform_interrupt_defers_parent_wake_until_outcome_known(
     assert isinstance(resp, Response) and resp.status_code == 204
     assert calls == [("dir/conv_g", 1.0)]
     assert captured["wakes"] == []
-    assert runner.take_pending_interrupt("conv_g") is True
+    assert runner.take_pending_interrupt("conv_g")[0] is True
     # Consumed: a second take finds nothing and the grace timer is disarmed.
-    assert runner.take_pending_interrupt("conv_g") is False
+    assert runner.take_pending_interrupt("conv_g")[0] is False
 
 
 @pytest.mark.asyncio
@@ -178,7 +196,38 @@ async def test_interrupt_grace_timer_delivers_unconfirmed_cancel(
     # The grace-timer cancel is a guess, not a confirmed kill, so a same-turn
     # survivor completion may still correct it later.
     assert captured["wake_calls"][-1]["cancel_confirmed"] is False
-    assert runner.take_pending_interrupt("conv_g") is False
+    assert runner.take_pending_interrupt("conv_g")[0] is False
+
+
+@pytest.mark.asyncio
+async def test_grace_timer_does_not_cancel_superseded_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An old interrupt's grace timer must not cancel a newer dispatch.
+
+    Interrupt turn A, then a new send registers turn B on the same child before
+    A's timer fires. The timer is bound to A's ``work_id``, so when it fires the
+    newer dispatch B is left untouched and can still complete — instead of B
+    being cancelled and its result lost.
+    """
+    import asyncio
+
+    import omnigent.harnesses.goose_native.bridge as goose_bridge
+    from omnigent.runner.native import interrupt as interrupt_mod
+
+    monkeypatch.setattr(goose_bridge, "bridge_dir_for_session_id", lambda conv: f"dir/{conv}")
+    monkeypatch.setattr(goose_bridge, "inject_interrupt", lambda bridge_dir, *, timeout_s: None)
+    monkeypatch.setattr(interrupt_mod, "_NATIVE_INTERRUPT_CANCEL_GRACE_S", 0.02)
+
+    runner, captured = _make_runner()
+    captured["current_work_id"] = "work_A"
+    await runner.interrupt("goose-native", "conv_g")  # defers, bound to work_A
+    # A new send reuses the child session before the timer fires.
+    captured["current_work_id"] = "work_B"
+
+    await asyncio.sleep(0.1)
+    assert captured["wakes"] == [], "the newer dispatch must not be cancelled"
+    assert captured["superseded"] == [("conv_g", "cancelled", "work_A")]
 
 
 @pytest.mark.asyncio
@@ -197,7 +246,7 @@ async def test_resolved_interrupt_disarms_grace_timer(
 
     runner, captured = _make_runner()
     await runner.interrupt("goose-native", "conv_g")
-    assert runner.take_pending_interrupt("conv_g") is True
+    assert runner.take_pending_interrupt("conv_g")[0] is True
 
     await asyncio.sleep(0.1)
     assert captured["wakes"] == []
@@ -271,7 +320,7 @@ async def test_uniform_stop_kills_tears_down_and_goes_idle(
     resp = await runner.stop("cursor-native", "conv_c")
 
     assert isinstance(resp, Response) and resp.status_code == 204
-    assert runner.take_pending_interrupt("conv_c") is False
+    assert runner.take_pending_interrupt("conv_c")[0] is False
     assert killed == [("dir/conv_c", 1.0)]
     idle = [e for _, e in captured["published"] if e.get("status") == "idle"]
     assert idle == [{"type": "session.status", "status": "idle"}]
@@ -421,4 +470,4 @@ async def test_claude_interrupt_resolves_bridge_id_and_injects(
     assert injected == [("dir/bid-conv_cl", 1.0)]
     # No optimistic 'cancelled': the outcome is unknown until an edge lands.
     assert captured["wakes"] == []
-    assert runner.take_pending_interrupt("conv_cl") is True
+    assert runner.take_pending_interrupt("conv_cl")[0] is True
