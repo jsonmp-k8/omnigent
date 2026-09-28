@@ -56,8 +56,8 @@ export interface ServerSelectorV2Setup {
   /** Has connected to any server before (returning user). The shell counts MDM
    *  presets too, which `recentServers` excludes, so it outlives the list. */
   connectedBefore?: boolean;
-  /** The CLI's local server is already up → local actions "Open" it rather
-   *  than "Start" it. */
+  /** Advisory: the CLI's local server looked up at load → local actions read
+   *  "Open" rather than "Start". Labels only; start-local re-checks health. */
   localServerRunning?: boolean;
   /** Mocks only: route Join / Install actions to the terminal step (which runs
    *  the mocked local-server flow) instead of the no-op connect, so the install
@@ -159,8 +159,9 @@ export function ServerSelectorV2({ setup }: { setup: ServerSelectorV2Setup }) {
   // ConnectResult so the list can still show a connect error when connecting
   // directly.
   const connect = async (url: string): Promise<ConnectResult> => {
-    // The stopped local install must be booted, not navigated to (dead URL).
-    if (!setup.localServerRunning && isLocalInstall(url)) {
+    // The local install always goes through start-local, which reuses a healthy
+    // server or boots one — the running hint only picks the label.
+    if (isLocalInstall(url)) {
       setTerminalTarget({ kind: "local", back: "server" });
       setStep("terminal");
       return {};

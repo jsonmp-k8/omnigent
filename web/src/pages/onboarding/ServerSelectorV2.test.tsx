@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ServerSelectorV2, type ServerSelectorV2Setup } from "./ServerSelectorV2";
 
@@ -89,8 +89,11 @@ describe("ServerSelectorV2", () => {
     expect(onConnect).not.toHaveBeenCalled();
   });
 
-  it("a running local server reads 'Open Omnigent' and connects directly", () => {
+  it("a running local server reads 'Open Omnigent' but still goes through start-local", async () => {
+    // The hint is a load-time snapshot: if the server died since, start-local
+    // (health-checked reuse-or-boot) recovers where a direct connect would fail.
     const onConnect = vi.fn().mockResolvedValue({});
+    const onStartLocal = vi.fn().mockResolvedValue({ ok: true });
     render(
       <ServerSelectorV2
         setup={makeSetup({
@@ -98,11 +101,14 @@ describe("ServerSelectorV2", () => {
           localServerRunning: true,
           recentServers: ["http://localhost:6767/"],
           onConnect,
+          onStartLocal,
         })}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" }));
-    expect(onConnect).toHaveBeenCalledWith("http://localhost:6767/");
+    expect(screen.getByText(/connecting to the local server/i)).toBeInTheDocument();
+    await waitFor(() => expect(onStartLocal).toHaveBeenCalledOnce());
+    expect(onConnect).not.toHaveBeenCalled();
   });
 
   it("a user-run server on another loopback port connects directly", () => {

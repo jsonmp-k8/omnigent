@@ -7,12 +7,16 @@
 const { describe, it, mock, afterEach } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const { spawnSync } = require("child_process");
 
 const {
   normalizeServerUrl,
   isLoopbackServer,
   sameLoopbackServer,
   parseLocalServerPidfile,
+  localServerStatus,
   candidatePaths,
   resolveCliPath,
   cliCommandParts,
@@ -107,6 +111,43 @@ describe("parseLocalServerPidfile", () => {
     assert.equal(parseLocalServerPidfile("abc\ndef"), null); // non-numeric
     assert.equal(parseLocalServerPidfile(""), null);
     assert.equal(parseLocalServerPidfile(null), null);
+  });
+});
+
+describe("localServerStatus", () => {
+  const prevDataDir = process.env.OMNIGENT_DATA_DIR;
+  afterEach(() => {
+    if (prevDataDir === undefined) delete process.env.OMNIGENT_DATA_DIR;
+    else process.env.OMNIGENT_DATA_DIR = prevDataDir;
+  });
+
+  // Point the data dir at a temp dir holding `pidfile` (or none).
+  function withPidfile(pidfile) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omnigent-pidfile-test-"));
+    if (pidfile !== undefined) fs.writeFileSync(path.join(dir, "local_server.pid"), pidfile);
+    process.env.OMNIGENT_DATA_DIR = dir;
+  }
+
+  it("reports not running without a pidfile", () => {
+    withPidfile(undefined);
+    assert.equal(localServerStatus(), null);
+  });
+
+  it("reports not running for a stale pidfile (dead pid)", () => {
+    // A just-exited child's pid is dead (reuse within the test is negligible).
+    const { pid } = spawnSync(process.execPath, ["-e", ""]);
+    withPidfile(`${pid}\n6767\n`);
+    assert.equal(localServerStatus(), null);
+  });
+
+  it("reports running with the recorded port for a live pid", () => {
+    withPidfile(`${process.pid}\n6767\n`);
+    assert.deepEqual(localServerStatus(), {
+      running: true,
+      url: "http://127.0.0.1:6767",
+      pid: process.pid,
+      port: 6767,
+    });
   });
 });
 

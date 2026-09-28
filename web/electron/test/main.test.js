@@ -1263,6 +1263,14 @@ describe("recent-server startup wiring (src/main.js)", () => {
       /ipcMain\.handle\("omnigent:get-recent-servers"[\s\S]{0,400}excludingManagedServers\(\s*normalizeRecentServers\(loadSettings\(\)\.recent_servers\),\s*managed/,
     );
   });
+
+  it("counts MDM presets toward the setup page's returning-user signal", () => {
+    // Raw recents, NOT managed-excluded: a preset-only history is still returning.
+    assert.match(
+      liveCode,
+      /ipcMain\.handle\("omnigent:get-setup-capabilities"[\s\S]{0,400}connectedBefore:\s*normalizeRecentServers\(loadSettings\(\)\.recent_servers\)\.length > 0/,
+    );
+  });
 });
 
 // Guard for the deep-link path join in createWindow. A basename-less SPA path
