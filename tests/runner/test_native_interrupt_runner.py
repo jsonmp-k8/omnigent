@@ -66,8 +66,6 @@ def _make_runner(**overrides: Any) -> tuple[NativeInterruptRunner, dict[str, Any
         *,
         status: str,
         output: str | None,
-        cancel_confirmed: bool = False,
-        response_id: str | None = None,
         only_if_work_id: str | None = None,
     ) -> _FakeAck:
         if only_if_work_id is not None and only_if_work_id != captured["current_work_id"]:
@@ -80,8 +78,6 @@ def _make_runner(**overrides: Any) -> tuple[NativeInterruptRunner, dict[str, Any
                 "child_session_id": child_session_id,
                 "status": status,
                 "output": output,
-                "cancel_confirmed": cancel_confirmed,
-                "response_id": response_id,
                 "only_if_work_id": only_if_work_id,
             }
         )
@@ -194,9 +190,6 @@ async def test_interrupt_grace_timer_delivers_unconfirmed_cancel(
 
     await asyncio.sleep(0.1)
     assert captured["wakes"] == [("conv_g", "cancelled", None)]
-    # The grace-timer cancel is a guess, not a confirmed kill, so a same-turn
-    # survivor completion may still correct it later.
-    assert captured["wake_calls"][-1]["cancel_confirmed"] is False
     assert runner.take_pending_interrupt("conv_g")[0] is False
 
 
@@ -424,9 +417,6 @@ async def test_uniform_stop_kills_tears_down_and_goes_idle(
     idle = [e for _, e in captured["published"] if e.get("status") == "idle"]
     assert idle == [{"type": "session.status", "status": "idle"}]
     assert captured["wakes"] == [("conv_c", "cancelled", None)]
-    # The kill is definitive: tag the cancel confirmed so a later stale
-    # completion cannot overturn it.
-    assert captured["wake_calls"][-1]["cancel_confirmed"] is True
 
 
 @pytest.mark.asyncio
@@ -506,9 +496,6 @@ async def test_claude_stop_is_idempotent_without_advertised_tmux(
 
     assert isinstance(resp, Response) and resp.status_code == 204
     assert captured["wakes"] == [("conv_cn", "cancelled", None)]
-    # A confirmed stop tags the cancel definitive so a stale completion cannot
-    # resurrect the killed session.
-    assert captured["wake_calls"][-1]["cancel_confirmed"] is True
 
 
 @pytest.mark.asyncio

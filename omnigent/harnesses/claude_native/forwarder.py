@@ -961,25 +961,6 @@ class _PostRetryTracker:
         self._base_delay_s = max(0.0, base_delay_s)
         self._max_delay_s = max(0.0, max_delay_s)
         self._entries: dict[str, _PostRetryEntry] = {}
-        self._pinned_values: dict[str, str | None] = {}
-
-    def pin_value(self, key: str, value: str | None) -> str | None:
-        """Bind ``value`` to ``key`` on first sight; return the pinned value after.
-
-        Keeps a retried post's turn ``response_id`` tied to the turn that
-        produced the event even after later polls advance the forwarder's
-        current turn — so a delayed ``Stop`` retry cannot be re-attributed to a
-        newer turn (which would let it overturn that turn's cancellation on the
-        runner). Dropped by :meth:`clear` and on exhaustion, once the post is no
-        longer retried.
-
-        :param key: Stable retry key, e.g. ``"hook:2:0:idle"``.
-        :param value: Value to pin on the first call for ``key``.
-        :returns: The value pinned on the first call for ``key``.
-        """
-        if key not in self._pinned_values:
-            self._pinned_values[key] = value
-        return self._pinned_values[key]
 
     def retry_delay_s(self, key: str) -> float | None:
         """
@@ -1009,7 +990,6 @@ class _PostRetryTracker:
         :returns: None.
         """
         self._entries.pop(key, None)
-        self._pinned_values.pop(key, None)
         # A cleared key means the post got through (or was ambiguously
         # delivered); reset process-level forward-sync health (#1120).
         _note_forward_success()
@@ -1047,7 +1027,6 @@ class _PostRetryTracker:
         )
         if give_up:
             self._entries.pop(key, None)
-            self._pinned_values.pop(key, None)
             return _PostRetryDecision(
                 attempts=entry.attempts,
                 delay_s=0.0,
@@ -1203,9 +1182,6 @@ async def forward_claude_transcript_to_session(
     seen_delta_keys: dict[tuple[str, int], None] = {}
     item_retries = _PostRetryTracker()
     status_retries = _PostRetryTracker()
-    # Backoff for the turn-start identity post. Keys are per response_id, so it
-    # need not reset on session rotation (a rotated session's turns are new ids).
-    identity_retries = _PostRetryTracker()
     subagent_start_retries = _PostRetryTracker()
     subagent_item_retries = _PostRetryTracker(
         max_transient_attempts=_SUBAGENT_ITEM_MAX_TRANSIENT_ATTEMPTS
@@ -1229,18 +1205,6 @@ async def forward_claude_transcript_to_session(
     # lifetime of the forwarder task; the server's idempotence handles
     # the rare case where two forwarder processes race the same conv.
     external_session_id_mirrored = False
-    # The turn id whose identity we have already published on a turn-start
-    # ``running`` edge, so we announce each new turn exactly once. Lets the
-    # runner learn which turn drives a sub-agent dispatch BEFORE any interrupt
-    # or terminal edge — the independent identity a later completion is matched
-    # against so it cannot overturn a different turn's cancellation. Reset on
-    # /clear and /fork rotations alongside other session state.
-    published_turn_response_id: str | None = None
-    # The turn whose boundary is being held because its identity has not yet
-    # reached the runner. While set, the transcript is NOT advanced (so the
-    # held turn's Stop cannot be re-pinned to a newer turn) and its Stop is
-    # deferred. Reset on rotation alongside other session state.
-    held_turn_id: str | None = None
     # Native task system state: maps and ordered list accumulated from
     # TaskCreated / TaskCompleted / PostToolUse/TaskUpdate hook events.
     # Reset on /clear and /fork rotations alongside other session state.
@@ -1332,8 +1296,6 @@ async def forward_claude_transcript_to_session(
                         )
                         subagent_status_retries = _PostRetryTracker()
                         external_session_id_mirrored = False
-                        published_turn_response_id = None
-                        held_turn_id = None
                         task_subjects = {}
                         task_statuses = {}
                         task_order = []
@@ -1377,8 +1339,6 @@ async def forward_claude_transcript_to_session(
                         )
                         subagent_status_retries = _PostRetryTracker()
                         external_session_id_mirrored = False
-                        published_turn_response_id = None
-                        held_turn_id = None
                         task_subjects = {}
                         task_statuses = {}
                         task_order = []
@@ -1436,90 +1396,34 @@ async def forward_claude_transcript_to_session(
                         # the same poll would lose the boundary. Cursor-keyed, so
                         # the main hook phase below does not re-mint.
                         await _prescan_precompact_edges(bridge_dir, hook_state)
-                        # ``post_stop`` gates the turn-end (Stop) edge, and
-                        # ``stop_turn_response_id`` is the turn it is attributed
-                        # to. A turn's Stop is deferred until its identity has
-                        # reached the runner, so a completion is never delivered
-                        # before the id it must be matched against — but while
-                        # holding we must NOT advance the transcript, or the held
-                        # Stop would be re-pinned to a newer turn.
-                        post_stop = False
-                        stop_turn_response_id: str | None = None
-                        if held_turn_id is not None:
-                            published_turn_response_id, _hold = await _publish_turn_identity(
-                                client=client,
-                                session_id=current_session_id,
-                                response_id=held_turn_id,
-                                already_published=published_turn_response_id,
-                                settled_response_ids=(
-                                    dedupe.settled_response_id,
-                                    dedupe.pending_settled_response_id,
-                                ),
-                                retry_tracker=identity_retries,
-                            )
-                            if not _hold:
-                                # Identity landed; post the held turn's Stop now,
-                                # still attributed to it (we never advanced the
-                                # transcript while holding).
-                                post_stop = True
-                                stop_turn_response_id = held_turn_id
-                                held_turn_id = None
-                        else:
-                            prev_byte_offset = state.byte_offset
-                            state = await _forward_available_items(
-                                client=client,
-                                session_id=current_session_id,
-                                bridge_dir=bridge_dir,
-                                agent_name=agent_name,
-                                state=state,
-                                retry_tracker=item_retries,
-                                skip_user_messages=skip_user_messages,
-                                dedupe=dedupe,
-                            )
-                            # Announce identity only for a turn with NEW activity
-                            # this poll — never a settled turn re-observed on a
-                            # restart (which would falsely reactivate the session
-                            # with no idle edge left to repair it).
-                            if (
-                                state.current_response_id is not None
-                                and state.byte_offset != prev_byte_offset
-                            ):
-                                published_turn_response_id, _hold = await _publish_turn_identity(
-                                    client=client,
-                                    session_id=current_session_id,
-                                    response_id=state.current_response_id,
-                                    already_published=published_turn_response_id,
-                                    settled_response_ids=(
-                                        dedupe.settled_response_id,
-                                        dedupe.pending_settled_response_id,
-                                    ),
-                                    retry_tracker=identity_retries,
-                                )
-                                if _hold:
-                                    held_turn_id = state.current_response_id
-                            if held_turn_id is None:
-                                post_stop = True
-                                stop_turn_response_id = state.current_response_id
-                        if post_stop:
-                            hook_state = await _forward_available_status_events(
-                                client=client,
-                                session_id=current_session_id,
-                                bridge_dir=bridge_dir,
-                                state=hook_state,
-                                retry_tracker=status_retries,
-                                dedupe=dedupe,
-                                task_subjects=task_subjects,
-                                task_statuses=task_statuses,
-                                task_order=task_order,
-                                # The turn-end edges (Stop→idle / StopFailure→failed)
-                                # carry the turn's response id so ap-web can CLOSE the
-                                # streaming ``activeResponse`` opened by the turn-start
-                                # ``running`` edge. It is the HELD turn's id when a
-                                # deferred Stop is finally posted, else the active
-                                # turn's — never a newer turn's, so a delayed Stop is
-                                # not re-attributed.
-                                response_id=stop_turn_response_id,
-                            )
+                        state = await _forward_available_items(
+                            client=client,
+                            session_id=current_session_id,
+                            bridge_dir=bridge_dir,
+                            agent_name=agent_name,
+                            state=state,
+                            retry_tracker=item_retries,
+                            skip_user_messages=skip_user_messages,
+                            dedupe=dedupe,
+                        )
+                        hook_state = await _forward_available_status_events(
+                            client=client,
+                            session_id=current_session_id,
+                            bridge_dir=bridge_dir,
+                            state=hook_state,
+                            retry_tracker=status_retries,
+                            dedupe=dedupe,
+                            task_subjects=task_subjects,
+                            task_statuses=task_statuses,
+                            task_order=task_order,
+                            # The turn-end edges (Stop→idle / StopFailure→failed)
+                            # carry the turn's response id so ap-web can CLOSE the
+                            # streaming ``activeResponse`` opened by the turn-start
+                            # ``running`` edge. The transcript forwarder ran just
+                            # above, so ``state.current_response_id`` is the active
+                            # turn's id.
+                            response_id=state.current_response_id,
+                        )
                         # Deferred ``/compact``-refusal dismissal: runs AFTER
                         # the hook phase so the ``failed`` post always follows
                         # the ``PreCompact`` ``in_progress`` that raised the
@@ -3785,73 +3689,6 @@ def _compaction_status_for_record(record: ClaudeHookRecord) -> str | None:
     return None
 
 
-async def _publish_turn_identity(
-    *,
-    client: httpx.AsyncClient,
-    session_id: str,
-    response_id: str | None,
-    already_published: str | None,
-    settled_response_ids: tuple[str | None, ...],
-    retry_tracker: _PostRetryTracker,
-) -> tuple[str | None, bool]:
-    """Announce a new turn's id on a ``running`` edge, once per turn.
-
-    Claude surfaces a turn's ``response_id`` to the runner only on its terminal
-    ``Stop`` edge. That is too late to safely correct a cancellation: a delayed
-    ``Stop`` from a superseded turn would be indistinguishable from the current
-    turn's. Publishing the id on a turn-start ``running`` edge lets the runner
-    bind the dispatch to its turn independently — so a later completion is
-    matched to the turn that was cancelled, and a stale one is rejected.
-
-    The identity must reliably reach the runner BEFORE the turn's ``Stop``, or a
-    completion could arrive with no id to match and lose the result. So a
-    transient post failure asks the caller to HOLD terminal delivery this poll
-    (``hold_terminal=True``) and is retried; only a permanent rejection gives up
-    and proceeds (correction then degrades to rejecting an unknown id — the
-    pre-existing limitation, not a hang, and never a false success).
-
-    An already-settled turn is never announced: re-asserting ``running`` for a
-    completed response (e.g. a forwarder restart re-observing it) would falsely
-    reactivate the session with no later idle edge to repair it.
-
-    :param client: Omnigent HTTP client.
-    :param session_id: Omnigent session/conversation id.
-    :param response_id: The active turn's id, or ``None`` when none is known.
-    :param already_published: The id last announced, to avoid re-announcing.
-    :param settled_response_ids: Turn ids already settled (settled +
-        pending-settled); an announcement for one of these is suppressed.
-    :param retry_tracker: Backoff/retry state for the identity post.
-    :returns: ``(published_id, hold_terminal)`` — the id now considered
-        announced, and whether the caller should defer the turn's terminal edge
-        until a later poll establishes the identity.
-    """
-    if response_id is None or response_id == already_published:
-        return already_published, False
-    if response_id in settled_response_ids:
-        # The turn already ended; treat as announced so we neither re-assert
-        # ``running`` nor hold its (already-consumed) terminal edge.
-        return response_id, False
-    retry_key = f"turn-identity:{response_id}"
-    if retry_tracker.retry_delay_s(retry_key) is not None:
-        return already_published, True  # backing off from a prior failure: hold
-    try:
-        await post_external_session_status(
-            client,
-            session_id=session_id,
-            status="running",
-            response_id=response_id,
-        )
-    except httpx.HTTPError as exc:
-        decision = retry_tracker.record_failure(retry_key, exc, session_id=session_id)
-        if decision.exhausted:
-            # Permanent rejection: give up on the hint and proceed so the turn's
-            # terminal edge is never held forever.
-            return response_id, False
-        return already_published, True  # transient: hold the terminal edge, retry
-    retry_tracker.clear(retry_key)
-    return response_id, False
-
-
 async def _forward_available_status_events(
     *,
     client: httpx.AsyncClient,
@@ -4179,18 +4016,12 @@ async def _forward_available_status_events(
         retry_key = f"hook:{record.event_cursor}:{record.byte_offset}:{status}"
         if retry_tracker.retry_delay_s(retry_key) is not None:
             return durable
-        # Pin the turn id to this turn-end edge on its first attempt. A ``Stop``
-        # whose post fails and is retried on a later poll would otherwise adopt
-        # ``state.current_response_id`` after a newer turn advanced it, letting
-        # the runner mis-attribute the completion to that newer turn and overturn
-        # its cancellation. The pin keeps the retry bound to the turn that ended.
-        edge_response_id = retry_tracker.pin_value(retry_key, response_id)
         try:
             await post_external_session_status(
                 client,
                 session_id=session_id,
                 status=status,
-                response_id=edge_response_id,
+                response_id=response_id,
                 # The ``Stop`` hook fires exactly once per finished turn and
                 # never on an interrupt, so its ``idle`` edge is a confirmed
                 # turn completion, unlike quiescence-derived idles.
@@ -4229,7 +4060,7 @@ async def _forward_available_status_events(
                         client,
                         session_id=session_id,
                         reason=f"hook status {status} rejected",
-                        response_id=edge_response_id,
+                        response_id=response_id,
                     )
                 durable = next_durable
                 await _write_hook_state_async(bridge_dir, durable)
@@ -4250,11 +4081,11 @@ async def _forward_available_status_events(
             )
             return durable
         retry_tracker.clear(retry_key)
-        if edge_response_id is not None:
+        if response_id is not None:
             # The turn ended — record its id as a pending settle so a later
             # assistant entry still inheriting it is marked as a scheduled
             # wake (see _promote_pending_settle and the bridge parser).
-            dedupe.pending_settled_response_id = edge_response_id
+            dedupe.pending_settled_response_id = response_id
         durable = next_durable
         await _write_hook_state_async(bridge_dir, durable)
     durable = HookForwardState(

@@ -80,7 +80,6 @@ class MarkSubagentTerminalAndWake(Protocol):
         *,
         status: str,
         output: str | None,
-        cancel_confirmed: bool = False,
         only_if_work_id: str | None = None,
     ) -> SubagentDeliveryAck:
         raise NotImplementedError
@@ -605,15 +604,12 @@ class NativeInterruptRunner:
         await _cancel_auto_forwarder_task(conv_id)
         self._publish_event(conv_id, {"type": "session.status", "status": "idle"})
         # The kill is confirmed, so this ``cancelled`` is truthful and settles
-        # any interrupt still waiting on its outcome. ``cancel_confirmed`` marks
-        # it definitive: a later (possibly stale, reused-session) completion
-        # must not resurrect the session the operator killed.
+        # any interrupt still waiting on its outcome.
         self.clear_pending_interrupt(conv_id)
         delivery_ack = self._mark_subagent_terminal_and_wake(
             conv_id,
             status="cancelled",
             output=None,
-            cancel_confirmed=True,
         )
         if not delivery_ack.delivered and (
             delivery_ack.entry is not None or conv_id in self._session_sub_agent_names
@@ -680,15 +676,12 @@ class NativeInterruptRunner:
         await self._teardown_session_terminals(conv_id)
         self._publish_event(conv_id, {"type": "session.status", "status": "idle"})
         # The kill is confirmed, so this ``cancelled`` is truthful and settles
-        # any interrupt still waiting on its outcome. ``cancel_confirmed`` marks
-        # it definitive: a later (possibly stale, reused-session) completion
-        # must not resurrect the session the operator killed.
+        # any interrupt still waiting on its outcome.
         self.clear_pending_interrupt(conv_id)
         delivery_ack = self._mark_subagent_terminal_and_wake(
             conv_id,
             status="cancelled",
             output=None,
-            cancel_confirmed=True,
         )
         if not delivery_ack.delivered and (
             delivery_ack.entry is not None or conv_id in self._session_sub_agent_names

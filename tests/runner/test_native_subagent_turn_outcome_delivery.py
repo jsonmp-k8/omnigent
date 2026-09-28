@@ -11,7 +11,8 @@ the agent was confirmed stopped. These tests pin the corrected contract:
 - Harnesses without that plumbing keep the legacy idle -> completed mapping.
 - An interrupt defers the parent wake; the next unconfirmed idle settles the
   dispatch as ``cancelled`` while preserving the output it carried.
-- A harness-confirmed completion corrects an already-delivered ``cancelled``.
+- A delayed cancel bound to an old dispatch never settles a newer send that
+  reused the child session.
 
 The status tests drive the runner's real HTTP event route -- the same
 ``external_session_status`` POSTs the native forwarders emit -- so they
@@ -144,53 +145,6 @@ async def test_turn_completed_idle_delivers_completed_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_grace_timer_cancel_is_corrected_by_survivor_via_turn_start_identity() -> None:
-    """A survivor's result is preserved after the grace-timer cancel.
-
-    The regression Polly flagged: the fallback cancel carries no turn id, and
-    claude only surfaces one on its terminal ``Stop``. Turn identity must be
-    established BEFORE the timeout so the later confirmed completion can be
-    matched to the cancelled turn — otherwise the survivor's result is lost.
-
-    Here the forwarder's turn-start ``running`` edge publishes the turn id
-    (``resp1``); the grace-timer cancel is delivered with no id (as the real
-    fallback does); the survivor's confirmed ``Stop`` carries ``resp1`` and, on
-    a positive same-turn match, corrects the cancellation and reaches the parent.
-    """
-    rig = _Rig("claude-native")
-    try:
-        async with _runner_client(rig.app) as client:
-            await rig.create_child_session(client)
-            # Turn-start identity (forwarder's running edge) — established BEFORE
-            # any cancel, independently of the terminal edge.
-            resp = await rig.post_status(client, {"status": "running", "response_id": "resp1"})
-            assert resp.status_code == 204, resp.text
-            assert rig.runner_app.get_subagent_work(rig.child_id).turn_response_id == "resp1"
-
-            # The grace-timer fallback fires with NO turn id (as it really does).
-            rig.runner_app.mark_subagent_work_terminal(
-                rig.child_id, status="cancelled", output=None
-            )
-
-            # The child survived the interrupt and finished: its confirmed Stop
-            # carries the same turn id, so the cancellation is corrected.
-            resp = await rig.post_status(
-                client,
-                {
-                    "status": "idle",
-                    "turn_completed": True,
-                    "response_id": "resp1",
-                    "output": "the verdict",
-                },
-            )
-            assert resp.status_code == 204, resp.text
-        delivered = [(item["status"], item["output"]) for item in rig.drained()]
-        assert delivered == [("cancelled", ""), ("completed", "the verdict")]
-    finally:
-        rig.close()
-
-
-@pytest.mark.asyncio
 async def test_quiescence_idle_for_legacy_native_harness_still_completes() -> None:
     """Harnesses without turn-outcome plumbing keep the idle -> completed mapping.
 
@@ -301,60 +255,6 @@ async def test_settled_outcome_is_redelivered_on_retried_quiescence_idle(
         rig.close()
 
 
-@pytest.mark.asyncio
-async def test_confirmed_completion_corrects_delivered_cancelled() -> None:
-    """A harness-confirmed same-turn completion replaces a delivered ``cancelled``.
-
-    The grace-timer ``cancelled`` is a fallback, not a fact; when the agent
-    survives and its forwarder later confirms the finished turn, the real
-    result must be re-delivered rather than discarded as ALREADY_DELIVERED.
-    The correction requires a POSITIVE same-turn match: the cancellation records
-    its turn id, and the completion carries the same one. An unconfirmed
-    completion must keep losing to the delivered status.
-    """
-    from omnigent.runner import app as runner_app
-
-    parent_id = uuid.uuid4().hex
-    child_id = uuid.uuid4().hex
-    inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-    runner_app._session_inboxes_ref[parent_id] = inbox
-    runner_app.register_subagent_work(
-        parent_session_id=parent_id,
-        child_session_id=child_id,
-        agent="researcher",
-        title="cite-check",
-    )
-    try:
-        # The interrupt-guess cancel records the turn it settled (``resp1``).
-        ack = runner_app.mark_subagent_work_terminal(
-            child_id, status="cancelled", output=None, response_id="resp1"
-        )
-        assert ack.delivered_now
-
-        unconfirmed = runner_app.mark_subagent_work_terminal(
-            child_id, status="completed", output="stale guess", response_id="resp1"
-        )
-        assert not unconfirmed.delivered_now
-
-        confirmed = runner_app.mark_subagent_work_terminal(
-            child_id,
-            status="completed",
-            output="the verdict",
-            turn_confirmed=True,
-            response_id="resp1",
-        )
-        assert confirmed.delivered_now
-
-        statuses = []
-        while not inbox.empty():
-            item = inbox.get_nowait()
-            statuses.append((item["status"], item["output"]))
-        assert statuses == [("cancelled", ""), ("completed", "the verdict")]
-    finally:
-        runner_app.unregister_subagent_work(child_id)
-        runner_app._session_inboxes_ref.pop(parent_id, None)
-
-
 async def test_grace_timer_cancel_does_not_settle_reused_dispatch() -> None:
     """A delayed cancel bound to an old dispatch never settles a newer send.
 
@@ -396,7 +296,7 @@ async def test_grace_timer_cancel_does_not_settle_reused_dispatch() -> None:
 
         # B completes normally and reaches the parent.
         done = runner_app.mark_subagent_work_terminal(
-            child_id, status="completed", output="B result", turn_confirmed=True
+            child_id, status="completed", output="B result"
         )
         assert done.delivered_now
 
@@ -404,190 +304,6 @@ async def test_grace_timer_cancel_does_not_settle_reused_dispatch() -> None:
         while not inbox.empty():
             statuses.append(inbox.get_nowait()["status"])
         assert statuses == ["completed"]
-    finally:
-        runner_app.unregister_subagent_work(child_id)
-        runner_app._session_inboxes_ref.pop(parent_id, None)
-
-
-async def test_confirmed_hard_stop_cancel_survives_stale_completion() -> None:
-    """A prior turn's retried completion cannot resurrect a hard-stopped reuse.
-
-    The regression: turn A finishes and is delivered; the child session is
-    reused for turn B, which is hard-stopped (a confirmed kill, carrying no
-    turn id — exactly what ``_claude_stop`` reports). When A's lost-then-retried
-    ``Stop`` replays, the confirmed-cancel provenance must keep B cancelled and
-    deliver no second completion — even though, with B's turn id unknown, the
-    turn-correlation guard alone could not reject it. The operator's kill is
-    definitive.
-    """
-    from omnigent.runner import app as runner_app
-
-    parent_id = uuid.uuid4().hex
-    child_id = uuid.uuid4().hex
-    inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-    runner_app._session_inboxes_ref[parent_id] = inbox
-    try:
-        # Turn A completes and is delivered.
-        runner_app.register_subagent_work(
-            parent_session_id=parent_id,
-            child_session_id=child_id,
-            agent="researcher",
-            title="turn-a",
-        )
-        a_done = runner_app.mark_subagent_work_terminal(
-            child_id,
-            status="completed",
-            output="A result",
-            turn_confirmed=True,
-            response_id="resp_A",
-        )
-        assert a_done.delivered_now
-
-        # The parent reuses the child session for turn B, then hard-stops it.
-        # The hard stop carries no turn id, so only provenance can protect it.
-        runner_app.register_subagent_work(
-            parent_session_id=parent_id,
-            child_session_id=child_id,
-            agent="researcher",
-            title="turn-b",
-        )
-        b_stopped = runner_app.mark_subagent_work_terminal(
-            child_id,
-            status="cancelled",
-            output=None,
-            cancel_confirmed=True,
-        )
-        assert b_stopped.delivered_now
-
-        # A's lost ``Stop`` is retried by the forwarder; it must not overturn B.
-        replay = runner_app.mark_subagent_work_terminal(
-            child_id,
-            status="completed",
-            output="A result",
-            turn_confirmed=True,
-            response_id="resp_A",
-        )
-        assert not replay.delivered_now
-        entry = runner_app.get_subagent_work(child_id)
-        assert entry is not None and entry.status == "cancelled"
-
-        statuses = []
-        while not inbox.empty():
-            item = inbox.get_nowait()
-            statuses.append((item["status"], item["output"]))
-        assert statuses == [("completed", "A result"), ("cancelled", "")]
-    finally:
-        runner_app.unregister_subagent_work(child_id)
-        runner_app._session_inboxes_ref.pop(parent_id, None)
-
-
-async def test_confirmed_hard_stop_after_delivered_cancel_blocks_later_completion() -> None:
-    """A confirmed hard stop makes an already-delivered cancel definitive.
-
-    A fallback (unconfirmed) cancel is delivered first; then the operator's
-    confirmed hard stop lands. Even though there is nothing new to deliver, the
-    provenance must become sticky so a later same-turn Stop cannot overturn the
-    kill.
-    """
-    from omnigent.runner import app as runner_app
-
-    parent_id = uuid.uuid4().hex
-    child_id = uuid.uuid4().hex
-    inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-    runner_app._session_inboxes_ref[parent_id] = inbox
-    runner_app.register_subagent_work(
-        parent_session_id=parent_id,
-        child_session_id=child_id,
-        agent="researcher",
-        title="cite-check",
-    )
-    try:
-        # Fallback (unconfirmed) cancel, recording the turn id.
-        first = runner_app.mark_subagent_work_terminal(
-            child_id, status="cancelled", output=None, response_id="resp1"
-        )
-        assert first.delivered_now
-
-        # The operator's confirmed hard stop lands after delivery.
-        runner_app.mark_subagent_work_terminal(
-            child_id, status="cancelled", output=None, cancel_confirmed=True
-        )
-        assert runner_app.get_subagent_work(child_id).cancel_confirmed is True
-
-        # A delayed same-turn Stop must NOT resurrect the killed session.
-        replay = runner_app.mark_subagent_work_terminal(
-            child_id, status="completed", output="late", turn_confirmed=True, response_id="resp1"
-        )
-        assert not replay.delivered_now
-        assert runner_app.get_subagent_work(child_id).status == "cancelled"
-
-        statuses = []
-        while not inbox.empty():
-            statuses.append(inbox.get_nowait()["status"])
-        assert statuses == ["cancelled"]
-    finally:
-        runner_app.unregister_subagent_work(child_id)
-        runner_app._session_inboxes_ref.pop(parent_id, None)
-
-
-async def test_stale_turn_completion_does_not_overturn_unconfirmed_cancel() -> None:
-    """A completion for a superseded turn cannot correct a reuse's cancel.
-
-    Even when a cancellation is only an unconfirmed guess (so a same-turn
-    survivor completion still legitimately corrects it), a confirmed completion
-    carrying a *different* turn's ``response_id`` — a prior turn's retried
-    ``Stop`` after the session was reused — must not overturn it. A same-turn
-    completion still does.
-    """
-    from omnigent.runner import app as runner_app
-
-    parent_id = uuid.uuid4().hex
-    child_id = uuid.uuid4().hex
-    inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-    runner_app._session_inboxes_ref[parent_id] = inbox
-    runner_app.register_subagent_work(
-        parent_session_id=parent_id,
-        child_session_id=child_id,
-        agent="researcher",
-        title="turn-b",
-    )
-    try:
-        # Turn B is interrupted and settles as an unconfirmed cancel; the edge
-        # binds the dispatch to B's turn id.
-        b_cancel = runner_app.mark_subagent_work_terminal(
-            child_id, status="cancelled", output=None, response_id="resp_B"
-        )
-        assert b_cancel.delivered_now
-
-        # A prior turn's retried confirmed completion (resp_A) must be rejected.
-        stale = runner_app.mark_subagent_work_terminal(
-            child_id,
-            status="completed",
-            output="A result",
-            turn_confirmed=True,
-            response_id="resp_A",
-        )
-        assert not stale.delivered_now
-        entry = runner_app.get_subagent_work(child_id)
-        assert entry is not None and entry.status == "cancelled"
-
-        # B's own survivor completion (same turn) still corrects the guess.
-        survivor = runner_app.mark_subagent_work_terminal(
-            child_id,
-            status="completed",
-            output="B result",
-            turn_confirmed=True,
-            response_id="resp_B",
-        )
-        assert survivor.delivered_now
-        entry = runner_app.get_subagent_work(child_id)
-        assert entry is not None and entry.status == "completed"
-
-        statuses = []
-        while not inbox.empty():
-            item = inbox.get_nowait()
-            statuses.append((item["status"], item["output"]))
-        assert statuses == [("cancelled", ""), ("completed", "B result")]
     finally:
         runner_app.unregister_subagent_work(child_id)
         runner_app._session_inboxes_ref.pop(parent_id, None)
