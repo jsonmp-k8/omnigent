@@ -256,6 +256,7 @@ import {
   writeBackgroundSessionTitlesEnabled,
 } from "@/lib/backgroundSessionTitlesPreferences";
 import { SettingsCustomizeSection } from "./settings/SettingsCustomizeSection";
+import { ReviewImportsPanel } from "@/components/onboarding/HostImportReview";
 
 // Admin-only management surfaces, rendered as the Members / Policies settings
 // sub-categories. Visible to admins in all modes (accounts, OIDC, single-user).
@@ -2592,6 +2593,15 @@ function ImportSection() {
         <h2 className="text-ui font-medium">Import from a machine</h2>
         <div className="rounded-xl border border-border bg-card p-4">
           <ImportSessionsPanel />
+        </div>
+      </div>
+      <div className="mt-8 flex flex-col gap-3">
+        <h2 className="text-ui font-medium">Harness imports</h2>
+        <p className="-mt-2 text-ui text-muted-foreground">
+          See the logins, MCP servers, skills, and plugins each machine's harnesses carry over.
+        </p>
+        <div className="rounded-xl border border-border bg-card p-4">
+          <ReviewImportsPanel />
         </div>
       </div>
     </Section>

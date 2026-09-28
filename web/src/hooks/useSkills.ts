@@ -22,7 +22,10 @@ export type SkillsTarget =
     };
 
 /** Both composers receive complete catalogs directly from host-backed requests. */
-async function fetchSkills(target: SkillsTarget, signal: AbortSignal): Promise<SkillSummary[]> {
+export async function fetchSkills(
+  target: SkillsTarget,
+  signal: AbortSignal,
+): Promise<SkillSummary[]> {
   const params =
     target.sessionId !== undefined
       ? new URLSearchParams({ session_id: target.sessionId })
@@ -33,6 +36,11 @@ async function fetchSkills(target: SkillsTarget, signal: AbortSignal): Promise<S
   const body = (await response.json()) as { skills?: SkillSummary[] };
   if (!Array.isArray(body.skills)) throw new Error("Invalid host skills response");
   return body.skills;
+}
+
+/** Shared cache key, so other host-scoped readers reuse the composer's catalogs. */
+export function skillsQueryKey(target: SkillsTarget | null) {
+  return ["skills", target?.sessionId, target] as const;
 }
 
 interface SkillsOptions {
@@ -46,7 +54,7 @@ interface SkillsOptions {
 export function useSkills({ target, enabled = true, starting = false }: SkillsOptions) {
   const available = enabled && target !== null;
   const query = useQuery({
-    queryKey: ["skills", target?.sessionId, target],
+    queryKey: skillsQueryKey(target),
     queryFn: available ? ({ signal }) => fetchSkills(target, signal) : skipToken,
     enabled: available,
     staleTime: 30_000,
