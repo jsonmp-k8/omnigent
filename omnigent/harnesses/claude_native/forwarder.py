@@ -961,6 +961,25 @@ class _PostRetryTracker:
         self._base_delay_s = max(0.0, base_delay_s)
         self._max_delay_s = max(0.0, max_delay_s)
         self._entries: dict[str, _PostRetryEntry] = {}
+        self._pinned_values: dict[str, str | None] = {}
+
+    def pin_value(self, key: str, value: str | None) -> str | None:
+        """Bind ``value`` to ``key`` on first sight; return the pinned value after.
+
+        Keeps a retried post's turn ``response_id`` tied to the turn that
+        produced the event even after later polls advance the forwarder's
+        current turn — so a delayed ``Stop`` retry cannot be re-attributed to a
+        newer turn (which would let it overturn that turn's cancellation on the
+        runner). Dropped by :meth:`clear` and on exhaustion, once the post is no
+        longer retried.
+
+        :param key: Stable retry key, e.g. ``"hook:2:0:idle"``.
+        :param value: Value to pin on the first call for ``key``.
+        :returns: The value pinned on the first call for ``key``.
+        """
+        if key not in self._pinned_values:
+            self._pinned_values[key] = value
+        return self._pinned_values[key]
 
     def retry_delay_s(self, key: str) -> float | None:
         """
@@ -990,6 +1009,7 @@ class _PostRetryTracker:
         :returns: None.
         """
         self._entries.pop(key, None)
+        self._pinned_values.pop(key, None)
         # A cleared key means the post got through (or was ambiguously
         # delivered); reset process-level forward-sync health (#1120).
         _note_forward_success()
@@ -1027,6 +1047,7 @@ class _PostRetryTracker:
         )
         if give_up:
             self._entries.pop(key, None)
+            self._pinned_values.pop(key, None)
             return _PostRetryDecision(
                 attempts=entry.attempts,
                 delay_s=0.0,
@@ -4017,12 +4038,18 @@ async def _forward_available_status_events(
         retry_key = f"hook:{record.event_cursor}:{record.byte_offset}:{status}"
         if retry_tracker.retry_delay_s(retry_key) is not None:
             return durable
+        # Pin the turn id to this turn-end edge on its first attempt. A ``Stop``
+        # whose post fails and is retried on a later poll would otherwise adopt
+        # ``state.current_response_id`` after a newer turn advanced it, letting
+        # the runner mis-attribute the completion to that newer turn and overturn
+        # its cancellation. The pin keeps the retry bound to the turn that ended.
+        edge_response_id = retry_tracker.pin_value(retry_key, response_id)
         try:
             await post_external_session_status(
                 client,
                 session_id=session_id,
                 status=status,
-                response_id=response_id,
+                response_id=edge_response_id,
                 # The ``Stop`` hook fires exactly once per finished turn and
                 # never on an interrupt, so its ``idle`` edge is a confirmed
                 # turn completion, unlike quiescence-derived idles.
@@ -4061,7 +4088,7 @@ async def _forward_available_status_events(
                         client,
                         session_id=session_id,
                         reason=f"hook status {status} rejected",
-                        response_id=response_id,
+                        response_id=edge_response_id,
                     )
                 durable = next_durable
                 await _write_hook_state_async(bridge_dir, durable)
@@ -4082,11 +4109,11 @@ async def _forward_available_status_events(
             )
             return durable
         retry_tracker.clear(retry_key)
-        if response_id is not None:
+        if edge_response_id is not None:
             # The turn ended — record its id as a pending settle so a later
             # assistant entry still inheriting it is marked as a scheduled
             # wake (see _promote_pending_settle and the bridge parser).
-            dedupe.pending_settled_response_id = response_id
+            dedupe.pending_settled_response_id = edge_response_id
         durable = next_durable
         await _write_hook_state_async(bridge_dir, durable)
     durable = HookForwardState(

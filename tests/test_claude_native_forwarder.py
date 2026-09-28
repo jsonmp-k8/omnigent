@@ -4083,6 +4083,78 @@ async def test_forwarder_drops_poison_item_after_bounded_permanent_retries(
 
 
 @pytest.mark.asyncio
+async def test_stop_edge_retry_keeps_original_turn_id(tmp_path: Path) -> None:
+    """A retried ``Stop`` edge keeps the turn id it fired for, not a newer one.
+
+    Regression: turn A's ``Stop`` post fails and is held for retry; before the
+    retry lands, a later turn advances the forwarder's ``current_response_id``.
+    The retried edge must still carry turn A's id — otherwise the runner
+    attributes A's completion to the newer turn and can overturn that turn's
+    cancellation, turning a stopped dispatch into a false success. The turn id
+    is pinned to the edge on its first attempt so the retry preserves it.
+    """
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text("", encoding="utf-8")
+    record_hook_event(
+        bridge_dir,
+        {
+            "hook_event_name": "SessionStart",
+            "session_id": "claude-session",
+            "transcript_path": str(transcript_path),
+        },
+    )
+    record_hook_event(bridge_dir, {"hook_event_name": "Stop", "session_id": "claude-session"})
+
+    retry_tracker = forwarder._PostRetryTracker(base_delay_s=0.0, max_delay_s=0.0)
+    status_posts: list[dict[str, Any]] = []
+
+    def _handle_request(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        assert isinstance(payload, dict)
+        if payload["type"] != "external_session_status":
+            return httpx.Response(202, json={})
+        status_posts.append(payload["data"])
+        idle_attempts = sum(1 for p in status_posts if p.get("status") == "idle")
+        # Fail the first idle (Stop) attempt so it is held for retry.
+        if idle_attempts == 1:
+            return httpx.Response(503, json={"error": "unavailable"})
+        return httpx.Response(202, json={})
+
+    transport = httpx.MockTransport(_handle_request)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        dedupe = forwarder._ForwardDedupeState()
+        state = forwarder.HookForwardState(event_cursor=0, byte_offset=0)
+
+        async def _poll(
+            current: forwarder.HookForwardState, response_id: str
+        ) -> forwarder.HookForwardState:
+            return await forwarder._forward_available_status_events(
+                client=client,
+                session_id="conv_abc",
+                bridge_dir=bridge_dir,
+                state=current,
+                retry_tracker=retry_tracker,
+                dedupe=dedupe,
+                task_subjects={},
+                task_statuses={},
+                task_order=[],
+                response_id=response_id,
+            )
+
+        # Poll 1: the current turn is A; the Stop idle edge fails and is held.
+        state = await _poll(state, "resp_A")
+        # Poll 2 (retry): a newer turn B is now current, but the retried Stop
+        # must still carry turn A's id.
+        state = await _poll(state, "resp_B")
+
+    idle_posts = [p for p in status_posts if p.get("status") == "idle"]
+    assert len(idle_posts) == 2, "the failed Stop edge must be retried"
+    assert all(p["response_id"] == "resp_A" for p in idle_posts), idle_posts
+    assert all(p["turn_completed"] is True for p in idle_posts)
+
+
+@pytest.mark.asyncio
 async def test_forwarder_retries_user_item_on_ambiguous_post_failure(tmp_path: Path) -> None:
     """
     An ambiguous POST failure holds the cursor and re-posts the item.
