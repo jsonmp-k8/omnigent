@@ -53,6 +53,15 @@ function isLocal(url: string): boolean {
   return LOCAL_HOST_RE.test(url);
 }
 
+// The CLI's local-server port (omnigent/host/local_server.py _DEFAULT_LOCAL_PORT).
+const LOCAL_SERVER_PORT = "6767";
+
+/** The CLI-managed local install (loopback on its port), which "Start Omnigent"
+ *  boots. Other loopback ports are user-run servers and connect directly. */
+export function isLocalInstall(url: string): boolean {
+  return isLocal(url) && new URL(url).port === LOCAL_SERVER_PORT;
+}
+
 /** Card title: local servers read as "Local installation (host)". */
 function serverTitle(url: string): string {
   return isLocal(url) ? `Local installation (${displayName(url)})` : displayName(url);
@@ -129,6 +138,8 @@ export function ServerSelectStep({
   recentServers,
   managedServers,
   installed,
+  localServerRunning,
+  startInAdd,
   onBack,
   onConnect,
   onRemove,
@@ -140,8 +151,12 @@ export function ServerSelectStep({
   error?: string;
   recentServers: string[];
   managedServers: string[];
-  /** Returning user (CLI installed) → "Open Omnigent"; new → "Install Omnigent". */
+  /** CLI installed → "Open"/"Start Omnigent"; missing → "Install Omnigent". */
   installed?: boolean;
+  /** Local server already up → its row reads "Open", else "Start Omnigent". */
+  localServerRunning?: boolean;
+  /** Open on the URL-input ("add") view even when servers are listed. */
+  startInAdd?: boolean;
   /** Reports whether the URL-input ("add") view is showing, so the parent can
    *  swap the panel band (hero icons) for it. */
   onAddModeChange?: (addMode: boolean) => void;
@@ -179,7 +194,12 @@ export function ServerSelectStep({
   const [expandedUrl, setExpandedUrl] = useState<string | null>(null);
   // "list": pick from existing servers (with an "Add server" button). "add":
   // the URL-input view (heading + input + benefits). Empty list → start in add.
-  const [mode, setMode] = useState<"list" | "add">(listed.length === 0 ? "add" : "list");
+  const [mode, setMode] = useState<"list" | "add">(
+    startInAdd || listed.length === 0 ? "add" : "list",
+  );
+  // Back from the add view returns to the list only when it was opened from
+  // there; otherwise (empty list, or opened directly) it exits the step.
+  const [addFromList, setAddFromList] = useState(false);
 
   // Tell the parent when the add (URL-input) view is showing, so it can swap the
   // panel band to the hero icons.
@@ -245,6 +265,8 @@ export function ServerSelectStep({
 
   // Session-added servers are just recents the user hasn't connected to yet.
   const recentSection = [...addedServers, ...recentServers];
+  // Joining the stopped local install boots it first → "Start", not "Open".
+  const startsLocal = selected !== null && !localServerRunning && isLocalInstall(selected);
 
   const renderRow = (url: string) => {
     const isSelected = selected === url;
@@ -414,6 +436,7 @@ export function ServerSelectStep({
                   type="button"
                   onClick={() => {
                     setSelected(null);
+                    setAddFromList(true);
                     setMode("add");
                   }}
                   className="flex shrink-0 items-center gap-1 text-base text-muted-foreground hover:text-foreground"
@@ -434,9 +457,7 @@ export function ServerSelectStep({
             <Button
               variant="ghost"
               size="lg"
-              // Back returns to the list when there is one to return to; from
-              // the empty-list add view it exits the step.
-              onClick={() => (listed.length > 0 ? setMode("list") : onBack())}
+              onClick={() => (addFromList ? setMode("list") : onBack())}
             >
               <ArrowLeft className="size-4" />
               Back
@@ -457,8 +478,8 @@ export function ServerSelectStep({
               Back
             </Button>
             <Button disabled={selected === null} onClick={join} size="lg">
-              <InstallActionIcon installed={installed} />
-              {installActionLabel(installed)}
+              <InstallActionIcon installed={installed} startsLocal={startsLocal} />
+              {installActionLabel(installed, startsLocal)}
             </Button>
           </>
         )}

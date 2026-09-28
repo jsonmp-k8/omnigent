@@ -41,22 +41,103 @@ describe("ServerSelectorV2", () => {
     expect(screen.getByText(/starting the local server/i)).toBeInTheDocument();
   });
 
-  it("a returning user (installed) starts on the server list, not the landing", () => {
+  it("a returning user (has recents) starts on the server list, not the landing", () => {
     render(
-      <ServerSelectorV2
-        setup={makeSetup({ installed: true, recentServers: ["https://team.example.com/"] })}
-      />,
+      <ServerSelectorV2 setup={makeSetup({ recentServers: ["https://team.example.com/"] })} />,
     );
     expect(screen.getByText(/^Recents$/)).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Meet Omnigent" })).not.toBeInTheDocument();
   });
 
-  it("Join your team advances to the server-select step", () => {
+  it("an installed CLI alone doesn't make a returning user", () => {
+    render(<ServerSelectorV2 setup={makeSetup({ installed: true })} />);
+    expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument();
+  });
+
+  it("a returning MDM user (no recents — presets are excluded) starts on the preset list", () => {
     render(
-      <ServerSelectorV2 setup={makeSetup({ recentServers: ["https://team.example.com/"] })} />,
+      <ServerSelectorV2
+        setup={makeSetup({
+          connectedBefore: true,
+          managedServers: ["https://field-eng-omni.aws.databricksapps.com"],
+        })}
+      />,
     );
+    expect(screen.getByText(/preset \(by your organization\)/i)).toBeInTheDocument();
+  });
+
+  it("a returning user who cleared every server starts on the landing", () => {
+    render(<ServerSelectorV2 setup={makeSetup({ connectedBefore: true })} />);
+    expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument();
+  });
+
+  it("Join your team advances to the server-select step", () => {
+    render(<ServerSelectorV2 setup={makeSetup()} />);
     fireEvent.click(screen.getByRole("button", { name: /join your team/i }));
-    expect(screen.getByText(/^Recents$/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Server URL")).toBeInTheDocument();
+  });
+
+  it("the stopped local install reads 'Start Omnigent' and boots the local server", () => {
+    const onConnect = vi.fn().mockResolvedValue({});
+    render(
+      <ServerSelectorV2
+        setup={makeSetup({ installed: true, recentServers: ["http://localhost:6767/"], onConnect })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Start Omnigent" }));
+    expect(screen.getByText(/starting the local server/i)).toBeInTheDocument();
+    expect(onConnect).not.toHaveBeenCalled();
+  });
+
+  it("a running local server reads 'Open Omnigent' and connects directly", () => {
+    const onConnect = vi.fn().mockResolvedValue({});
+    render(
+      <ServerSelectorV2
+        setup={makeSetup({
+          installed: true,
+          localServerRunning: true,
+          recentServers: ["http://localhost:6767/"],
+          onConnect,
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" }));
+    expect(onConnect).toHaveBeenCalledWith("http://localhost:6767/");
+  });
+
+  it("a user-run server on another loopback port connects directly", () => {
+    const onConnect = vi.fn().mockResolvedValue({});
+    render(
+      <ServerSelectorV2
+        setup={makeSetup({ installed: true, recentServers: ["http://localhost:8000/"], onConnect })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" }));
+    expect(onConnect).toHaveBeenCalledWith("http://localhost:8000/");
+  });
+
+  it("the local intro reads 'Start' when stopped and 'Open' when running", () => {
+    const { unmount } = render(<ServerSelectorV2 setup={makeSetup({ installed: true })} />);
+    fireEvent.click(screen.getByRole("button", { name: /get started locally/i }));
+    expect(screen.getByRole("button", { name: "Start Omnigent" })).toBeInTheDocument();
+    unmount();
+    render(<ServerSelectorV2 setup={makeSetup({ installed: true, localServerRunning: true })} />);
+    fireEvent.click(screen.getByRole("button", { name: /get started locally/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Open Omnigent" }));
+    expect(screen.getByText(/connecting to the local server/i)).toBeInTheDocument();
+  });
+
+  it("'Add server…' in the preset dropdown opens the URL input; Back returns to the landing", () => {
+    render(
+      <ServerSelectorV2
+        setup={makeSetup({ managedServers: ["https://field-eng-omni.aws.databricksapps.com"] })}
+      />,
+    );
+    fireEvent.pointerDown(screen.getByRole("button", { name: /choose team url/i }), { button: 0 });
+    fireEvent.click(screen.getByRole("menuitem", { name: /add server/i }));
+    expect(screen.getByLabelText("Server URL")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(screen.getByRole("heading", { name: "Meet Omnigent" })).toBeInTheDocument();
   });
 
   it("picking a preset server from the landing shows its detail step", () => {
@@ -80,6 +161,8 @@ describe("ServerSelectorV2", () => {
         })}
       />,
     );
+    // Returning (has recents) → opens on the list; Back reaches the landing.
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
     fireEvent.click(screen.getByRole("button", { name: /join your team \(field-eng-omni\)/i }));
     fireEvent.click(screen.getByRole("button", { name: /show all servers/i }));
     // Now on the full list: both sections present, so recents are reachable.
