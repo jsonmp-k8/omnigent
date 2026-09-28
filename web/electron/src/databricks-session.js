@@ -19,7 +19,7 @@ const {
 } = require("./databricks-oauth");
 const { parseAccountFromToken, listRunningWorkspaces } = require("./databricks-account");
 const { isDatabricksOAuthServerUrl } = require("./url");
-const { cookieMatchesOrigin } = require("./databricks-auth");
+const { cookieMatchesOrigin, isTransientRenewalError } = require("./databricks-auth");
 
 const SESSION_CREATE_PATH = "/auth/session/create";
 // Bound on the session-create request so a stalled socket can't hang connect.
@@ -81,8 +81,10 @@ async function ensureDatabricksSession(
       });
       console.log("[omnigent] databricks session: connected with stored credentials", { origin });
       return restored;
-    } catch {
+    } catch (error) {
       signal?.throwIfAborted();
+      // An unreachable workspace can't finish a browser sign-in either.
+      if (isTransientRenewalError(error)) throw error;
       // The token and session modules already logged the underlying failure.
       console.log("[omnigent] databricks session: stored credentials unusable; signing in", {
         origin,
