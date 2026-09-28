@@ -35,6 +35,7 @@ from omnigent.server.bundles import content_bundle_location, validate_agent_bund
 from omnigent.server.routes._auth_helpers import require_user as _require_user
 from omnigent.server.routes._origin import require_trusted_origin
 from omnigent.server.schemas import AgentObject, MCPServerSummary, PaginatedList, SkillSummary
+from omnigent.server.seeded_agents import suppressed_agent_names
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 
@@ -266,6 +267,14 @@ def create_builtin_agents_router(
         first, at most 50 per page and paged with ``after`` only; ``last_id``
         is the last row the server read, which may not be in ``data``.
 
+        Packaged built-ins the deployment suppressed via
+        ``OMNIGENT_SEEDED_AGENTS`` are filtered out. The filter runs after
+        the store page is read, so the cursor stays store-based and
+        ``has_more`` / ``last_id`` remain correct — a filtered page can
+        return fewer than ``limit`` rows, which the paginating client
+        already handles. Suppressing hides a row without deleting it, so a
+        session already bound to one keeps working.
+
         :param request: The incoming FastAPI request (for auth).
         :param limit: Maximum number of agents to return (1-1000; ``scope=user``
             caps it at 50).
@@ -278,8 +287,13 @@ def create_builtin_agents_router(
         user_id = _require_user(request, auth_provider)
         if scope != "user":
             page = agent_store.list(limit=limit, after=after, before=before, order=order)
+            suppressed = suppressed_agent_names()
             return PaginatedList(
-                data=[_to_agent_object(a, agent_cache) for a in page.data],
+                data=[
+                    _to_agent_object(a, agent_cache)
+                    for a in page.data
+                    if a.name not in suppressed
+                ],
                 first_id=page.first_id,
                 last_id=page.last_id,
                 has_more=page.has_more,

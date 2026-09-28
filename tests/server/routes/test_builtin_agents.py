@@ -87,3 +87,37 @@ async def test_builtin_flag_distinguishes_seeded_from_registered(
     by_id = {a["id"]: a for a in resp.json()["data"]}
     assert by_id[seeded_id]["builtin"] is True
     assert by_id[registered_id]["builtin"] is False
+
+
+async def test_suppressed_agents_are_hidden_from_discovery(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """
+    A packaged built-in the deployment suppressed is omitted from the list.
+
+    This is what trims the picker on a deployment whose database was seeded
+    before ``OMNIGENT_SEEDED_AGENTS`` was set: the row is still there (and
+    still bound to any session that used it), but discovery skips it. An
+    operator's own agent is never suppressed, so it keeps its place.
+    """
+    from omnigent.server import seeded_agents
+
+    agent_store = SqlAlchemyAgentStore(db_uri)
+    agent_store.create(builtin_agent_id("polly"), name="polly", bundle_location="test:///p")
+    agent_store.create(
+        builtin_agent_id("house-agent"), name="house-agent", bundle_location="test:///h"
+    )
+
+    seeded_agents.record_suppressed_agents(frozenset({"polly"}))
+    try:
+        resp = await client.get("/v1/agents?limit=100")
+    finally:
+        seeded_agents.record_suppressed_agents(frozenset())
+
+    assert resp.status_code == 200
+    names = [a["name"] for a in resp.json()["data"]]
+    assert "polly" not in names
+    assert "house-agent" in names
+    # Hidden, not deleted — the row (and its cascade-linked history) survives.
+    assert agent_store.get_by_name("polly") is not None
