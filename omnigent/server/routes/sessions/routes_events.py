@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import itertools
+import re
 import secrets
 import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from typing import Any, Literal, cast
 
 import httpx
@@ -272,6 +273,30 @@ _retry_recovery_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
 _retry_recovery_tasks: WorkspaceScopedCache[str, asyncio.Task[dict[str, bool | str]]] = (
     WorkspaceScopedCache()
 )
+
+_compact_tasks: WorkspaceScopedCache[tuple[str, str], asyncio.Task[dict[str, Any]]] = (
+    WorkspaceScopedCache()
+)
+
+
+async def _compact_single_flight(
+    session_id: str, stable_id: str, dispatch: Callable[[], Coroutine[Any, Any, dict[str, Any]]]
+) -> dict[str, Any]:
+    """Share dispatch and receipt persistence even if an HTTP caller disconnects."""
+    key = (session_id, stable_id)
+    task = _compact_tasks.get(key)
+    if task is None:
+        task = asyncio.create_task(dispatch())
+        _compact_tasks[key] = task
+
+        def finished(completed: asyncio.Task[dict[str, Any]]) -> None:
+            _compact_tasks.pop(key, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finished)
+    return await asyncio.shield(task)
+
 
 # POST /events types that arrive per streamed chunk — the harness echoing its
 # own live output back. Their per-call audit row is pure noise (the content is
@@ -1350,92 +1375,120 @@ def register_events_routes(
             )
             return {"queued": False, "elicitation_id": elicit_id}
         if body.type == _COMPACT_TYPE:
-
-            async def record_compact() -> dict[str, Any]:
-                receipt = NewConversationItem(
-                    type="slash_command",
-                    response_id=f"compact_{secrets.token_hex(16)}",
-                    data=SlashCommandData(
-                        agent="omnigent",
-                        kind="command",
-                        name="compact",
-                        arguments="",
-                    ),
-                    created_by=created_by,
-                )
-                items = await asyncio.to_thread(conversation_store.append, session_id, [receipt])
-                _publish_external_conversation_item(session_id, items[0])
-                return {"queued": False, "item_id": items[0].id}
-
-            # Unified control dispatch (designs/CLAUDE_NATIVE.md
-            # "Control events dispatch on the runner"): forward /compact
-            # to the bound runner first, regardless of harness. The
-            # runner dispatches by harness — native harnesses inject
-            # /compact into the vendor TUI and return 200 on success or
-            # 5xx on failure. SDK harnesses return 204 (no-op) because
-            # their context is controlled entirely by the vendor harness.
-            # A 4xx/5xx from the runner is surfaced as an error.
-            # TUI budget, not the 5s default: the claude-native handler
-            # drives a delivery-verified slash-command inject, and a timeout
-            # here would surface as an error mid-TUI-compact.
-            runner_result = await _forward_session_change_to_runner(
-                session_id,
-                runner_router,
-                {"type": _COMPACT_TYPE},
-                timeout_s=_TUI_INJECT_FORWARD_TIMEOUT_S,
-            )
-            if runner_result is not None and runner_result.status_code == 200:
-                return await record_compact()
-            if runner_result is not None and runner_result.status_code != 204:
+            stable_id = body.data.get("stable_id", secrets.token_hex(16))
+            if not isinstance(stable_id, str) or not re.fullmatch(r"[0-9a-f]{32}", stable_id):
                 raise OmnigentError(
-                    f"Compaction failed: runner returned {runner_result.status_code}",
-                    code=ErrorCode.INTERNAL_ERROR,
+                    "compact stable_id must be a 32-char lowercase hex string",
+                    code=ErrorCode.INVALID_INPUT,
                 )
-            # ``runner_result is None`` means no runner was reachable. For a
-            # native-terminal session /compact MUST run in the vendor TUI —
-            # falling through to server-side in-process compaction is wrong
-            # (it wouldn't compact the terminal's own context) and errors for
-            # a harness that declares no LLM model. A disconnected-but-wakeable
-            # session (runner_asleep / host_asleep) should wake and compact
-            # just like sending a message does, so relaunch the runner the same
-            # way the message-dispatch path does, then retry the forward once.
-            if runner_result is None and _is_native_terminal_session(conv):
-                conv, woke_client = await _wake_bound_runner_for_control(conv)
-                if woke_client is not None:
-                    # Same TUI-inject budget as the initial forward: a
-                    # just-relaunched runner is the slow case (cold pane, just
-                    # advertised), and the claude-native injector's worst case
-                    # (~16s) exceeds the 5s default — a timeout there returns
-                    # None and would wrongly fall through to the "reconnect"
-                    # 503 while Claude Code is actually compacting.
-                    runner_result = await _forward_session_change_to_runner(
-                        session_id,
-                        runner_router,
-                        {"type": _COMPACT_TYPE},
-                        timeout_s=_TUI_INJECT_FORWARD_TIMEOUT_S,
-                    )
-                    if runner_result is not None and runner_result.status_code == 200:
-                        return await record_compact()
-                    if runner_result is not None and runner_result.status_code != 204:
+
+            async def dispatch_compact(compact_conv: Conversation = conv) -> dict[str, Any]:
+                existing = await asyncio.to_thread(
+                    conversation_store.get_item, session_id, stable_id
+                )
+                if existing is not None:
+                    if not (
+                        isinstance(existing.data, SlashCommandData)
+                        and existing.data.agent == "omnigent"
+                        and existing.data.kind == "command"
+                        and existing.data.name == "compact"
+                    ):
                         raise OmnigentError(
-                            f"Compaction failed: runner returned {runner_result.status_code}",
-                            code=ErrorCode.INTERNAL_ERROR,
+                            "stable_id is already in use", code=ErrorCode.INVALID_INPUT
                         )
-                # Native session that couldn't be woken (host offline) — the
-                # runner is the only thing that can compact it, so surface a
-                # clear "reconnect first" error rather than falling through to
-                # in-process compaction (which fails with a confusing
-                # no-LLM-model message).
-                raise OmnigentError(
-                    "Can't compact this session while its runner is offline. "
-                    "Reconnect the session (send a message to wake it), then "
-                    "run /compact again.",
-                    code=ErrorCode.RUNNER_UNAVAILABLE,
+                    return {"queued": False, "item_id": existing.id}
+
+                async def record_compact() -> dict[str, Any]:
+                    receipt = NewConversationItem(
+                        type="slash_command",
+                        response_id=f"compact_{stable_id}",
+                        stable_id=stable_id,
+                        data=SlashCommandData(
+                            agent="omnigent",
+                            kind="command",
+                            name="compact",
+                            arguments="",
+                        ),
+                        created_by=created_by,
+                    )
+                    items = await asyncio.to_thread(
+                        conversation_store.append, session_id, [receipt]
+                    )
+                    _publish_external_conversation_item(session_id, items[0])
+                    return {"queued": False, "item_id": items[0].id}
+
+                # Unified control dispatch (designs/CLAUDE_NATIVE.md
+                # "Control events dispatch on the runner"): forward /compact
+                # to the bound runner first, regardless of harness. The
+                # runner dispatches by harness — native harnesses inject
+                # /compact into the vendor TUI and return 200 on success or
+                # 5xx on failure. SDK harnesses return 204 (no-op) because
+                # their context is controlled entirely by the vendor harness.
+                # A 4xx/5xx from the runner is surfaced as an error.
+                # TUI budget, not the 5s default: the claude-native handler
+                # drives a delivery-verified slash-command inject, and a timeout
+                # here would surface as an error mid-TUI-compact.
+                runner_result = await _forward_session_change_to_runner(
+                    session_id,
+                    runner_router,
+                    {"type": _COMPACT_TYPE},
+                    timeout_s=_TUI_INJECT_FORWARD_TIMEOUT_S,
                 )
-            raise OmnigentError(
-                "/compact is not available for this session type.",
-                code=ErrorCode.INVALID_INPUT,
-            )
+                if runner_result is not None and runner_result.status_code == 200:
+                    return await record_compact()
+                if runner_result is not None and runner_result.status_code != 204:
+                    raise OmnigentError(
+                        f"Compaction failed: runner returned {runner_result.status_code}",
+                        code=ErrorCode.INTERNAL_ERROR,
+                    )
+                # ``runner_result is None`` means no runner was reachable. For a
+                # native-terminal session /compact MUST run in the vendor TUI —
+                # falling through to server-side in-process compaction is wrong
+                # (it wouldn't compact the terminal's own context) and errors for
+                # a harness that declares no LLM model. A disconnected-but-wakeable
+                # session (runner_asleep / host_asleep) should wake and compact
+                # just like sending a message does, so relaunch the runner the same
+                # way the message-dispatch path does, then retry the forward once.
+                if runner_result is None and _is_native_terminal_session(compact_conv):
+                    compact_conv, woke_client = await _wake_bound_runner_for_control(compact_conv)
+                    if woke_client is not None:
+                        # Same TUI-inject budget as the initial forward: a
+                        # just-relaunched runner is the slow case (cold pane, just
+                        # advertised), and the claude-native injector's worst case
+                        # (~16s) exceeds the 5s default — a timeout there returns
+                        # None and would wrongly fall through to the "reconnect"
+                        # 503 while Claude Code is actually compacting.
+                        runner_result = await _forward_session_change_to_runner(
+                            session_id,
+                            runner_router,
+                            {"type": _COMPACT_TYPE},
+                            timeout_s=_TUI_INJECT_FORWARD_TIMEOUT_S,
+                        )
+                        if runner_result is not None and runner_result.status_code == 200:
+                            return await record_compact()
+                        if runner_result is not None and runner_result.status_code != 204:
+                            raise OmnigentError(
+                                f"Compaction failed: runner returned {runner_result.status_code}",
+                                code=ErrorCode.INTERNAL_ERROR,
+                            )
+                    # Native session that couldn't be woken (host offline) — the
+                    # runner is the only thing that can compact it, so surface a
+                    # clear "reconnect first" error rather than falling through to
+                    # in-process compaction (which fails with a confusing
+                    # no-LLM-model message).
+                    raise OmnigentError(
+                        "Can't compact this session while its runner is offline. "
+                        "Reconnect the session (send a message to wake it), then "
+                        "run /compact again.",
+                        code=ErrorCode.RUNNER_UNAVAILABLE,
+                    )
+                raise OmnigentError(
+                    "/compact is not available for this session type.",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+
+            return await _compact_single_flight(session_id, stable_id, dispatch_compact)
+
         if body.type == "compaction":
             import uuid as _uuid
 

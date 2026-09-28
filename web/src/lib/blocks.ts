@@ -302,13 +302,16 @@ export interface SlashCommandBlock {
   output: string | null;
 }
 
+export const OMNIGENT_AGENT_NAME = "omnigent";
+export const COMPACT_COMMAND_NAME = "compact";
+
 /** Echo submitted skills and web compaction requests; native command output is a receipt. */
 export function shouldEchoSlashCommand(
   kind: string | undefined,
   name: string,
   agent: string | undefined,
 ): boolean {
-  return kind !== "command" || (name === "compact" && agent === "omnigent");
+  return kind !== "command" || (name === COMPACT_COMMAND_NAME && agent === OMNIGENT_AGENT_NAME);
 }
 
 /**

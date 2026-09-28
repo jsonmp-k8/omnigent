@@ -21,6 +21,7 @@ HTTP response and asserting the correct server behaviour.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any
@@ -148,6 +149,126 @@ async def test_compact_skips_omnigent_compaction_when_runner_handles_it(
     assert captured == [{"type": "compact"}], (
         f"AP server must forward exactly one compact control to the runner; got {captured!r}."
     )
+
+
+async def test_compact_retry_after_lost_http_response_dispatches_once(
+    client: httpx.AsyncClient,
+) -> None:
+    from omnigent.runtime import set_runner_client
+
+    runner, captured = _fake_runner_returning(200)
+    set_runner_client(runner)
+    try:
+        agent = await create_test_agent(client)
+        sid = await _create_session(client, agent["id"])
+        stable_id = "c" * 32
+        lost_response = False
+
+        async def drop_first_response(request: httpx.Request) -> httpx.Response:
+            nonlocal lost_response
+            response = await client.post(request.url.path, json=json.loads(request.content))
+            assert response.status_code == 202, response.text
+            if not lost_response:
+                lost_response = True
+                raise httpx.ReadError("Accepted response was lost", request=request)
+            return response
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(drop_first_response), base_url="http://test"
+        ) as browser:
+            payload = {"type": "compact", "data": {"stable_id": stable_id}}
+            with pytest.raises(httpx.ReadError):
+                await browser.post(f"/v1/sessions/{sid}/events", json=payload)
+            retry = await browser.post(f"/v1/sessions/{sid}/events", json=payload)
+        assert retry.json() == {"queued": False, "item_id": stable_id}
+        items = (await client.get(f"/v1/sessions/{sid}/items")).json()["data"]
+        receipts = [item for item in items if item["type"] == "slash_command"]
+        assert [item["id"] for item in receipts] == [stable_id]
+        assert captured == [{"type": "compact"}]
+    finally:
+        await runner.aclose()
+        set_runner_client(None)
+
+
+@pytest.mark.parametrize("cancel_first", [False, True])
+async def test_compact_concurrent_retry_shares_dispatch(
+    client: httpx.AsyncClient, cancel_first: bool
+) -> None:
+    from omnigent.runtime import set_runner_client
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    dispatches = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal dispatches
+        if request.method == "POST" and json.loads(request.content).get("type") == "compact":
+            dispatches += 1
+            entered.set()
+            await release.wait()
+            return httpx.Response(200)
+        return httpx.Response(204)
+
+    runner = httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="http://runner")
+    set_runner_client(runner)
+    try:
+        agent = await create_test_agent(client)
+        sid = await _create_session(client, agent["id"])
+        payload = {"type": "compact", "data": {"stable_id": "d" * 32}}
+        first = asyncio.create_task(client.post(f"/v1/sessions/{sid}/events", json=payload))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        if cancel_first:
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+        retry = asyncio.create_task(client.post(f"/v1/sessions/{sid}/events", json=payload))
+        release.set()
+        responses = await asyncio.gather(*([retry] if cancel_first else [first, retry]))
+        assert all(response.status_code == 202 for response in responses)
+        assert all(response.json()["item_id"] == "d" * 32 for response in responses)
+        assert dispatches == 1
+    finally:
+        release.set()
+        await runner.aclose()
+        set_runner_client(None)
+
+
+async def test_compact_failed_dispatch_can_retry_same_id(client: httpx.AsyncClient) -> None:
+    from omnigent.runtime import set_runner_client
+
+    runner, captured = _fake_runner_returning(503)
+    set_runner_client(runner)
+    try:
+        agent = await create_test_agent(client)
+        sid = await _create_session(client, agent["id"])
+        payload = {"type": "compact", "data": {"stable_id": "e" * 32}}
+        first = await client.post(f"/v1/sessions/{sid}/events", json=payload)
+        assert first.status_code == 500
+        assert len(captured) == 1
+        success_runner, succeeded = _fake_runner_returning(200)
+        set_runner_client(success_runner)
+        try:
+            retry = await client.post(f"/v1/sessions/{sid}/events", json=payload)
+            assert retry.status_code == 202, retry.text
+            assert retry.json()["item_id"] == "e" * 32
+            assert len(succeeded) == 1
+        finally:
+            await success_runner.aclose()
+    finally:
+        await runner.aclose()
+        set_runner_client(None)
+
+
+@pytest.mark.parametrize("stable_id", ["bad", 42, None])
+async def test_compact_rejects_invalid_request_identity(
+    client: httpx.AsyncClient, stable_id: object
+) -> None:
+    agent = await create_test_agent(client)
+    sid = await _create_session(client, agent["id"])
+    response = await client.post(
+        f"/v1/sessions/{sid}/events", json={"type": "compact", "data": {"stable_id": stable_id}}
+    )
+    assert response.status_code == 400
 
 
 async def test_compact_returns_error_when_runner_noops(

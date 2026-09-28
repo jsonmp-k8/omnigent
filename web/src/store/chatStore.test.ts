@@ -15410,6 +15410,80 @@ describe("chatStore compact dispatch", () => {
   });
   afterEach(() => writeAlwaysSteer(false));
 
+  it.each(["flush", "steer", "steerAll"])(
+    "dispatches queued compact without an agent binding via %s",
+    async (mode) => {
+      useChatStore.setState({ boundAgentId: null, sessionStatus: "running" });
+      await useChatStore.getState().compact();
+      const [queued] = useChatStore.getState().queuedMessages;
+      if (mode === "flush") {
+        useChatStore.setState({ sessionStatus: "idle" });
+        useChatStore.getState().maybeFlushQueuedHead();
+      } else if (mode === "steer") {
+        useChatStore.getState().steerMessage(queued!.queueId);
+      } else {
+        useChatStore.getState().steerAllQueuedMessages("conv_compact");
+      }
+      await tick();
+      expect(compactPosts()).toHaveLength(1);
+      expect(useChatStore.getState().queuedMessages).toEqual([]);
+      const body = JSON.parse((compactPosts()[0]![1] as RequestInit).body as string);
+      expect(body.data.stable_id).toBe(queued!.stableId);
+    },
+  );
+
+  it.each(["foreground", "background"])(
+    "preserves compact identity across a failed %s send and retry",
+    async (mode) => {
+      useChatStore.setState({ sessionStatus: "running" });
+      await useChatStore.getState().compact();
+      const [queued] = useChatStore.getState().queuedMessages;
+      let fail = true;
+      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).endsWith("/events") && init?.method === "POST") {
+          if (fail) return Promise.reject(new TypeError("HTTP response lost"));
+          const body = JSON.parse(init.body as string);
+          return mockResponse({ queued: false, item_id: body.data.stable_id });
+        }
+        return defaultFetchHandler(input, init);
+      });
+      if (mode === "background") {
+        seedConversationsCache([conv("conv_compact", "idle"), conv("conv_other", "running")]);
+        useChatStore.setState({ conversationId: "conv_other" });
+        useChatStore.getState().flushBackgroundQueues();
+      } else {
+        useChatStore.getState().steerMessage(queued!.queueId);
+      }
+      await tick();
+      expect(useChatStore.getState().queuedMessages[0]?.stableId).toBe(queued!.stableId);
+      fail = false;
+      useChatStore.getState().steerMessage(queued!.queueId);
+      await tick();
+      const ids = compactPosts().map(
+        ([, init]) => JSON.parse((init as RequestInit).body as string).data.stable_id,
+      );
+      expect(ids).toEqual([queued!.stableId, queued!.stableId]);
+      expect(useChatStore.getState().queuedMessages).toEqual([]);
+    },
+  );
+
+  it("clears a queued retry when its compact receipt arrives", async () => {
+    useChatStore.setState({ sessionStatus: "running" });
+    await useChatStore.getState().compact();
+    const [queued] = useChatStore.getState().queuedMessages;
+    handleSessionEvent({
+      type: "slash_command",
+      kind: "command",
+      name: "compact",
+      arguments: "",
+      output: null,
+      agentName: "omnigent",
+      itemId: queued!.stableId!,
+      responseId: "receipt",
+    });
+    expect(useChatStore.getState().queuedMessages).toEqual([]);
+  });
+
   it("renders a compact user bubble immediately when idle and posts the control event", async () => {
     const promise = useChatStore.getState().compact();
     expect(useChatStore.getState().blocks).toEqual([

@@ -160,7 +160,7 @@ def test_tab_completes_compact_before_explicit_submission(
         route.fulfill(
             status=202,
             content_type="application/json",
-            body=json.dumps({"queued": False, "item_id": "compact-test-receipt"}),
+            body=json.dumps({"queued": False, "item_id": body["data"]["stable_id"]}),
         )
 
     page.route(f"**/v1/sessions/{session_id}/events", accept_compact)
@@ -177,4 +177,6 @@ def test_tab_completes_compact_before_explicit_submission(
     composer.press("Enter")
     expect(composer).to_have_value("")
     expect(page.locator('[data-role="user"]').filter(has_text="/compact")).to_be_visible()
-    assert compact_requests == [{"type": "compact", "data": {}}]
+    assert len(compact_requests) == 1
+    assert compact_requests[0]["type"] == "compact"
+    assert len(compact_requests[0]["data"]["stable_id"]) == 32

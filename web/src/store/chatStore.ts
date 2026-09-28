@@ -55,6 +55,8 @@ import type {
 } from "@/lib/blocks";
 import { userInputElicitationKey } from "@/lib/askUserQuestion";
 import {
+  COMPACT_COMMAND_NAME,
+  OMNIGENT_AGENT_NAME,
   LIVE_ITEM_PREFIX,
   PENDING_FILE_PREFIX,
   slashCommandEchoItemId,
@@ -157,7 +159,7 @@ import type { StoredReplyDraft } from "@/lib/replyDraft";
 
 export interface SendOptions {
   /** Dispatch a control event through the message queue. */
-  command?: "compact";
+  command?: typeof COMPACT_COMMAND_NAME;
   /** Client-only quote provenance, retained if the composer needs to retry. */
   replyDraft?: StoredReplyDraft;
   /**
@@ -551,7 +553,7 @@ export interface PendingUserMessage {
  */
 export interface QueuedMessage {
   /** Control event to dispatch instead of a plaintext message. */
-  command?: "compact";
+  command?: typeof COMPACT_COMMAND_NAME;
   /** Client-only id, e.g. `q_1`. */
   queueId: string;
   /** Fully-assembled message text (mentions/quotes already applied). */
@@ -1063,7 +1065,7 @@ export interface AppChatState {
 
 /** Actions exposed on the root store. */
 export interface ChatActions {
-  send: (text: string, agentId: string, files?: File[], opts?: SendOptions) => Promise<void>;
+  send: (text: string, agentId: string | null, files?: File[], opts?: SendOptions) => Promise<void>;
   clearSideChatToOpen: () => void;
   /** Open a generic side chat as a rail tab under `parentId`, seeding its
    *  composer with `draft` (the typed `/side` question) so it isn't lost while
@@ -1080,7 +1082,7 @@ export interface ChatActions {
     text: string,
     files?: File[],
     replyDraft?: StoredReplyDraft,
-    command?: "compact",
+    command?: typeof COMPACT_COMMAND_NAME,
   ) => void;
   /** Remove a queued message by id (the strip's per-row delete). */
   dequeueMessage: (queueId: string) => void;
@@ -1902,7 +1904,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     const s = get();
     const target = s.queuedMessages.find((m) => m.queueId === queueId);
     const agentId = target?.agentId ?? s.boundAgentId;
-    if (target === undefined || agentId === null) return;
+    if (target === undefined || (agentId === null && target.command !== COMPACT_COMMAND_NAME))
+      return;
     // Remove BEFORE the POST so a concurrent flush can't also send it.
     setActive({ queuedMessages: s.queuedMessages.filter((m) => m.queueId !== queueId) });
     void s.send(target.text, agentId, target.files, queuedSendOptions(target));
@@ -1911,7 +1914,11 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   steerAllQueuedMessages: (conversationId) => {
     const s = get();
     const own = s.queuedMessages.filter((m) => m.conversationId === conversationId);
-    if (own.length === 0 || own.some((m) => (m.agentId ?? s.boundAgentId) === null)) return;
+    if (
+      own.length === 0 ||
+      own.some((m) => m.command !== COMPACT_COMMAND_NAME && (m.agentId ?? s.boundAgentId) === null)
+    )
+      return;
     const batchOrder = new Map(own.map((m, index) => [m.queueId, index]));
     // Remove BEFORE the POSTs so a concurrent flush can't also send one.
     setActive({
@@ -1919,7 +1926,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     });
     for (const m of own) {
       const agentId = m.agentId ?? s.boundAgentId;
-      if (agentId === null) continue;
+      if (agentId === null && m.command !== COMPACT_COMMAND_NAME) continue;
       void s.send(m.text, agentId, m.files, queuedSendOptions(m, batchOrder));
     }
   },
@@ -1939,8 +1946,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     // the turn already ended and only background work (background shells /
     // sub-agents) outlives it, so the server accepts a new turn immediately —
     // mirror `shouldQueueSend`. Only the local send lifecycle (`streaming`) and
-    // an actively `running` turn gate the flush. No agent → nothing to send to.
-    if (s.conversationId === null || s.boundAgentId === null || s.sessionStatus === "running") {
+    // an actively `running` turn gate the flush. Controls need no agent binding.
+    if (s.conversationId === null || s.sessionStatus === "running") {
       return;
     }
     if (s.status === "streaming") {
@@ -1966,6 +1973,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     // head-only guard would let it block this conversation's messages forever.
     const head = s.queuedMessages.find((m) => m.conversationId === s.conversationId);
     if (head === undefined || head.requiresRetry) return;
+    if (head.command !== COMPACT_COMMAND_NAME && (head.agentId ?? s.boundAgentId) === null) return;
     // Remove it BEFORE the POST so a re-entrant flush can't double-send.
     setActive({ queuedMessages: s.queuedMessages.filter((m) => m.queueId !== head.queueId) });
     void s.send(head.text, head.agentId ?? s.boundAgentId, head.files, queuedSendOptions(head));
@@ -2011,8 +2019,12 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       if (backgroundFlushInFlight.has(conversationId)) continue;
       const cooldownUntil = backgroundFlushCooldownUntil.get(conversationId);
       if (cooldownUntil !== undefined && cooldownUntil > now) continue;
-      const head = get().queuedMessages.find((m) => m.conversationId === conversationId);
-      if (head === undefined || head.requiresRetry) continue;
+      const queuedHead = get().queuedMessages.find((m) => m.conversationId === conversationId);
+      if (queuedHead === undefined || queuedHead.requiresRetry) continue;
+      const head = {
+        ...queuedHead,
+        stableId: queuedHead.stableId ?? randomUUID().replace(/-/g, ""),
+      };
 
       // Remove BEFORE the work starts so a re-entrant trigger can't double-send.
       backgroundFlushInFlight.add(conversationId);
@@ -2041,8 +2053,11 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       // the next trigger backs off instead of hammering a failing runner.
       void (async () => {
         await waitForPrior();
-        if (head.command === "compact") {
-          await postEvent(conversationId, { type: "compact", data: {} });
+        if (head.command === COMPACT_COMMAND_NAME) {
+          await postEvent(conversationId, {
+            type: COMPACT_COMMAND_NAME,
+            data: { stable_id: head.stableId },
+          });
           return;
         }
         // Reuse prior successful uploads so cooldown-paced retries do not
@@ -2103,11 +2118,11 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     });
   },
   send: async (text, agentId, files, opts) => {
-    if (opts?.command === "compact") {
+    if (opts?.command === COMPACT_COMMAND_NAME) {
       const conversationId = opts.pinnedConversationId ?? get().conversationId;
       if (!conversationId) return;
       try {
-        await sendCompact(conversationId);
+        await sendCompact(conversationId, opts.stableId);
       } catch (err) {
         if (!opts.onError) throw err;
         opts.onError(describeSendFailure(err).message);
@@ -2878,7 +2893,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
         readAlwaysSteer(),
       )
     ) {
-      s.enqueueMessage("/compact", undefined, undefined, "compact");
+      s.enqueueMessage(`/${COMPACT_COMMAND_NAME}`, undefined, undefined, COMPACT_COMMAND_NAME);
       return;
     }
     await sendCompact(s.conversationId);
@@ -3185,34 +3200,44 @@ function setActive(partial: Partial<ChatState> | ((state: ChatState) => Partial<
 
 // ── Internal helpers ─────────────────────────────────────
 
-async function sendCompact(conversationId: string): Promise<void> {
-  const itemId = `compact_pending_${randomUUID()}`;
+async function sendCompact(
+  conversationId: string,
+  stableId = randomUUID().replace(/-/g, ""),
+): Promise<void> {
+  const itemId = slashCommandEchoItemId(stableId);
   const set = setterFor(conversationId);
   const createdBy = getCurrentAuthorId();
-  set((s) => ({
-    blocks: [
-      ...s.blocks,
-      {
-        type: "user_message",
-        stableKey: itemId,
-        content: [{ type: "input_text", text: "/compact" }],
-        ctx: {
-          itemId,
-          responseId: "",
-          agent: "omnigent",
-          depth: 0,
-          turn: 0,
-          timestamp: 0,
-          createdAtS: Math.floor(Date.now() / 1000),
-          ...(createdBy !== null ? { createdBy } : {}),
+  set((s) =>
+    s.blocks.some((block) => block.ctx.itemId === itemId)
+      ? {}
+      : {
+          blocks: [
+            ...s.blocks,
+            {
+              type: "user_message",
+              stableKey: itemId,
+              content: [{ type: "input_text", text: `/${COMPACT_COMMAND_NAME}` }],
+              ctx: {
+                itemId,
+                responseId: "",
+                agent: OMNIGENT_AGENT_NAME,
+                depth: 0,
+                turn: 0,
+                timestamp: 0,
+                createdAtS: Math.floor(Date.now() / 1000),
+                ...(createdBy !== null ? { createdBy } : {}),
+              },
+            },
+          ],
         },
-      },
-    ],
-  }));
+  );
   const { waitForPrior, releaseSend } = enterSendChain(conversationId);
   try {
     await waitForPrior();
-    const result = await postEvent(conversationId, { type: "compact", data: {} });
+    const result = await postEvent(conversationId, {
+      type: COMPACT_COMMAND_NAME,
+      data: { stable_id: stableId },
+    });
     const echoId = result.itemId ? slashCommandEchoItemId(result.itemId) : itemId;
     set((s) => ({
       blocks: s.blocks.flatMap((block) => {
@@ -3222,7 +3247,11 @@ async function sendCompact(conversationId: string): Promise<void> {
       }),
     }));
   } catch (err) {
-    set((s) => ({ blocks: s.blocks.filter((block) => block.ctx.itemId !== itemId) }));
+    set((s) =>
+      s.blocks.some((block) => block.type === "slash_command" && block.ctx.itemId === stableId)
+        ? {}
+        : { blocks: s.blocks.filter((block) => block.ctx.itemId !== itemId) },
+    );
     throw err;
   } finally {
     releaseSend();
@@ -3285,6 +3314,13 @@ function queuedSendOptions(
     onError: (error) => {
       setActive((s) => {
         if (s.queuedMessages.some((m) => m.queueId === message.queueId)) return {};
+        if (
+          message.command === COMPACT_COMMAND_NAME &&
+          setterForState(message.conversationId)?.blocks.some(
+            (block) => block.type === "slash_command" && block.ctx.itemId === stableId,
+          )
+        )
+          return {};
         // Keep failed sends in batch order, ahead of newly queued messages.
         const index = s.queuedMessages.findIndex(
           (m) =>
@@ -5833,6 +5869,24 @@ export async function pumpStreamEvents(
               mcpStartupLaunch: { ...s.mcpStartupLaunch, dismissed: true },
             }
           : {}),
+        ...(fresh.some(
+          (block) => block.type === "slash_command" && block.name === COMPACT_COMMAND_NAME,
+        )
+          ? {
+              queuedMessages: s.queuedMessages.filter(
+                (message) =>
+                  message.conversationId !== id ||
+                  message.command !== COMPACT_COMMAND_NAME ||
+                  !fresh.some(
+                    (block) =>
+                      block.type === "slash_command" &&
+                      block.kind === "command" &&
+                      block.name === COMPACT_COMMAND_NAME &&
+                      block.ctx.itemId === message.stableId,
+                  ),
+              ),
+            }
+          : {}),
         blocks: [...s.blocks, ...fresh],
       };
     });
@@ -6984,7 +7038,17 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       return;
     case "slash_command":
       // Control receipts reconcile their own optimistic user bubble.
-      if (event.kind === "command" && event.agentName === "omnigent") return;
+      if (event.kind === "command" && event.agentName === OMNIGENT_AGENT_NAME) {
+        rootSetState((s) => ({
+          queuedMessages: s.queuedMessages.filter(
+            (message) =>
+              message.conversationId !== sourceConversationId ||
+              message.command !== COMPACT_COMMAND_NAME ||
+              message.stableId !== event.itemId,
+          ),
+        }));
+        return;
+      }
       // Claude-native: a `/skill-name` or surfaced CLI command typed
       // in the web composer round-trips through tmux → Claude TUI →
       // transcript → `external_conversation_item` (type=slash_command)
