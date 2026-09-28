@@ -302,6 +302,15 @@ export interface SlashCommandBlock {
   output: string | null;
 }
 
+/** Echo submitted skills and web compaction requests; native command output is a receipt. */
+export function shouldEchoSlashCommand(
+  kind: string | undefined,
+  name: string,
+  agent: string | undefined,
+): boolean {
+  return kind !== "command" || (name === "compact" && agent === "omnigent");
+}
+
 /**
  * Reconstruct the literal composer text a skill invocation came from,
  * e.g. `/review-pr 123 focus on auth`. A skill's `slash_command`

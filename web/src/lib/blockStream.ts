@@ -35,6 +35,7 @@ import {
   type ToolResultBlock,
   type UserMessageBlock,
   ELICITATION_RESPONSE_PREFIX,
+  shouldEchoSlashCommand,
   slashCommandEchoItemId,
   slashCommandEchoText,
   structuredErrorFields,
@@ -635,11 +636,8 @@ function* processEvent(state: ReducerState, event: StreamEvent): Generator<AnyBl
     // ── Slash command (Claude Code TUI) ─────────────
     case "slash_command": {
       adoptResponseIdIfUnset(state, event.responseId);
-      if (event.kind === "skill") {
-        // A skill receipt is the only record of the user's send — echo
-        // the typed `/name args` as a user bubble so the message doesn't
-        // vanish behind the Skill indicator (mirrors `skillEchoBlock` in
-        // itemsToBlocks, sharing the derived item id for dedup).
+      if (shouldEchoSlashCommand(event.kind, event.name, event.agentName)) {
+        // The derived id matches history hydration and the optimistic compact echo.
         yield {
           type: "user_message",
           ctx: {

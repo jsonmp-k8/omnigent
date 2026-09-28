@@ -176,5 +176,5 @@ def test_tab_completes_compact_before_explicit_submission(
 
     composer.press("Enter")
     expect(composer).to_have_value("")
-    expect(page.get_by_test_id("slash-command-card")).to_contain_text("compact")
+    expect(page.locator('[data-role="user"]').filter(has_text="/compact")).to_be_visible()
     assert compact_requests == [{"type": "compact", "data": {}}]

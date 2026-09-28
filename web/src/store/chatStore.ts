@@ -54,7 +54,12 @@ import type {
   UserMessageBlock,
 } from "@/lib/blocks";
 import { userInputElicitationKey } from "@/lib/askUserQuestion";
-import { LIVE_ITEM_PREFIX, PENDING_FILE_PREFIX, structuredErrorFields } from "@/lib/blocks";
+import {
+  LIVE_ITEM_PREFIX,
+  PENDING_FILE_PREFIX,
+  slashCommandEchoItemId,
+  structuredErrorFields,
+} from "@/lib/blocks";
 import { BlockStream } from "@/lib/blockStream";
 import { itemsToBlocks } from "@/lib/itemsToBlocks";
 import { isMessageItem, type ConversationItem, type MessageItem } from "@/lib/conversationItems";
@@ -3183,15 +3188,14 @@ function setActive(partial: Partial<ChatState> | ((state: ChatState) => Partial<
 async function sendCompact(conversationId: string): Promise<void> {
   const itemId = `compact_pending_${randomUUID()}`;
   const set = setterFor(conversationId);
+  const createdBy = getCurrentAuthorId();
   set((s) => ({
     blocks: [
       ...s.blocks,
       {
-        type: "slash_command",
-        kind: "command",
-        name: "compact",
-        arguments: "",
-        output: null,
+        type: "user_message",
+        stableKey: itemId,
+        content: [{ type: "input_text", text: "/compact" }],
         ctx: {
           itemId,
           responseId: "",
@@ -3200,6 +3204,7 @@ async function sendCompact(conversationId: string): Promise<void> {
           turn: 0,
           timestamp: 0,
           createdAtS: Math.floor(Date.now() / 1000),
+          ...(createdBy !== null ? { createdBy } : {}),
         },
       },
     ],
@@ -3208,11 +3213,12 @@ async function sendCompact(conversationId: string): Promise<void> {
   try {
     await waitForPrior();
     const result = await postEvent(conversationId, { type: "compact", data: {} });
+    const echoId = result.itemId ? slashCommandEchoItemId(result.itemId) : itemId;
     set((s) => ({
       blocks: s.blocks.flatMap((block) => {
         if (block.ctx.itemId !== itemId) return [block];
-        if (result.itemId && s.blocks.some((b) => b.ctx.itemId === result.itemId)) return [];
-        return [{ ...block, ctx: { ...block.ctx, itemId: result.itemId ?? itemId } }];
+        if (echoId !== itemId && s.blocks.some((b) => b.ctx.itemId === echoId)) return [];
+        return [{ ...block, ctx: { ...block.ctx, itemId: echoId } }];
       }),
     }));
   } catch (err) {
@@ -6977,7 +6983,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       });
       return;
     case "slash_command":
-      // Control receipts acknowledge their own optimistic command card.
+      // Control receipts reconcile their own optimistic user bubble.
       if (event.kind === "command" && event.agentName === "omnigent") return;
       // Claude-native: a `/skill-name` or surfaced CLI command typed
       // in the web composer round-trips through tmux → Claude TUI →

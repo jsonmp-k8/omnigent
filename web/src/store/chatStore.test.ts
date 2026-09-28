@@ -15410,10 +15410,13 @@ describe("chatStore compact dispatch", () => {
   });
   afterEach(() => writeAlwaysSteer(false));
 
-  it("renders a compact receipt immediately when idle and posts the control event", async () => {
+  it("renders a compact user bubble immediately when idle and posts the control event", async () => {
     const promise = useChatStore.getState().compact();
     expect(useChatStore.getState().blocks).toEqual([
-      expect.objectContaining({ type: "slash_command", kind: "command", name: "compact" }),
+      expect.objectContaining({
+        type: "user_message",
+        content: [{ type: "input_text", text: "/compact" }],
+      }),
     ]);
     await promise;
     expect(compactPosts()).toHaveLength(1);
@@ -15448,15 +15451,15 @@ describe("chatStore compact dispatch", () => {
     },
   );
 
-  it("reconciles the immediate card with a receipt that arrived over the stream", async () => {
+  it("reconciles the immediate user bubble with a receipt that arrived over the stream", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input).endsWith("/events") && init?.method === "POST") {
         const state = useChatStore.getState();
-        const optimistic = state.blocks.find((block) => block.type === "slash_command")!;
+        const optimistic = state.blocks.find((block) => block.type === "user_message")!;
         useChatStore.setState({
           blocks: [
             ...state.blocks,
-            { ...optimistic, ctx: { ...optimistic.ctx, itemId: "compact_receipt" } },
+            { ...optimistic, ctx: { ...optimistic.ctx, itemId: "compact_receipt:user" } },
           ],
         });
         return mockResponse({ queued: false, item_id: "compact_receipt" });
@@ -15466,8 +15469,8 @@ describe("chatStore compact dispatch", () => {
     await useChatStore.getState().compact();
     expect(useChatStore.getState().blocks).toEqual([
       expect.objectContaining({
-        type: "slash_command",
-        ctx: expect.objectContaining({ itemId: "compact_receipt" }),
+        type: "user_message",
+        ctx: expect.objectContaining({ itemId: "compact_receipt:user" }),
       }),
     ]);
   });
@@ -15539,7 +15542,7 @@ describe("chatStore compact dispatch", () => {
     useChatStore.getState().maybeFlushQueuedHead();
     await tick();
     expect(useChatStore.getState().queuedMessages).toEqual([{ ...queued, requiresRetry: true }]);
-    expect(useChatStore.getState().blocks.some((block) => block.type === "slash_command")).toBe(
+    expect(useChatStore.getState().blocks.some((block) => block.type === "user_message")).toBe(
       false,
     );
 

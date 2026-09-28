@@ -753,6 +753,39 @@ describe("itemsToBlocks — native tools and compaction", () => {
     expect(echo.ctx.createdBy).toBe("alice@example.com");
   });
 
+  it.each(["omnigent", "claude-native-ui"])(
+    "echoes web compact submissions but not native output (%s)",
+    (agent) => {
+      const blocks = itemsToBlocks([
+        {
+          id: "compact_receipt",
+          response_id: "compact_turn",
+          type: "slash_command",
+          status: "completed",
+          kind: "command",
+          name: "compact",
+          arguments: "",
+          model: agent,
+          created_by: "alice@example.com",
+        },
+      ]);
+      const echoes = blocks.filter((b) => b.type === "user_message");
+      if (agent === "omnigent") {
+        expect(echoes).toEqual([
+          expect.objectContaining({
+            content: [{ type: "input_text", text: "/compact" }],
+            ctx: expect.objectContaining({
+              itemId: "compact_receipt:user",
+              createdBy: "alice@example.com",
+            }),
+          }),
+        ]);
+      } else {
+        expect(echoes).toEqual([]);
+      }
+    },
+  );
+
   it("kind='command' propagates through the translator (and gets no user echo)", () => {
     // Surfaced CLI built-ins (``/effort``, ``/clear``, …) flow through
     // the same SlashCommandItem path with kind="command" so the

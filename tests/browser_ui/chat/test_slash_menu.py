@@ -3,7 +3,7 @@
 import time
 
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Route, expect
 
 _ROWS = "[data-testid^='slash-menu-item-']"
 
@@ -180,6 +180,118 @@ def test_tab_completes_compact_and_explicit_send_renders_receipt(
         assert chat.event_posts == []
         chat.emit_idle("compact-test-turn")
 
-    expect(page.get_by_test_id("slash-command-card")).to_contain_text("compact")
-    expect(page.get_by_test_id("slash-command-card")).to_have_count(1)
+    bubble = page.locator('[data-role="user"]').filter(has_text="/compact")
+    expect(bubble).to_be_visible()
+    expect(bubble).to_have_count(1)
     assert [event["body"]["type"] for event in chat.event_posts] == ["compact"]
+
+
+@pytest.mark.parametrize("harness", ["claude-sdk", "claude-native", "codex-native"])
+@pytest.mark.parametrize("always_steer", [False, True])
+@pytest.mark.parametrize("http_first", [False, True])
+def test_compact_stays_visible_during_active_turn(
+    page: Page,
+    chat_session_contract,
+    always_steer: bool,
+    harness: str,
+    http_first: bool,
+    request: pytest.FixtureRequest,
+) -> None:
+    chat = chat_session_contract
+    chat.harness = harness
+    if harness.endswith("-native"):
+        chat.update_session(
+            labels={
+                "omnigent.wrapper": "claude-code-native-ui"
+                if harness == "claude-native"
+                else "codex-native-ui"
+            }
+        )
+    if harness == "codex-native":
+        chat.contract.json(f"/v1/sessions/{chat.session_id}/codex_goal", {"goal": None})
+    if always_steer:
+        page.add_init_script("localStorage.setItem('omnigent:always-steer', 'true')")
+    pending: list[Route] = []
+    request.addfinalizer(lambda: [route.abort() for route in pending])
+
+    def hold_compact(route: Route) -> None:
+        if route.request.post_data_json.get("type") == "compact":
+            pending.append(route)
+        else:
+            route.fallback()
+
+    chat.contract.route(f"**/v1/sessions/{chat.session_id}/events", hold_compact)
+    page.goto(chat.url)
+    chat.wait_for_stream()
+    chat.emit_busy("compact-active-turn")
+    chat.emit(
+        {
+            "event": "response.created",
+            "data": {"id": "compact-active-turn", "status": "in_progress", "output": []},
+        }
+    )
+    chat.emit(
+        {
+            "event": "response.output_text.delta",
+            "data": {"delta": "Still working on the task. " * 12, "message_id": "active-text"},
+        }
+    )
+    expect(page.get_by_text("Still working on the task.", exact=False)).to_be_visible()
+    composer = _composer(page)
+    composer.fill("/compact")
+    composer.press("Enter")
+    if not always_steer:
+        page.get_by_role("button", name="Send queued message now", exact=True).click()
+    bubble = page.locator('[data-role="user"]').filter(has_text="/compact")
+    expect(bubble).to_be_visible()
+    assert len(pending) == 1
+    chat.emit(
+        {
+            "event": "response.output_text.delta",
+            "data": {"delta": "More work in progress. " * 12, "message_id": "active-text"},
+        }
+    )
+    expect(page.get_by_text("More work in progress.", exact=False)).to_be_visible()
+    expect(bubble).to_be_visible()
+    if http_first:
+        pending.pop().fulfill(json={"queued": False, "item_id": "compact-receipt"})
+        expect(bubble).to_be_visible()
+    chat.emit(
+        {
+            "event": "response.output_item.done",
+            "data": {
+                "item": {
+                    "id": "compact-receipt",
+                    "response_id": "compact-receipt-turn",
+                    "type": "slash_command",
+                    "kind": "command",
+                    "name": "compact",
+                    "arguments": "",
+                    "model": "omnigent",
+                }
+            },
+        }
+    )
+    if not http_first:
+        pending.pop().fulfill(json={"queued": False, "item_id": "compact-receipt"})
+    expect(bubble).to_have_count(1)
+    expect(bubble).to_be_visible()
+    chat.emit_idle("compact-active-turn")
+    expect(bubble).to_be_visible()
+    chat.set_items(
+        [
+            {
+                "id": "compact-receipt",
+                "response_id": "compact-receipt-turn",
+                "type": "slash_command",
+                "status": "completed",
+                "kind": "command",
+                "name": "compact",
+                "arguments": "",
+                "model": "omnigent",
+            }
+        ]
+    )
+    page.reload()
+    expect(bubble).to_have_count(1)
+    expect(bubble).to_be_visible()

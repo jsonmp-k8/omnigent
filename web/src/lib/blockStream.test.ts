@@ -226,6 +226,39 @@ describe("BlockStream — block ctx carries response_id and item_id", () => {
     expect(echo.ctx.createdBy).toBeUndefined();
   });
 
+  it.each(["omnigent", "claude-native-ui"])(
+    "echoes web compact submissions but not native output (%s)",
+    (agent) => {
+      const blocks = reduce([
+        {
+          type: "slash_command",
+          kind: "command",
+          name: "compact",
+          arguments: "",
+          output: null,
+          agentName: agent,
+          itemId: "compact_receipt",
+          responseId: "compact_turn",
+          createdBy: "alice@example.com",
+        },
+      ]);
+      const echoes = blocks.filter((b) => b.type === "user_message");
+      if (agent === "omnigent") {
+        expect(echoes).toEqual([
+          expect.objectContaining({
+            content: [{ type: "input_text", text: "/compact" }],
+            ctx: expect.objectContaining({
+              itemId: "compact_receipt:user",
+              createdBy: "alice@example.com",
+            }),
+          }),
+        ]);
+      } else {
+        expect(echoes).toEqual([]);
+      }
+    },
+  );
+
   it("slash_command kind='command' stays indicator-only (no user echo)", () => {
     const blocks = reduce([
       {

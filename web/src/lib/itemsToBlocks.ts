@@ -31,6 +31,7 @@ import {
   type ToolResultBlock,
   type UserMessageBlock,
   answeredElicitationItemId,
+  shouldEchoSlashCommand,
   slashCommandEchoItemId,
   slashCommandEchoText,
   structuredErrorFields,
@@ -95,7 +96,7 @@ export function itemsToBlocks(items: ConversationItem[]): AnyBlock[] {
   for (const item of items) {
     if (!item.response_id) continue;
     if (isSlashCommandItem(item)) {
-      const echo = skillEchoBlock(item);
+      const echo = slashCommandEchoBlock(item);
       if (echo !== null) blocks.push(echo);
     }
     if (isFunctionCallItem(item)) {
@@ -427,16 +428,9 @@ function compactionToBlock(item: CompactionItem): CompactionBlock {
   };
 }
 
-/**
- * Re-materialize a skill receipt's typed text as a user bubble. The
- * skill `slash_command` item is the only transcript record of the
- * user's send, so without this echo the message vanishes behind the
- * Skill indicator. Command receipts (`/effort`, `/model`, …) stay
- * indicator-only — they are state changes, not prose. A missing
- * ``kind`` defaults to skill, matching ``slashCommandToBlock``.
- */
-function skillEchoBlock(item: SlashCommandItem): UserMessageBlock | null {
-  if (item.kind === "command") return null;
+/** Reconstruct submitted command text consistently with the live stream. */
+function slashCommandEchoBlock(item: SlashCommandItem): UserMessageBlock | null {
+  if (!shouldEchoSlashCommand(item.kind, item.name, item.model)) return null;
   return {
     type: "user_message",
     ctx: { ...ctxFor(item), itemId: slashCommandEchoItemId(item.id) },
