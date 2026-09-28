@@ -4171,23 +4171,30 @@ async def test_publish_turn_identity_announces_each_turn_once() -> None:
         return httpx.Response(202, json={})
 
     transport = httpx.MockTransport(_handle_request)
+    tracker = forwarder._PostRetryTracker(base_delay_s=0.0, max_delay_s=0.0)
+
+    async def _announce(rid: str | None, published: str | None) -> tuple[str | None, bool]:
+        return await forwarder._publish_turn_identity(
+            client=client,
+            session_id="conv",
+            response_id=rid,
+            already_published=published,
+            settled_response_ids=("R_done",),
+            retry_tracker=tracker,
+        )
+
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        published = await forwarder._publish_turn_identity(
-            client=client, session_id="conv", response_id="R1", already_published=None
-        )
-        assert published == "R1"
-        published = await forwarder._publish_turn_identity(
-            client=client, session_id="conv", response_id="R1", already_published=published
-        )
-        assert published == "R1"  # same turn: not re-announced
-        published = await forwarder._publish_turn_identity(
-            client=client, session_id="conv", response_id="R2", already_published=published
-        )
-        assert published == "R2"  # new turn: announced
-        published = await forwarder._publish_turn_identity(
-            client=client, session_id="conv", response_id=None, already_published=published
-        )
-        assert published == "R2"  # no active turn: no-op
+        published, hold = await _announce("R1", None)
+        assert (published, hold) == ("R1", False)
+        published, hold = await _announce("R1", published)
+        assert (published, hold) == ("R1", False)  # same turn: not re-announced
+        published, hold = await _announce("R2", published)
+        assert (published, hold) == ("R2", False)  # new turn: announced
+        published, hold = await _announce(None, published)
+        assert (published, hold) == ("R2", False)  # no active turn: no-op
+        # An already-settled turn is never re-announced (no false "running").
+        published, hold = await _announce("R_done", published)
+        assert (published, hold) == ("R_done", False)
 
     running = [
         p["data"]
@@ -4195,6 +4202,49 @@ async def test_publish_turn_identity_announces_each_turn_once() -> None:
         if p["type"] == "external_session_status" and p["data"].get("status") == "running"
     ]
     assert [d["response_id"] for d in running] == ["R1", "R2"]
+
+
+@pytest.mark.asyncio
+async def test_publish_turn_identity_holds_terminal_until_established() -> None:
+    """A transient identity failure holds the turn's terminal edge, then clears.
+
+    Identity must reach the runner before the turn's ``Stop`` — otherwise a
+    completion arrives with no id to match and the survivor's result is lost. So
+    a transient failure returns ``hold_terminal=True`` (the caller defers the
+    Stop and retries); once the post lands, the hold clears. A permanent
+    rejection instead gives up so the Stop is never held forever.
+    """
+    attempts: list[str] = []
+
+    def _handle_request(request: httpx.Request) -> httpx.Response:
+        attempts.append("post")
+        # Fail the first attempt transiently (503), then accept.
+        return httpx.Response(503 if len(attempts) == 1 else 202, json={})
+
+    transport = httpx.MockTransport(_handle_request)
+    tracker = forwarder._PostRetryTracker(base_delay_s=0.0, max_delay_s=0.0)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # Transient failure: hold the terminal edge, identity not yet published.
+        published, hold = await forwarder._publish_turn_identity(
+            client=client,
+            session_id="conv",
+            response_id="R1",
+            already_published=None,
+            settled_response_ids=(),
+            retry_tracker=tracker,
+        )
+        assert (published, hold) == (None, True)
+        # Retry lands: identity established, terminal edge may proceed.
+        published, hold = await forwarder._publish_turn_identity(
+            client=client,
+            session_id="conv",
+            response_id="R1",
+            already_published=None,
+            settled_response_ids=(),
+            retry_tracker=tracker,
+        )
+        assert (published, hold) == ("R1", False)
+    assert len(attempts) == 2
 
 
 @pytest.mark.asyncio

@@ -187,6 +187,7 @@ async def test_interrupt_grace_timer_delivers_unconfirmed_cancel(
     monkeypatch.setattr(interrupt_mod, "_NATIVE_INTERRUPT_CANCEL_GRACE_S", 0.02)
 
     runner, captured = _make_runner()
+    captured["current_work_id"] = "work_g"  # a live dispatch to bind the cancel to
     resp = await runner.interrupt("goose-native", "conv_g")
     assert isinstance(resp, Response) and resp.status_code == 204
     assert captured["wakes"] == []
@@ -228,6 +229,35 @@ async def test_grace_timer_does_not_cancel_superseded_dispatch(
     await asyncio.sleep(0.1)
     assert captured["wakes"] == [], "the newer dispatch must not be cancelled"
     assert captured["superseded"] == [("conv_g", "cancelled", "work_A")]
+
+
+@pytest.mark.asyncio
+async def test_grace_timer_skips_cancel_when_dispatch_unbound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupt with no bound dispatch must not cancel anything on timeout.
+
+    If no work entry existed when the interrupt fired (e.g. a runner restart had
+    not recovered it), the timer captures ``None`` and cannot bind. Delivering a
+    cancel then could settle a newer send that reused the child, so the timer
+    must skip entirely — the restart recovery scan owns unbound children.
+    """
+    import asyncio
+
+    import omnigent.harnesses.goose_native.bridge as goose_bridge
+    from omnigent.runner.native import interrupt as interrupt_mod
+
+    monkeypatch.setattr(goose_bridge, "bridge_dir_for_session_id", lambda conv: f"dir/{conv}")
+    monkeypatch.setattr(goose_bridge, "inject_interrupt", lambda bridge_dir, *, timeout_s: None)
+    monkeypatch.setattr(interrupt_mod, "_NATIVE_INTERRUPT_CANCEL_GRACE_S", 0.02)
+
+    runner, captured = _make_runner()
+    captured["current_work_id"] = None  # no dispatch to bind to
+    await runner.interrupt("goose-native", "conv_g")
+
+    await asyncio.sleep(0.1)
+    assert captured["wakes"] == [], "an unbound interrupt must deliver no cancel"
+    assert captured["superseded"] == []
 
 
 @pytest.mark.asyncio

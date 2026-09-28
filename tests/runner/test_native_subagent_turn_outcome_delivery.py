@@ -481,6 +481,55 @@ async def test_confirmed_hard_stop_cancel_survives_stale_completion() -> None:
         runner_app._session_inboxes_ref.pop(parent_id, None)
 
 
+async def test_confirmed_hard_stop_after_delivered_cancel_blocks_later_completion() -> None:
+    """A confirmed hard stop makes an already-delivered cancel definitive.
+
+    A fallback (unconfirmed) cancel is delivered first; then the operator's
+    confirmed hard stop lands. Even though there is nothing new to deliver, the
+    provenance must become sticky so a later same-turn Stop cannot overturn the
+    kill.
+    """
+    from omnigent.runner import app as runner_app
+
+    parent_id = uuid.uuid4().hex
+    child_id = uuid.uuid4().hex
+    inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    runner_app._session_inboxes_ref[parent_id] = inbox
+    runner_app.register_subagent_work(
+        parent_session_id=parent_id,
+        child_session_id=child_id,
+        agent="researcher",
+        title="cite-check",
+    )
+    try:
+        # Fallback (unconfirmed) cancel, recording the turn id.
+        first = runner_app.mark_subagent_work_terminal(
+            child_id, status="cancelled", output=None, response_id="resp1"
+        )
+        assert first.delivered_now
+
+        # The operator's confirmed hard stop lands after delivery.
+        runner_app.mark_subagent_work_terminal(
+            child_id, status="cancelled", output=None, cancel_confirmed=True
+        )
+        assert runner_app.get_subagent_work(child_id).cancel_confirmed is True
+
+        # A delayed same-turn Stop must NOT resurrect the killed session.
+        replay = runner_app.mark_subagent_work_terminal(
+            child_id, status="completed", output="late", turn_confirmed=True, response_id="resp1"
+        )
+        assert not replay.delivered_now
+        assert runner_app.get_subagent_work(child_id).status == "cancelled"
+
+        statuses = []
+        while not inbox.empty():
+            statuses.append(inbox.get_nowait()["status"])
+        assert statuses == ["cancelled"]
+    finally:
+        runner_app.unregister_subagent_work(child_id)
+        runner_app._session_inboxes_ref.pop(parent_id, None)
+
+
 async def test_stale_turn_completion_does_not_overturn_unconfirmed_cancel() -> None:
     """A completion for a superseded turn cannot correct a reuse's cancel.
 

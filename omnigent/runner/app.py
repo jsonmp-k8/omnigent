@@ -2193,6 +2193,12 @@ def mark_subagent_work_terminal(
             reason=_SUBAGENT_DELIVERY_SUPERSEDED_DISPATCH,
         )
     if entry.status in _SUBAGENT_TERMINAL_STATUSES:
+        # A confirmed hard stop makes a cancellation definitive even when it
+        # arrives after an unconfirmed cancel was already delivered: record the
+        # provenance before any early return so a later same-turn completion
+        # cannot overturn the operator's kill.
+        if status == "cancelled" and cancel_confirmed and entry.status == "cancelled":
+            entry.cancel_confirmed = True
         # ``failed`` outranks ``completed``: a quiescence-derived ``completed``
         # (the watcher's ``idle`` edge) can be recorded — and delivered — before
         # the turn's real ``failed`` edge lands. The failure must replace it and
@@ -10540,7 +10546,14 @@ def create_runner_app(
             else:
                 if status in ("idle", "failed"):
                     recovered_entry = await _ensure_subagent_work_entry(conversation_id)
-                if status == "idle" and interrupt_pending:
+                if status == "idle" and interrupt_pending and interrupt_work_id is None:
+                    # The interrupt was never bound to a dispatch (no work entry
+                    # when it fired, e.g. after a runner restart). Settling now
+                    # could cancel a newer send that reused this child, so skip
+                    # and leave it for the recovery scan — never fall through to
+                    # ``completed``, since the turn was interrupted.
+                    pass
+                elif status == "idle" and interrupt_pending:
                     # Interrupt with no confirming edge: an unconfirmed guess, so
                     # a same-turn confirmed completion may still correct it. Bound
                     # to the interrupted dispatch so it cannot cancel a newer send.

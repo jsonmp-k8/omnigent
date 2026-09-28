@@ -457,6 +457,18 @@ class NativeInterruptRunner:
         was_pending, work_id = self.take_pending_interrupt(conv_id)
         if not was_pending:
             return
+        if work_id is None:
+            # The interrupt was never bound to a dispatch (no work entry existed
+            # when it fired — e.g. a runner restart hadn't recovered it yet).
+            # Delivering ``cancelled`` now could settle a *newer* send that has
+            # since reused this child session, permanently mislabeling it. Skip:
+            # the restart recovery scan owns children with no live work entry.
+            self._logger.info(
+                "Native interrupt grace timer: no dispatch bound for session=%s; "
+                "skipping cancel to avoid settling a reused dispatch",
+                conv_id,
+            )
+            return
         delivery_ack = self._mark_subagent_terminal_and_wake(
             conv_id,
             status="cancelled",

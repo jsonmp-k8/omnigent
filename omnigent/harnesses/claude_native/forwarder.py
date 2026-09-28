@@ -1203,6 +1203,9 @@ async def forward_claude_transcript_to_session(
     seen_delta_keys: dict[tuple[str, int], None] = {}
     item_retries = _PostRetryTracker()
     status_retries = _PostRetryTracker()
+    # Backoff for the turn-start identity post. Keys are per response_id, so it
+    # need not reset on session rotation (a rotated session's turns are new ids).
+    identity_retries = _PostRetryTracker()
     subagent_start_retries = _PostRetryTracker()
     subagent_item_retries = _PostRetryTracker(
         max_transient_attempts=_SUBAGENT_ITEM_MAX_TRANSIENT_ATTEMPTS
@@ -1436,31 +1439,41 @@ async def forward_claude_transcript_to_session(
                             skip_user_messages=skip_user_messages,
                             dedupe=dedupe,
                         )
-                        published_turn_response_id = await _publish_turn_identity(
+                        published_turn_response_id, _hold_terminal = await _publish_turn_identity(
                             client=client,
                             session_id=current_session_id,
                             response_id=state.current_response_id,
                             already_published=published_turn_response_id,
+                            settled_response_ids=(
+                                dedupe.settled_response_id,
+                                dedupe.pending_settled_response_id,
+                            ),
+                            retry_tracker=identity_retries,
                         )
-                        hook_state = await _forward_available_status_events(
-                            client=client,
-                            session_id=current_session_id,
-                            bridge_dir=bridge_dir,
-                            state=hook_state,
-                            retry_tracker=status_retries,
-                            dedupe=dedupe,
-                            task_subjects=task_subjects,
-                            task_statuses=task_statuses,
-                            task_order=task_order,
-                            # The turn-end edges (Stop→idle / StopFailure→failed)
-                            # carry the turn's response id so ap-web can CLOSE the
-                            # streaming ``activeResponse`` opened by the turn-start
-                            # ``running`` edge (_forward_available_items). The
-                            # transcript forwarder ran just above, so
-                            # ``state.current_response_id`` is the active turn's id
-                            # (the user-message reset only fires on the next turn).
-                            response_id=state.current_response_id,
-                        )
+                        # Defer the turn-end (Stop) edge until its identity has
+                        # reached the runner, so a completion is never delivered
+                        # before the id it must be matched against. The rest of
+                        # the poll (subagent history, etc.) still runs.
+                        if not _hold_terminal:
+                            hook_state = await _forward_available_status_events(
+                                client=client,
+                                session_id=current_session_id,
+                                bridge_dir=bridge_dir,
+                                state=hook_state,
+                                retry_tracker=status_retries,
+                                dedupe=dedupe,
+                                task_subjects=task_subjects,
+                                task_statuses=task_statuses,
+                                task_order=task_order,
+                                # The turn-end edges (Stop→idle / StopFailure→failed)
+                                # carry the turn's response id so ap-web can CLOSE the
+                                # streaming ``activeResponse`` opened by the turn-start
+                                # ``running`` edge (_forward_available_items). The
+                                # transcript forwarder ran just above, so
+                                # ``state.current_response_id`` is the active turn's id
+                                # (the user-message reset only fires on the next turn).
+                                response_id=state.current_response_id,
+                            )
                         # Deferred ``/compact``-refusal dismissal: runs AFTER
                         # the hook phase so the ``failed`` post always follows
                         # the ``PreCompact`` ``in_progress`` that raised the
@@ -3732,7 +3745,9 @@ async def _publish_turn_identity(
     session_id: str,
     response_id: str | None,
     already_published: str | None,
-) -> str | None:
+    settled_response_ids: tuple[str | None, ...],
+    retry_tracker: _PostRetryTracker,
+) -> tuple[str | None, bool]:
     """Announce a new turn's id on a ``running`` edge, once per turn.
 
     Claude surfaces a turn's ``response_id`` to the runner only on its terminal
@@ -3742,19 +3757,37 @@ async def _publish_turn_identity(
     bind the dispatch to its turn independently — so a later completion is
     matched to the turn that was cancelled, and a stale one is rejected.
 
-    Best-effort: the running badge is otherwise PTY-derived, so a dropped post
-    only forgoes the identity hint for this turn (the terminal edge still
-    carries the id); it never blocks forwarding. Returns the id now published
-    (or the unchanged ``already_published`` when there is nothing new to send).
+    The identity must reliably reach the runner BEFORE the turn's ``Stop``, or a
+    completion could arrive with no id to match and lose the result. So a
+    transient post failure asks the caller to HOLD terminal delivery this poll
+    (``hold_terminal=True``) and is retried; only a permanent rejection gives up
+    and proceeds (correction then degrades to rejecting an unknown id — the
+    pre-existing limitation, not a hang, and never a false success).
+
+    An already-settled turn is never announced: re-asserting ``running`` for a
+    completed response (e.g. a forwarder restart re-observing it) would falsely
+    reactivate the session with no later idle edge to repair it.
 
     :param client: Omnigent HTTP client.
     :param session_id: Omnigent session/conversation id.
     :param response_id: The active turn's id, or ``None`` when none is known.
     :param already_published: The id last announced, to avoid re-announcing.
-    :returns: The id that has now been announced for this turn.
+    :param settled_response_ids: Turn ids already settled (settled +
+        pending-settled); an announcement for one of these is suppressed.
+    :param retry_tracker: Backoff/retry state for the identity post.
+    :returns: ``(published_id, hold_terminal)`` — the id now considered
+        announced, and whether the caller should defer the turn's terminal edge
+        until a later poll establishes the identity.
     """
     if response_id is None or response_id == already_published:
-        return already_published
+        return already_published, False
+    if response_id in settled_response_ids:
+        # The turn already ended; treat as announced so we neither re-assert
+        # ``running`` nor hold its (already-consumed) terminal edge.
+        return response_id, False
+    retry_key = f"turn-identity:{response_id}"
+    if retry_tracker.retry_delay_s(retry_key) is not None:
+        return already_published, True  # backing off from a prior failure: hold
     try:
         await post_external_session_status(
             client,
@@ -3762,11 +3795,15 @@ async def _publish_turn_identity(
             status="running",
             response_id=response_id,
         )
-    except httpx.HTTPError:
-        # Identity is a hint, not a correctness dependency of forwarding; the
-        # terminal edge still carries the id. Retry on the next poll.
-        return already_published
-    return response_id
+    except httpx.HTTPError as exc:
+        decision = retry_tracker.record_failure(retry_key, exc, session_id=session_id)
+        if decision.exhausted:
+            # Permanent rejection: give up on the hint and proceed so the turn's
+            # terminal edge is never held forever.
+            return response_id, False
+        return already_published, True  # transient: hold the terminal edge, retry
+    retry_tracker.clear(retry_key)
+    return response_id, False
 
 
 async def _forward_available_status_events(
