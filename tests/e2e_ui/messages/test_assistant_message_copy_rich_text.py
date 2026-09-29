@@ -13,6 +13,8 @@ Asserted, by reading both flavors back off the real browser clipboard:
   - ``text/plain`` is the markdown source, unchanged.
   - ``text/html`` carries the rendered elements a rich-text paste consumes,
     and none of the raw markdown punctuation that was the bug.
+  - ``text/html`` carries no image and no app-relative href, matching what the
+    chat renderer itself refuses to load.
 
 Selectors:
   - assistant bubble: ``data-testid="message-bubble"`` + ``data-role="assistant"``
@@ -47,6 +49,12 @@ _MESSAGE_TEXT = "\n".join(
         "| key | value |",
         "| --- | --- |",
         "| rows | 2 |",
+        "",
+        "A line a<br>line b break.",
+        "",
+        "![beacon](https://blocked.invalid/pixel.png)",
+        "",
+        "See [src/App.tsx](src/App.tsx).",
     ]
 )
 
@@ -136,5 +144,20 @@ def test_assistant_copy_offers_rendered_html_and_markdown(
         # The bug itself: raw markdown punctuation reaching a rich-text paste.
         for raw in ("**bold**", "## Findings", "| --- |"):
             assert raw not in html, f"{raw!r} leaked into the HTML flavor: {html!r}"
+
+        # Inline HTML renders, so neighbouring words keep their break. The
+        # clipboard round-trip re-serializes, so match the tag, not its spelling.
+        assert "<br" in html, f"the <br> was dropped: {html!r}"
+        assert "aline b" not in html, f"the <br> fused its neighbours: {html!r}"
+
+        # Chat blocks remote images in agent output; carrying one onto the
+        # clipboard would load it on paste, in an app with no such block.
+        assert "<img" not in html, f"an image reached the clipboard: {html!r}"
+        assert "blocked.invalid" not in html, f"a remote src reached the clipboard: {html!r}"
+
+        # A workspace citation resolves against the paste target, not this app,
+        # so the anchor goes and the path stays readable.
+        assert 'href="src/App.tsx"' not in html, f"an in-app href survived: {html!r}"
+        assert "src/App.tsx" in html, f"the cited path was lost: {html!r}"
     finally:
         ctx.close()

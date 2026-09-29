@@ -66,16 +66,44 @@ describe("markdownToHtml", () => {
     );
   });
 
-  it("drops raw HTML tags and strips a javascript: href", () => {
+  it("renders inline HTML, so a <br> between two words does not fuse them", () => {
+    expect(markdownToHtml("line a<br>line b")).toBe("<p>line a<br>line b</p>");
+    expect(markdownToHtml("H<sub>2</sub>O")).toBe("<p>H<sub>2</sub>O</p>");
+    expect(markdownToHtml("<details>\n<summary>More</summary>\n\nbody\n\n</details>")).toBe(
+      "<details>\n<summary>More</summary>\n<p>body</p>\n</details>",
+    );
+  });
+
+  it("strips script, event handlers and a javascript: href", () => {
     const html = markdownToHtml(
       '<script>alert(1)</script><img src=x onerror="alert(1)">\n\n[click](javascript:alert(1))',
     );
 
     expect(html).not.toContain("<script");
-    expect(html).not.toContain("<img");
     expect(html).not.toContain("onerror");
     expect(html).not.toContain("javascript:");
-    expect(html).toContain("<a>click</a>");
+    // The href is gone, so the link text survives as plain text.
+    expect(html).toBe("<p>click</p>");
+  });
+
+  it("carries no image out, since chat itself never loads one from agent output", () => {
+    // A remote src would become a tracking beacon the moment the fragment is
+    // pasted into a mail client or a doc — the load the chat renderer refuses.
+    expect(markdownToHtml("![alt](https://evil.example/pixel.png)")).toBe("<p>alt</p>");
+    expect(markdownToHtml("![shot](/v1/sessions/abc/shot.png)")).toBe("<p>shot</p>");
+    expect(markdownToHtml("![](https://evil.example/p.png)")).toBe("<p></p>");
+  });
+
+  it("unwraps a link only this app could resolve, keeping its text", () => {
+    // A workspace citation or an in-app route would resolve against whatever
+    // app received the paste; the path itself is what the reader wants.
+    expect(markdownToHtml("see [src/App.tsx](src/App.tsx) and [chat](/c/123)")).toBe(
+      "<p>see src/App.tsx and chat</p>",
+    );
+    expect(markdownToHtml("[ok](https://ok.example)")).toBe(
+      '<p><a href="https://ok.example">ok</a></p>',
+    );
+    expect(markdownToHtml("[mail](mailto:a@b.c)")).toBe('<p><a href="mailto:a@b.c">mail</a></p>');
   });
 });
 
