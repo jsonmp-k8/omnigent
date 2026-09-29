@@ -164,9 +164,10 @@ _TURN_COMPLETED_DRAIN_SECONDS = 1.0
 # Pause/Stop budget. The ``turn/interrupt`` RPC round-trip gets its own short
 # slice; the app server then gets a real window to confirm the turn actually
 # stopped, instead of the turn being dropped on a fixed half-second hope. The
-# two sum to 2.0s, leaving headroom for close_session inside the executor
-# adapter's 3.0s _INTERRUPT_SLICE_S — so a confirmed stop is reported through
-# the interrupt itself rather than surfacing as a timed-out interrupt.
+# two sum to 2.0s so the confirm fits inside the executor adapter's
+# interrupt-event slice. close_session is not covered by that budget — it can
+# take seconds to reap the app server — so the adapter finishes it in the
+# background rather than cancelling the teardown mid-terminate.
 _INTERRUPT_REQUEST_SECONDS = 0.5
 _INTERRUPT_CONFIRM_SECONDS = 1.5
 _INTERRUPT_CONFIRM_POLL_SECONDS = 0.02
@@ -4186,14 +4187,36 @@ class _CodexAppServerSession:
             self.active_turn_id = turn_id
         return True
 
+    def live_turn_id(self) -> str | None:
+        """The turn the app server still has open, independent of the generator.
+
+        ``run_turn``'s teardown clears :attr:`active_turn_id` as soon as the
+        generator unwinds, which happens well before the app server stops
+        generating when a Pause tears the runner turn down first. Falling back
+        to the reader's started-but-not-ended turn keeps the interrupt aimed at
+        a turn that is genuinely still running.
+
+        :returns: The live turn id, or ``None`` when nothing is open.
+        """
+        if self.active_turn_id is not None:
+            return self.active_turn_id
+        started = self._reader_started_turn
+        if started is not None and started not in (
+            self._reader_completed_turn,
+            self._reader_failed_turn,
+        ):
+            return started
+        return None
+
     async def interrupt_turn(self) -> bool:
-        if self.thread_id is None or self.active_turn_id is None:
+        turn_id = self.live_turn_id()
+        if self.thread_id is None or turn_id is None:
             return False
         await self._request(
             "turn/interrupt",
             {
                 "threadId": self.thread_id,
-                "turnId": self.active_turn_id,
+                "turnId": turn_id,
             },
         )
         return True
@@ -4229,12 +4252,12 @@ class _CodexAppServerSession:
 
         :param turn_id: The turn asked to stop, e.g. ``"turn_abc123"``.
         :returns: ``True`` once the app server ended the turn (completed or
-            terminally failed), the transport died, or the generator's own
-            teardown already cleared the active turn.
+            terminally failed) or the transport died. The generator clearing
+            :attr:`active_turn_id` is deliberately NOT a stop — it unwinds
+            before the app server does, so treating it as one would confirm a
+            Pause while Codex was still generating.
         """
         if self._transport_error is not None or not self._started:
-            return True
-        if self.active_turn_id != turn_id:
             return True
         return turn_id in (self._reader_completed_turn, self._reader_failed_turn)
 
@@ -4872,8 +4895,12 @@ class CodexExecutor(Executor):
         if state is None or state.app_session is None:
             return False
         app_session = state.app_session
-        interrupted_turn_id = app_session.active_turn_id
-        confirmed = interrupted_turn_id is None  # nothing running: already stopped
+        # Ask the app session which turn it still has open rather than reading
+        # the generator's ``active_turn_id`` — Pause usually arrives after
+        # ``run_turn`` unwound and cleared that, while Codex is still
+        # generating, and keying off it would report a stop nobody asked for.
+        interrupted_turn_id = app_session.live_turn_id()
+        confirmed = interrupted_turn_id is None  # nothing open: nothing to stop
         try:
             await asyncio.wait_for(
                 app_session.interrupt_turn(),

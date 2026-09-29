@@ -5591,3 +5591,84 @@ async def test_interrupt_reaches_a_native_agent_that_outlived_the_runner_turn(
         assert not forwarded, (
             f"interrupt on an idle native session must not be forwarded; got {forwarded!r}"
         )
+
+
+class _RejectingHarnessClient(_ScriptedHarnessClient):
+    """Scripted client whose harness answers the interrupt POST with 404.
+
+    Models the real scaffold's fail-loud response when it has neither an
+    in-flight turn nor an inner session to stop.
+    """
+
+    async def post(self, url: str, *, json: dict[str, Any], timeout: Any = None) -> Any:
+        """Record the body and reject it the way the harness scaffold would."""
+        del url, timeout
+        self.patched_events.append(json)
+
+        class _Response:
+            status_code = 404
+            headers: dict[str, str] = {}
+            content = b""
+
+            def raise_for_status(self) -> None:
+                """httpx only raises on an explicit call, which the runner never makes."""
+
+        return _Response()
+
+
+@pytest.mark.asyncio
+async def test_interrupt_rejected_by_the_harness_is_not_reported_as_delivered(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A 404 from the harness must not read as a landed Pause.
+
+    ``httpx`` does not raise on status, so an interrupt the harness refused
+    looked exactly like one it accepted: the runner answered a bare 204 and
+    suppressed its own "found no turn running" log, leaving a silent no-op that
+    was *less* diagnosable than before the forward existed.
+    """
+    conv_id = f"conv_{uuid.uuid4().hex}"
+
+    spec = AgentSpec(
+        spec_version=1,
+        name="t",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "antigravity-native"}),
+    )
+
+    async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        """Return the antigravity-native spec for any agent_id."""
+        del agent_id, session_id
+        return spec
+
+    harness_client = _RejectingHarnessClient([])
+    pm = _FakeProcessManager(harness_client)
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+
+    async with _runner_client(app) as client:
+        create_resp = await client.post(
+            "/v1/sessions",
+            json={"session_id": conv_id, "agent_id": "880b5afda28ad55ff74cbeb9b5fc67fb"},
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        app.state.native_pane_status[conv_id] = "running"
+
+        with caplog.at_level("INFO"):
+            int_resp = await client.post(
+                f"/v1/sessions/{conv_id}/events",
+                json={"type": "interrupt"},
+            )
+
+    assert int_resp.status_code == 204, int_resp.text
+    forwarded = [body for body in harness_client.patched_events if body.get("type") == "interrupt"]
+    assert forwarded, "the interrupt must still be attempted against the busy vendor"
+    messages = " | ".join(record.getMessage() for record in caplog.records)
+    assert "rejected by the harness" in messages, (
+        f"a refused interrupt must be logged as refused; log was: {messages}"
+    )
+    assert "found no turn running" in messages, (
+        f"a refused interrupt must not be reported as a landed Pause; log was: {messages}"
+    )

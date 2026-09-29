@@ -92,6 +92,9 @@ class _FakeAppSession:
     async def close(self):
         self.closed = True
 
+    def live_turn_id(self):
+        return self.active_turn_id
+
     async def interrupt_turn(self):
         self.interrupted = True
         return True
@@ -1415,6 +1418,68 @@ class TestCodexExecutor(unittest.TestCase):
             self.assertTrue(fake_session.interrupted)
             self.assertTrue(fake_session.closed)
             self.assertEqual(executor._session_states, {})
+
+        _run(_t())
+
+    def test_app_server_live_turn_id_survives_the_generator_teardown(self):
+        """The interrupt must target the turn the app server still has open.
+
+        ``run_turn``'s ``finally`` clears ``active_turn_id`` the moment the
+        generator unwinds, which is *before* Codex stops generating when Pause
+        tore the runner turn down first. Reading only that attribute left
+        ``interrupt_turn`` with nothing to address, so no ``turn/interrupt`` was
+        ever sent while the app server kept working.
+        """
+
+        async def _t():
+            session = _CodexAppServerSession(
+                codex_path="/bin/echo",
+                cwd="/tmp/workspace",
+                env={},
+                tool_executor=None,
+            )
+            session._started = True
+            session.thread_id = "thread-1"
+            session._note_native_activity(
+                {"method": "turn/started", "params": {"turn": {"id": "turn-1"}}}
+            )
+            session.active_turn_id = "turn-1"
+
+            self.assertEqual(session.live_turn_id(), "turn-1")
+
+            # The generator unwinds; the app server has not been told anything.
+            session.active_turn_id = None
+            self.assertEqual(
+                session.live_turn_id(),
+                "turn-1",
+                "a turn the reader saw start and never saw end is still live",
+            )
+            self.assertFalse(
+                session.turn_stopped("turn-1"),
+                "clearing active_turn_id must not confirm a stop by itself",
+            )
+
+            sent = []
+
+            async def _capture(method, params):
+                sent.append((method, params))
+                return {}
+
+            session._request = _capture  # type: ignore[assignment]
+            self.assertTrue(await session.interrupt_turn())
+            self.assertEqual(
+                sent,
+                [("turn/interrupt", {"threadId": "thread-1", "turnId": "turn-1"})],
+                f"interrupt must address the still-open turn; sent {sent!r}",
+            )
+
+            session._note_native_activity(
+                {"method": "turn/completed", "params": {"turn": {"id": "turn-1"}}}
+            )
+            self.assertIsNone(
+                session.live_turn_id(), "a turn the reader saw end is no longer live"
+            )
+            self.assertTrue(session.turn_stopped("turn-1"))
 
         _run(_t())
 
