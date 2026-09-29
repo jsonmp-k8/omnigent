@@ -759,7 +759,13 @@ tool_groups:
 Every group defaults to `true`, so omitting the block changes nothing. Values
 must be booleans and group names must match exactly; a typo fails the load
 rather than silently leaving the group registered. Disabling `browser` also
-drops the embedded-browser guidance from the composed system prompt.
+drops the embedded-browser guidance from the composed system prompt. The block
+is read the same way from a `config.yaml` bundle and a single-file agent YAML.
+
+`agent_discovery: false` is rejected while `spawn: true` or the
+`scheduled_tasks` group is on: `sys_session_create` and
+`sys_scheduled_task_create` take an `agent_id` the model looks up with
+`sys_agent_list` / `sys_agent_get`.
 
 The session read tools (`sys_session_list` / `sys_session_get_history` /
 `sys_session_get_info`), `sys_session_rename`, and `sys_cancel_task` have no
