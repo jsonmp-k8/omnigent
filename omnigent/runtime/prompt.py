@@ -189,9 +189,9 @@ def build_instructions_nullable(
     the fabricated ``"You are a helpful assistant."`` fallback when there is
     truly nothing to compose (no author text, no per-request text, no skills
     hint, no applicable spec-level or per-turn framework instructions).
-    With the embedded-browser guidance applying to every agent, a real spec
-    always carries at least one framework instruction, so callers should
-    expect text rather than ``None`` in practice.
+    The embedded-browser guidance makes this rare, but a spec that sets
+    ``tool_groups.browser: false`` with no author text and no sub-agents
+    composes to ``None``.
 
     Delivery channels that must not leak the fallback literal (e.g. a warn
     check, or a first-user-turn prefix) call this instead of comparing
