@@ -60,6 +60,7 @@ from omnigent.spec.types import (
     SandboxConfig,
     SharePolicy,
     SkillSpec,
+    ToolGroupsConfig,
     ToolsConfig,
 )
 from omnigent.spec.validator import _SKILL_NAME_MAX_LEN, _SKILL_NAME_PATTERN
@@ -310,6 +311,9 @@ def parse(root: Path, *, expand_env: bool = True) -> AgentSpec:
     # the specified sub-agent types. Defaults to False — session
     # reads stay always-on, but every write grant is explicit.
     spawn = bool(raw.get("spawn", False))
+    # Top-level ``tool_groups:`` opts out of framework-owned tool groups
+    # that otherwise register on every agent; each group defaults to on.
+    tool_groups = _parse_tool_groups(raw.get("tool_groups"))
     # Top-level ``agent_session_sharing:`` flag is the SOLE enabler of
     # the ``sys_session_share`` tool, independent of ``spawn`` /
     # ``tools.agents`` (and unrelated to server-API / CLI sharing).
@@ -354,6 +358,7 @@ def parse(root: Path, *, expand_env: bool = True) -> AgentSpec:
         terminals=terminals,
         timers=timers,
         spawn=spawn,
+        tool_groups=tool_groups,
         agent_session_sharing=agent_session_sharing,
     )
 
@@ -502,6 +507,56 @@ def _parse_tools_config(
         timeout=timeout,
         retry=retry,
         sandbox=sandbox,
+    )
+
+
+_TOOL_GROUP_NAMES: frozenset[str] = frozenset(ToolGroupsConfig.__dataclass_fields__)
+
+
+def _parse_tool_groups(raw: object) -> ToolGroupsConfig:
+    """
+    Parse the top-level ``tool_groups:`` block into a
+    :class:`ToolGroupsConfig`.
+
+    Strict on purpose: the block exists to *remove* tools, so a typo'd
+    group name or a non-boolean value fails the load rather than
+    silently leaving every group registered.
+
+    :param raw: The raw ``tool_groups:`` value, or ``None`` if absent.
+        Example: ``{"browser": False, "scheduled_tasks": False}``.
+    :returns: A populated :class:`ToolGroupsConfig`; every group on
+        when *raw* is ``None``.
+    :raises OmnigentError: If *raw* is not a mapping, names an unknown
+        group, or maps a group to a non-boolean.
+    """
+    if raw is None:
+        return ToolGroupsConfig()
+    if not isinstance(raw, dict):
+        raise OmnigentError(
+            f"tool_groups must be a YAML mapping, got {type(raw).__name__}",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    unknown = sorted(str(key) for key in raw if key not in _TOOL_GROUP_NAMES)
+    if unknown:
+        raise OmnigentError(
+            f"tool_groups: unknown group(s) {unknown}; "
+            f"expected one of {sorted(_TOOL_GROUP_NAMES)}",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    enabled: dict[str, bool] = {}
+    for name, value in raw.items():
+        if not isinstance(value, bool):
+            raise OmnigentError(
+                f"tool_groups.{name} must be a boolean, got {type(value).__name__}",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        enabled[str(name)] = value
+    return ToolGroupsConfig(
+        browser=enabled.get("browser", True),
+        scheduled_tasks=enabled.get("scheduled_tasks", True),
+        comments=enabled.get("comments", True),
+        policies=enabled.get("policies", True),
+        agent_discovery=enabled.get("agent_discovery", True),
     )
 
 
