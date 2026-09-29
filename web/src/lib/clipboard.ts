@@ -1,3 +1,11 @@
+/** A clipboard payload offered in more than one flavor. */
+export interface RichTextPayload {
+  /** Rendered HTML, taken by rich-text targets such as Slack or Google Docs. */
+  html: string;
+  /** Plain-text source, taken by editors, terminals, and code cells. */
+  text: string;
+}
+
 export async function copyText(text: string): Promise<void> {
   if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
     try {
@@ -9,12 +17,42 @@ export async function copyText(text: string): Promise<void> {
     }
   }
 
-  if (copyTextWithExecCommand(text)) return;
+  if (copyWithExecCommand({ text })) return;
 
   throw new Error("Clipboard API not available");
 }
 
-function copyTextWithExecCommand(text: string): boolean {
+/**
+ * Writes both flavors so the paste target picks the one it understands: a
+ * rich-text editor keeps the formatting, everything else still gets `text`.
+ */
+export async function copyRichText({ html, text }: RichTextPayload): Promise<void> {
+  if (
+    typeof navigator !== "undefined" &&
+    navigator.clipboard?.write &&
+    typeof ClipboardItem === "function"
+  ) {
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([text], { type: "text/plain" }),
+        }),
+      ]);
+      return;
+    } catch {
+      // Fall through: multi-flavor `write` can be unavailable or permission
+      // gated where the plain-text paths below still succeed.
+    }
+  }
+
+  if (copyWithExecCommand({ html, text })) return;
+
+  // Nothing could carry the HTML — copying the source beats copying nothing.
+  await copyText(text);
+}
+
+function copyWithExecCommand({ html, text }: { html?: string; text: string }): boolean {
   if (
     typeof document === "undefined" ||
     typeof document.execCommand !== "function" ||
@@ -46,6 +84,7 @@ function copyTextWithExecCommand(text: string): boolean {
   const handleCopy = (event: ClipboardEvent) => {
     event.preventDefault();
     event.clipboardData?.setData("text/plain", text);
+    if (html !== undefined) event.clipboardData?.setData("text/html", html);
   };
 
   document.addEventListener("copy", handleCopy);
