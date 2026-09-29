@@ -34,6 +34,13 @@ They are declared in `omnigent/harness_plugins.py` and typed in
 | `new-turn`    | The vendor session was dropped; the next turn rebuilds it from Omnigent's transcript. The conversation is preserved — the vendor's own thread is not. |
 | `unsupported` | There is nothing to resume. |
 
+`same-thread` describes the normal Pause. The ACP harnesses (`goose`, `qwen`,
+`grok`, `jcode`, …) fall back to terminating the subprocess when Pause arrives
+before the session handshake finished, or when the `session/cancel` send itself
+fails; that kills the vendor thread, so those degraded paths behave as
+`new-turn`. A client should treat `same-thread` as "the thread survives a Pause
+that lands", not as a guarantee against a vendor that is already broken.
+
 **`cancel`** — always `true`. Cancel is a framework floor, not a per-vendor
 feature: Omnigent's own turn teardown records the cancellation and its cause
 even when the vendor ignores the interrupt.
