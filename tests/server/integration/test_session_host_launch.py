@@ -678,8 +678,9 @@ async def test_inline_launch_timeout_honors_the_configured_budget(
     # Lenient inline contract: the create still returns the bound session.
     assert resp.status_code == 201, f"expected 201 despite launch timeout, got {resp.status_code}"
     # The point of the test: it gave up at the configured 1s, so the
-    # hard-coded 30s is no longer what bounds a launch.
-    assert elapsed < budget(15.0), (
+    # hard-coded 30s is no longer what bounds a launch. Unscaled on purpose:
+    # a CI-scaled budget would exceed 30s and pass against the old wait.
+    assert elapsed < 20.0, (
         f"create waited {elapsed:.1f}s — the configured launch budget was ignored"
     )
     assert "host launch timed out after 1s" in caplog.text

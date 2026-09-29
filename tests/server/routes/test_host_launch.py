@@ -332,16 +332,22 @@ class TestResolveLaunchTimeout:
         monkeypatch.setenv(LAUNCH_TIMEOUT_ENV_VAR, raw)
         assert resolve_launch_timeout_s() == 30.0
 
-    @pytest.mark.parametrize("raw", ["abc", "30s", "0", "-5", "0.05"])
+    def test_override_accepts_the_ceiling(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(LAUNCH_TIMEOUT_ENV_VAR, "3600")
+        assert resolve_launch_timeout_s() == 3600.0
+
+    @pytest.mark.parametrize(
+        "raw", ["abc", "30s", "0", "-5", "0.05", "nan", "inf", "-inf", "infinity", "3601"]
+    )
     def test_unusable_value_falls_back_with_a_warning(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
         raw: str,
     ) -> None:
-        """A malformed or sub-second setting must not become a launch budget:
-        this runs on session create, so raising would turn one operator typo
-        into every session failing to start. Fall back and say so."""
+        """A malformed, sub-second, non-finite or over-ceiling setting must not
+        become a launch budget: ``inf`` would hang a launch the host never
+        answers, and raising would fail every session create. Fall back."""
         monkeypatch.setenv(LAUNCH_TIMEOUT_ENV_VAR, raw)
         with caplog.at_level(logging.WARNING):
             assert resolve_launch_timeout_s() == 30.0

@@ -52,16 +52,21 @@ _DEFAULT_LAUNCH_TIMEOUT_S = 30.0
 # ("0", "0.05") would fail every launch rather than widen the budget.
 _MIN_LAUNCH_TIMEOUT_S = 1.0
 
+# Ceiling for the override: a launch that never answers must still fail, or
+# the create request and its pending launch hang for the process lifetime.
+_MAX_LAUNCH_TIMEOUT_S = 3600.0
+
 
 @functools.cache
 def resolve_launch_timeout_s() -> float:
     """Seconds a launch waits for the host's result (env override or default).
 
     Read from :data:`LAUNCH_TIMEOUT_ENV_VAR`, which both launch routes share so
-    the two can't drift. A value that isn't a number at or above
-    :data:`_MIN_LAUNCH_TIMEOUT_S` is ignored with a warning rather than raised:
-    this runs on the session-create path, where rejecting a malformed operator
-    setting would turn one typo into every session failing to start.
+    the two can't drift. A value that isn't a finite number between
+    :data:`_MIN_LAUNCH_TIMEOUT_S` and :data:`_MAX_LAUNCH_TIMEOUT_S` is ignored
+    with a warning rather than raised: this runs on the session-create path,
+    where rejecting a malformed operator setting would turn one typo into
+    every session failing to start.
 
     Cached, so the warning is logged once and the budget is fixed for the
     process lifetime; a change needs a server restart (tests call
@@ -76,17 +81,19 @@ def resolve_launch_timeout_s() -> float:
         value = float(raw)
     except ValueError:
         _logger.warning(
-            "%s must be a number of seconds, got %r — using %.0fs",
+            "%s must be a number of seconds, got %r — using %gs",
             LAUNCH_TIMEOUT_ENV_VAR,
             raw,
             _DEFAULT_LAUNCH_TIMEOUT_S,
         )
         return _DEFAULT_LAUNCH_TIMEOUT_S
-    if value < _MIN_LAUNCH_TIMEOUT_S:
+    # Also rejects the "nan" and "inf" that ``float()`` accepts.
+    if not _MIN_LAUNCH_TIMEOUT_S <= value <= _MAX_LAUNCH_TIMEOUT_S:
         _logger.warning(
-            "%s must be at least %.0fs, got %r — using %.0fs",
+            "%s must be between %gs and %gs, got %r — using %gs",
             LAUNCH_TIMEOUT_ENV_VAR,
             _MIN_LAUNCH_TIMEOUT_S,
+            _MAX_LAUNCH_TIMEOUT_S,
             raw,
             _DEFAULT_LAUNCH_TIMEOUT_S,
         )
