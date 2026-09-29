@@ -3976,21 +3976,28 @@ def create_runner_app(
                 extra={"session_id": conv_id},
             )
 
-    async def _cancel_inprocess_turn(conv_id: str) -> None:
+    async def _cancel_inprocess_turn(conv_id: str) -> bool:
+        """Cancel this session's live turn and forward the interrupt downstream.
+
+        :param conv_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
+        :returns: ``True`` when an interrupt was delivered somewhere (a runner
+            turn was torn down, or a still-busy vendor agent was asked to stop);
+            ``False`` when there was genuinely nothing running to interrupt.
+        """
         # Distinguish "no live turn" (absent) from a stream-mode turn (present as
         # the None sentinel — driven by the AP request's consumption of
         # proxy_stream, so the runner owns no cancellable Task). Both a live Task
         # and the sentinel have a live harness turn parked on a future, so the
         # interrupt must be forwarded for either.
         if conv_id not in _active_turns:
-            return
+            return await _forward_interrupt_to_busy_vendor(conv_id)
         target = _active_turns.get(conv_id)
         if isinstance(target, asyncio.Task) and target.done():
             # A done Task is a corpse, not a live turn. Leaving it wedges every
             # ``conv in _active_turns`` liveness check (the buffer gate would strand
             # later messages) — sweep it, tokens included.
             _sweep_dead_turn_slot(conv_id, target)
-            return
+            return await _forward_interrupt_to_busy_vendor(conv_id)
         _interrupted_sessions.add(conv_id)
         await _forward_harness_interrupt(conv_id)
         # Floor: force-cancel the runner Task when we own one. In stream mode
@@ -3999,6 +4006,33 @@ def create_runner_app(
         # ending proxy_stream.
         if isinstance(target, asyncio.Task):
             await _cancel_active_turn(conv_id, expected_task=target)
+        return True
+
+    async def _forward_interrupt_to_busy_vendor(conv_id: str) -> bool:
+        """Forward an interrupt for a vendor agent that outlived the runner turn.
+
+        A native harness's agent keeps generating in its own TUI/server after
+        the runner's turn object is gone, so "no runner turn" does not mean "not
+        busy" — ``_native_turn_in_flight`` is the authority there. Returning
+        early instead is what made Pause a silent no-op on the native harnesses
+        with no :class:`NativeInterruptRunner` handler; the harness's own
+        ``interrupt_session`` still reaches the vendor's cancel, so forward to it.
+
+        :param conv_id: Session/conversation identifier.
+        :returns: ``True`` when the interrupt was forwarded, ``False`` when the
+            session was not reported busy.
+        """
+        if not _native_turn_in_flight(conv_id):
+            return False
+        _logger.info(
+            "Interrupt for %s has no runner turn but its native agent still "
+            "reports %s; forwarding to the harness.",
+            conv_id,
+            _native_pane_status.get(conv_id),
+            extra={"session_id": conv_id},
+        )
+        await _forward_harness_interrupt(conv_id)
+        return True
 
     async def _resync_turn_state(
         conv_id: str, reason: str, *, owner_response_id: str | None = None
@@ -6500,7 +6534,12 @@ def create_runner_app(
             _interrupt_resp = await _native_interrupt_runner.interrupt(_harness, conversation_id)
             if _interrupt_resp is not None:
                 return _interrupt_resp
-            await _cancel_inprocess_turn(conversation_id)
+            if not await _cancel_inprocess_turn(conversation_id):
+                _logger.info(
+                    "Interrupt for %s found no turn running.",
+                    conversation_id,
+                    extra={"session_id": conversation_id},
+                )
             return Response(status_code=204)
 
         if body_type == "external_session_status":
@@ -6653,7 +6692,12 @@ def create_runner_app(
             _stop_resp = await _native_interrupt_runner.stop(_harness, conversation_id)
             if _stop_resp is not None:
                 return _stop_resp
-            await _cancel_inprocess_turn(conversation_id)
+            if not await _cancel_inprocess_turn(conversation_id):
+                _logger.info(
+                    "Stop for %s found no turn running.",
+                    conversation_id,
+                    extra={"session_id": conversation_id},
+                )
             return Response(status_code=204)
 
         if body_type == "effort_change":
