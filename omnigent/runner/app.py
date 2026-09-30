@@ -246,9 +246,18 @@ _CODEX_POPUP_RENDER_S = 0.7
 
 # Budget for confirming an approval switch actually landed. Codex echoes
 # "Permissions updated to <label>" once the popup applies; we poll the pane for
-# it so a no-op (e.g. a preset this codex build's /permissions doesn't offer)
-# fails loud instead of the label claiming a mode the TUI never entered.
+# it so a keystroke that didn't apply (e.g. a slow-rendering popup) fails loud
+# instead of the label claiming a mode the TUI never entered.
 _CODEX_PERMISSION_CONFIRM_BUDGET_S = 4.0
+
+# Budget for the /permissions popup to render its option rows before we read
+# them to find the target preset's menu digit. The popup can be slow to draw
+# mid-session (a busy TUI, MCP still starting), so give it room; if it still
+# can't be read we fall back to the preset's conventional menu position rather
+# than failing the switch. Which rows the popup lists is codex-config-dependent
+# (Read Only appears only with a read-only permission profile), so the digit is
+# read from the live popup when possible rather than hardcoded.
+_CODEX_PERMISSION_MENU_BUDGET_S = 5.0
 
 
 def _warn_unresolved_sub_agent(session_id: str | None, sub_agent_name: str) -> None:
@@ -6212,7 +6221,9 @@ def create_runner_app(
         # Codex switches approval stance through its own /permissions popup, not
         # thread/settings/update (that RPC drives model/effort but no-ops for
         # approval). So drive the popup by keystroke into the codex tmux pane —
-        # the same channel /compact uses — selecting the preset by its menu digit.
+        # the same channel /compact uses — reading the popup to find the preset's
+        # menu digit (row positions vary by codex build/platform, so we discover
+        # it rather than hardcode it) and confirming Codex echoed the switch.
         from omnigent.codex_approval_modes import codex_permission_preset
 
         preset = codex_permission_preset(mode)
@@ -6235,17 +6246,17 @@ def create_runner_app(
                 },
             )
         try:
-            await asyncio.to_thread(
+            offered = await asyncio.to_thread(
                 _inject_codex_permission_mode,
                 str(instance.socket_path),
                 instance.tmux_target,
-                menu_key=preset.menu_key,
+                label=preset.label,
                 needs_confirm=preset.needs_confirm,
             )
             # Confirm the switch landed before reporting success — the injection
-            # is otherwise fire-and-forget, so an unsupported preset (a menu row
-            # this codex build lacks) would silently no-op.
-            confirmed = await asyncio.to_thread(
+            # is otherwise fire-and-forget, so a slow-rendering popup would leave
+            # the label claiming a mode the TUI never entered.
+            confirmed = offered and await asyncio.to_thread(
                 _codex_permission_mode_confirmed,
                 str(instance.socket_path),
                 instance.tmux_target,
@@ -6261,14 +6272,36 @@ def create_runner_app(
                     ),
                 },
             )
+        if not offered:
+            # The popup was read but had no row for this preset. Codex lists Read
+            # Only only when the session runs with a read-only permission profile,
+            # so point the user at the reachable path instead of a phantom switch.
+            if preset.value == "read-only":
+                detail = (
+                    "Codex's /permissions popup doesn't offer Read Only on this "
+                    "platform — Codex lists it only on Windows or when a permission "
+                    "profile is active. To run read-only, start a new session in "
+                    "read-only mode."
+                )
+            else:
+                detail = (
+                    f"Codex's /permissions popup on this session doesn't offer {preset.label!r}."
+                )
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "codex_native_approval_mode_unsupported",
+                    "detail": detail,
+                },
+            )
         if not confirmed:
             return JSONResponse(
                 status_code=503,
                 content={
                     "error": "codex_native_approval_mode_failed",
                     "detail": (
-                        f"Codex did not confirm the switch to {preset.label!r}; this codex "
-                        "build's /permissions may not offer it."
+                        f"Codex didn't confirm the switch to {preset.label!r} within "
+                        f"{_CODEX_PERMISSION_CONFIRM_BUDGET_S:g}s; please try again."
                     ),
                 },
             )
@@ -7308,16 +7341,29 @@ def create_runner_app(
         socket_path: str,
         target: str,
         *,
-        menu_key: str,
+        label: str,
         needs_confirm: bool,
-    ) -> None:
-        # Drive Codex's /permissions popup: open it, then select the preset by
-        # its menu digit (position-independent, unlike arrow navigation). Full
-        # Access opens a "Yes, continue anyway" sub-dialog whose first option
-        # (digit 1) confirms. A settle pause between keystrokes is required — each
-        # screen draws asynchronously, and typing the command then pressing Enter
-        # back-to-back races the slash-menu so the command never submits.
-        from omnigent.harnesses.claude_native.bridge import _run_tmux
+    ) -> bool:
+        # Drive Codex's /permissions popup: open it, read its rows to find the
+        # digit that selects *label*, then press it. Which rows the popup lists
+        # depends on the session's codex config (Read Only shows only with a
+        # read-only permission profile) and their order can vary, so the digit is
+        # read from the live popup. If the popup can't be read in time (a busy
+        # TUI, a slow draw), fall back to the preset's conventional menu position
+        # rather than failing the switch. Full Access opens a "Yes, continue
+        # anyway" sub-dialog whose first option (digit 1) confirms. A settle pause
+        # between keystrokes is required — each screen draws asynchronously, and
+        # typing the command then pressing Enter back-to-back races the slash-menu
+        # so the command never submits.
+        #
+        # Returns True once a digit is pressed for *label* (from the live popup,
+        # or its conventional position on fallback); False when the popup was read
+        # but lists no row for *label*.
+        from omnigent.codex_approval_modes import (
+            CODEX_NATIVE_PERMISSION_PRESETS,
+            codex_permissions_menu,
+        )
+        from omnigent.harnesses.claude_native.bridge import _capture_pane, _run_tmux
 
         # Reset to a clean composer so the command submits: close any stray
         # menu/popup, then clear the line. C-u also wipes any text the TUI user
@@ -7327,26 +7373,67 @@ def create_runner_app(
         _run_tmux(socket_path, "send-keys", "-l", "-t", target, "/permissions")
         time.sleep(_CODEX_POPUP_RENDER_S)
         _run_tmux(socket_path, "send-keys", "-t", target, "Enter")
-        time.sleep(_CODEX_POPUP_RENDER_S)
-        _run_tmux(socket_path, "send-keys", "-l", "-t", target, menu_key)
+
+        # Wait for the popup to draw. Anchor on seeing at least two known preset
+        # rows (every popup variant lists Ask for approval and Full Access)
+        # rather than any numbered line, so a numbered list still visible in the
+        # transcript above can't be mistaken for the rendered popup.
+        known_labels = {preset.label for preset in CODEX_NATIVE_PERMISSION_PRESETS}
+
+        def _read_menu() -> dict[str, str]:
+            return codex_permissions_menu(_capture_pane(socket_path, target))
+
+        deadline = time.monotonic() + _CODEX_PERMISSION_MENU_BUDGET_S
+        options: dict[str, str] = {}
+        while True:
+            time.sleep(_CODEX_POPUP_RENDER_S)
+            options = _read_menu()
+            if len(options.keys() & known_labels) >= 2:
+                break
+            if time.monotonic() >= deadline:
+                options = {}
+                break
+
+        if options:
+            # The live popup was read: trust it. A missing row means this
+            # session's codex genuinely doesn't offer the preset (e.g. Read Only
+            # without a read-only permission profile). Re-read once to tolerate a
+            # partially-drawn popup before concluding the row is absent.
+            digit = options.get(label)
+            if digit is None:
+                time.sleep(_CODEX_POPUP_RENDER_S)
+                digit = _read_menu().get(label)
+            if digit is None:
+                # Close the popup so the TUI isn't stranded in it.
+                _run_tmux(socket_path, "send-keys", "-t", target, "Escape")
+                return False
+        else:
+            # The popup couldn't be read within the budget (a busy or slow TUI).
+            # Fall back to the preset's conventional menu position and let the
+            # confirmation echo gate correctness, rather than failing the switch.
+            digit = next(
+                (
+                    str(position)
+                    for position, preset in enumerate(CODEX_NATIVE_PERMISSION_PRESETS, start=1)
+                    if preset.label == label
+                ),
+                None,
+            )
+            if digit is None:
+                return False
+        _run_tmux(socket_path, "send-keys", "-l", "-t", target, digit)
         if needs_confirm:
             time.sleep(_CODEX_POPUP_RENDER_S)
             _run_tmux(socket_path, "send-keys", "-l", "-t", target, "1")
+        return True
 
     def _codex_permission_mode_confirmed(socket_path: str, target: str, label: str) -> bool:
-        # Codex echoes "Permissions updated to <label>" when a /permissions switch
-        # applies. Poll the pane and require the most-recent such line to match the
-        # target, so a keystroke that hit a non-existent menu row (a preset this
-        # codex build doesn't offer) is reported as not-applied rather than the
-        # label claiming a mode the TUI never entered.
+        from omnigent.codex_approval_modes import codex_permission_switch_confirmed
         from omnigent.harnesses.claude_native.bridge import _capture_pane
 
-        marker = "Permissions updated to "
         deadline = time.monotonic() + _CODEX_PERMISSION_CONFIRM_BUDGET_S
         while True:
-            pane = _capture_pane(socket_path, target)
-            updates = [line for line in pane.splitlines() if marker in line]
-            if updates and updates[-1].split(marker, 1)[1].strip() == label:
+            if codex_permission_switch_confirmed(_capture_pane(socket_path, target), label):
                 return True
             if time.monotonic() >= deadline:
                 return False
