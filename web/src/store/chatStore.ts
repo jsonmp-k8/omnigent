@@ -151,7 +151,10 @@ import {
   isSystemUserContent,
   taskNotificationMarkerContent,
 } from "@/lib/systemMessage";
-import { isNativeTerminalSession as isNativeTerminalSessionFn } from "@/lib/nativeCodingAgents";
+import {
+  isNativeTerminalSession as isNativeTerminalSessionFn,
+  nativeCodingAgentForHarness,
+} from "@/lib/nativeCodingAgents";
 import type { StoredReplyDraft } from "@/lib/replyDraft";
 import { toast } from "sonner";
 
@@ -1861,13 +1864,15 @@ export function consumePendingInitialPrompt(conversationId: string): PendingInit
  *
  * A non-native SDK harness (claude-sdk, codex) carries no wrapper label, so
  * ``supportsEffortControl`` needs the declared family to know the session takes
- * an effort override. Reads the cached harness catalog; ``null`` when the map
- * is unavailable or the harness declares no family.
+ * an effort override. Native harnesses keep their wrapper-label gate (as in
+ * ChatPage), so they resolve to ``null`` here too. Reads the cached harness
+ * catalog; ``null`` when the map is unavailable or the harness declares no family.
  */
 async function effortFamilyForSession(
   session: { harness?: string | null } | null | undefined,
 ): Promise<string | null> {
   if (queryClient === null || !session?.harness) return null;
+  if (nativeCodingAgentForHarness(session.harness)) return null;
   try {
     const catalog = await queryClient.fetchQuery({
       queryKey: ["harness-labels"],
