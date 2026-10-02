@@ -134,8 +134,8 @@ offers only your agents.
 
 Trimming hides, it never deletes. A packaged agent already seeded by an
 earlier boot keeps its database row, so sessions bound to it keep working and
-their history is untouched; only the new-session picker omits it. Removing a
-name from the allowlist brings it straight back on the next restart.
+their history is untouched; only the new-session picker omits it. Adding a
+name back to the allowlist brings it straight back on the next restart.
 
 Built-ins are keyed by name. If an extra's file stem or directory name matches
 an existing built-in, startup refreshes that stable row with the extra bundle;
