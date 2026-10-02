@@ -31,10 +31,8 @@ _logger = logging.getLogger(__name__)
 #: serve, e.g. ``"claude-native-ui,polly"``. Unset means "all".
 SEEDED_AGENTS_ENV = "OMNIGENT_SEEDED_AGENTS"
 
-# Packaged names the current configuration suppresses. Written once per
-# lifespan startup by ``_ensure_default_agents`` and read by GET /v1/agents.
-# Derived purely from the environment and the packaged roster, so concurrent
-# apps in one process compute the same value.
+# Packaged names the current configuration suppresses: written once per
+# lifespan startup by ``_ensure_default_agents``, read by GET /v1/agents.
 _suppressed: frozenset[str] = frozenset()
 
 

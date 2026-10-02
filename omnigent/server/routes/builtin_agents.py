@@ -34,7 +34,7 @@ from omnigent.server.auth import AuthProvider, local_single_user_enabled
 from omnigent.server.bundles import content_bundle_location, validate_agent_bundle
 from omnigent.server.routes._auth_helpers import require_user as _require_user
 from omnigent.server.routes._origin import require_trusted_origin
-from omnigent.server.schemas import AgentObject, MCPServerSummary, PaginatedList, SkillSummary
+from omnigent.server.schemas import AgentList, AgentObject, MCPServerSummary, SkillSummary
 from omnigent.server.seeded_agents import suppressed_agent_names
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
@@ -259,7 +259,7 @@ def create_builtin_agents_router(
         before: str | None = Query(default=None),
         order: str = Query(default="desc", pattern="^(asc|desc)$"),
         scope: str | None = Query(default=None, pattern="^user$"),
-    ) -> PaginatedList:
+    ) -> AgentList:
         """List server agents, or with ``scope=user`` the caller's own agents.
 
         Server agents come from ``agent_store.list()``, which never returns
@@ -282,21 +282,21 @@ def create_builtin_agents_router(
         :param before: Cursor: return agents before this id (server agents only).
         :param order: Sort order, ``"asc"`` or ``"desc"`` (server agents only).
         :param scope: ``"user"`` to list the caller's own agents.
-        :returns: A :class:`PaginatedList` of agents.
+        :returns: An :class:`AgentList` of agents; for server agents it also names
+            the packaged built-ins the deployment suppressed.
         """
         user_id = _require_user(request, auth_provider)
         if scope != "user":
             page = agent_store.list(limit=limit, after=after, before=before, order=order)
             suppressed = suppressed_agent_names()
-            return PaginatedList(
+            return AgentList(
                 data=[
-                    _to_agent_object(a, agent_cache)
-                    for a in page.data
-                    if a.name not in suppressed
+                    _to_agent_object(a, agent_cache) for a in page.data if a.name not in suppressed
                 ],
                 first_id=page.first_id,
                 last_id=page.last_id,
                 has_more=page.has_more,
+                suppressed_agent_names=sorted(suppressed),
             )
         require_user_agents()
         if before is not None or order != "desc":
@@ -313,7 +313,7 @@ def create_builtin_agents_router(
         data = await asyncio.to_thread(
             lambda: [_to_agent_object(a, agent_cache) for a in page.data]
         )
-        return PaginatedList(
+        return AgentList(
             data=data, first_id=page.first_id, last_id=page.last_id, has_more=page.has_more
         )
 

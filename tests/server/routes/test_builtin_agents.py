@@ -121,3 +121,37 @@ async def test_suppressed_agents_are_hidden_from_discovery(
     assert "house-agent" in names
     # Hidden, not deleted — the row (and its cascade-linked history) survives.
     assert agent_store.get_by_name("polly") is not None
+
+
+async def test_list_publishes_suppressed_agent_names(
+    client: httpx.AsyncClient,
+    db_uri: str,
+) -> None:
+    """
+    The list names the packaged built-ins it hides, so a client that also
+    discovers agents from session history (the web picker) can drop a hidden
+    built-in instead of resurfacing it as a custom agent.
+    """
+    from omnigent.server import seeded_agents
+
+    agent_store = SqlAlchemyAgentStore(db_uri)
+    agent_store.create(builtin_agent_id("polly"), name="polly", bundle_location="test:///p")
+    seeded_agents.record_suppressed_agents(frozenset({"polly", "debby"}))
+    try:
+        resp = await client.get("/v1/agents?limit=100")
+    finally:
+        seeded_agents.record_suppressed_agents(frozenset())
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["suppressed_agent_names"] == ["debby", "polly"]
+    assert "polly" not in [a["name"] for a in body["data"]]
+
+
+async def test_list_publishes_no_suppressed_names_by_default(
+    client: httpx.AsyncClient,
+) -> None:
+    """An untrimmed deployment reports an empty list, never a missing field."""
+    resp = await client.get("/v1/agents?limit=5")
+    assert resp.status_code == 200
+    assert resp.json()["suppressed_agent_names"] == []

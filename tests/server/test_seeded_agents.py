@@ -276,3 +276,78 @@ def test_os_pathsep_is_not_a_separator(monkeypatch: pytest.MonkeyPatch) -> None:
     parsed = seeded_agents.seeded_agent_allowlist()
     assert parsed is not None
     assert "polly" not in parsed
+
+
+def test_extra_that_overrides_a_packaged_name_is_not_suppressed(
+    seed_stores: _SeedStores, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator override of a packaged name survives a trimmed allowlist.
+
+    ``OMNIGENT_BUILTIN_AGENT_DIRS`` is documented as the supported way to
+    override a built-in by name. With the allowlist dropping that same name,
+    the suppressed set must not include it — the override IS the operator's
+    roster, and hiding it would empty the picker of exactly what they seeded.
+    """
+    override = tmp_path / f"{server_app._POLLY_AGENT_NAME}.yaml"
+    override.write_text(
+        f"name: {server_app._POLLY_AGENT_NAME}\n"
+        "executor:\n"
+        "  harness: claude-sdk\n"
+        "  model: claude-sonnet-4-20250514\n"
+        "prompt: house polly\n"
+    )
+    monkeypatch.setenv(seeded_agents.SEEDED_AGENTS_ENV, "")
+    monkeypatch.setenv(server_app._EXTRA_BUILTIN_AGENTS_ENV, str(override))
+    server_app._ensure_default_agents(
+        seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
+    )
+    assert seed_stores.agent_store.get_by_name(server_app._POLLY_AGENT_NAME) is not None
+    assert server_app._POLLY_AGENT_NAME not in seeded_agents.suppressed_agent_names()
+
+
+def test_extras_seeder_reports_the_names_it_seeded(
+    seed_stores: _SeedStores, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The extras helper returns its seeded names; nothing when unset."""
+    monkeypatch.delenv(server_app._EXTRA_BUILTIN_AGENTS_ENV, raising=False)
+    assert (
+        server_app._ensure_extra_builtin_agents(
+            seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
+        )
+        == frozenset()
+    )
+    custom = tmp_path / "house-agent.yaml"
+    custom.write_text(
+        "name: house-agent\n"
+        "executor:\n"
+        "  harness: claude-sdk\n"
+        "  model: claude-sonnet-4-20250514\n"
+        "prompt: hi\n"
+    )
+    monkeypatch.setenv(server_app._EXTRA_BUILTIN_AGENTS_ENV, str(custom))
+    assert server_app._ensure_extra_builtin_agents(
+        seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
+    ) == frozenset({"house-agent"})
+
+
+def test_unknown_allowlist_name_warns_instead_of_silently_hiding_everything(
+    seed_stores: _SeedStores,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A typo'd name (``claude-native`` for ``claude-native-ui``) is called out.
+
+    The allowlist matches nothing, so every packaged agent is suppressed —
+    the log must say the configured name is unknown, not just list what was
+    trimmed, or the operator has no clue why the picker went empty.
+    """
+    monkeypatch.setenv(seeded_agents.SEEDED_AGENTS_ENV, "claude-native,Polly")
+    with caplog.at_level("WARNING", logger=server_app.__name__):
+        server_app._ensure_default_agents(
+            seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
+        )
+    warning = next(r for r in caplog.records if seeded_agents.SEEDED_AGENTS_ENV in r.getMessage())
+    message = warning.getMessage()
+    # Both unknown names are called out, and the real roster is offered.
+    assert "claude-native" in message and "Polly" in message
+    assert "claude-native-ui" in message
