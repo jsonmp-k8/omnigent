@@ -1,4 +1,10 @@
-"""Tests for the OSV advisory delta judge in the Security Scan."""
+"""Tests for the OSV advisory delta judge in the Security Scan.
+
+The script shells out to ``uv export`` and ``pip-audit``; both are replaced
+here by small stub executables so every branch of the workflow path (export
+failure, missing report, malformed report, the delta verdicts) runs end to
+end through the real script without network or a real lockfile.
+"""
 
 from __future__ import annotations
 
@@ -9,76 +15,144 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / ".github/scripts/security-scan/osv-delta.py"
 
+# Stub `uv`: `uv export ...` prints a few requirement lines (one editable, to
+# prove it is filtered) unless the checkout contains `.export-fails`.
+_UV_STUB = """\
+import pathlib, sys
+if pathlib.Path(".export-fails").exists():
+    sys.stderr.write("error: Failed to parse `uv.lock`\\n")
+    sys.exit(2)
+print("-e .")
+print("urllib3==2.7.0")
+print("pyjwt==2.13.0")
+"""
 
-def _report(path: Path, deps: list[tuple[str, str, list[tuple[str, list[str]]]]]) -> Path:
-    """Write a pip-audit ``--format json`` report.
-
-    :param path: Destination file.
-    :param deps: ``(name, version, [(advisory id, fix versions), ...])`` per package.
-    :returns: ``path``, for convenience.
-    """
-    payload: dict[str, Any] = {
-        "dependencies": [
-            {
-                "name": name,
-                "version": version,
-                "vulns": [
-                    {"id": vid, "fix_versions": fixes, "aliases": []} for vid, fixes in vulns
-                ],
-            }
-            for name, version, vulns in deps
-        ],
-        "fixes": [],
-    }
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    return path
-
-
-def _run(base: list[Path], head: list[Path], tmp_path: Path) -> subprocess.CompletedProcess[str]:
-    summary = tmp_path / "summary.md"
-    env = {
-        **os.environ,
-        "BASE_REPORTS": " ".join(str(p) for p in base),
-        "HEAD_REPORTS": " ".join(str(p) for p in head),
-        "GITHUB_STEP_SUMMARY": str(summary),
-    }
-    return subprocess.run(
-        [sys.executable, str(SCRIPT)], env=env, capture_output=True, text=True, check=False
-    )
-
+# Stub `pip-audit`: copies <reports dir>/<requirements stem>.json to --output.
+# A missing fixture means "pip-audit crashed before writing a report".
+_PIP_AUDIT_STUB = """\
+import os, pathlib, shutil, sys
+args = sys.argv[1:]
+req = pathlib.Path(args[args.index("--requirement") + 1])
+out = pathlib.Path(args[args.index("--output") + 1])
+assert "--no-deps" in args and "json" in args
+assert "-e ." not in req.read_text(), "editable requirement leaked into the audit"
+fixture = pathlib.Path(os.environ["OSV_STUB_REPORTS"]) / (req.stem + ".json")
+if not fixture.exists():
+    sys.stderr.write("ERROR: resolution failed\\n")
+    sys.exit(2)
+shutil.copy(fixture, out)
+sys.exit(1 if "vulns" in fixture.read_text() else 0)
+"""
 
 _OPEN = [
     ("urllib3", "2.7.0", [("PYSEC-2026-4177", ["2.8.0"])]),
     ("pyjwt", "2.13.0", [("PYSEC-2026-4145", ["2.14.0"]), ("CVE-2026-102275", ["2.15.0"])]),
 ]
+_CLEAN: list[Any] = []
+_WERKZEUG = ("werkzeug", "3.1.8", [("CVE-2026-102598", ["3.1.9"])])
 
 
-def test_single_advisory_bump_passes_while_others_remain_open(tmp_path: Path) -> None:
+def _report_json(deps: list[tuple[str, str, list[tuple[str, list[str]]]]]) -> str:
+    return json.dumps(
+        {
+            "dependencies": [
+                {
+                    "name": name,
+                    "version": version,
+                    "vulns": [
+                        {"id": vid, "fix_versions": fixes, "aliases": []} for vid, fixes in vulns
+                    ],
+                }
+                for name, version, vulns in deps
+            ],
+            "fixes": [],
+        }
+    )
+
+
+class Harness:
+    """Two fake checkouts plus stub tools; ``run`` executes the real script."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.base = tmp_path / "base"
+        self.head = tmp_path / "pr"
+        self.reports = tmp_path / "reports"
+        self.work = tmp_path / "work"
+        self.summary = tmp_path / "summary.md"
+        for d in (self.base, self.head, self.reports, self.work):
+            d.mkdir()
+        (tmp_path / "uv_stub.py").write_text(_UV_STUB)
+        (tmp_path / "pip_audit_stub.py").write_text(_PIP_AUDIT_STUB)
+        self.env = {
+            **os.environ,
+            "OSV_DELTA_UV": f"{sys.executable} {tmp_path / 'uv_stub.py'}",
+            "OSV_DELTA_PIP_AUDIT": f"{sys.executable} {tmp_path / 'pip_audit_stub.py'}",
+            "OSV_STUB_REPORTS": str(self.reports),
+            "GITHUB_STEP_SUMMARY": str(self.summary),
+        }
+
+    def reports_for(self, side: str, deps: list[Any] | None, *, raw: str | None = None) -> None:
+        """Provide the two per-set reports for ``side`` ('base' or 'pr').
+
+        ``deps=None`` provides nothing (pip-audit "crashes"); ``raw`` writes
+        the given text verbatim instead of a well-formed report.
+        """
+        for name in ("main", "antigravity"):
+            path = self.reports / f"{side}-{name}-req.json"
+            if raw is not None:
+                path.write_text(raw)
+            elif deps is not None:
+                # Put all findings in the main set; the antigravity set is clean.
+                path.write_text(_report_json(deps if name == "main" else []))
+
+    def run(self) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--base",
+                str(self.base),
+                "--head",
+                str(self.head),
+                "--work",
+                str(self.work),
+            ],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+
+@pytest.fixture
+def harness(tmp_path: Path) -> Harness:
+    return Harness(tmp_path)
+
+
+def test_single_advisory_bump_passes_while_others_remain_open(harness: Harness) -> None:
     """The deadlock case: fixing urllib3 must pass even though pyjwt is still open."""
-    base = _report(tmp_path / "base.json", _OPEN)
-    head = _report(tmp_path / "head.json", _OPEN[1:])  # urllib3 fixed, pyjwt untouched
+    harness.reports_for("base", _OPEN)
+    harness.reports_for("pr", _OPEN[1:])  # urllib3 fixed, pyjwt untouched
 
-    result = _run([base], [head], tmp_path)
+    result = harness.run()
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Resolved by this PR (1)" in result.stdout
     assert "::warning::2 advisory/advisories remain open" in result.stdout
     assert "::error::" not in result.stdout
-    assert "Resolved 1" in (tmp_path / "summary.md").read_text()
+    assert "Resolved 1" in harness.summary.read_text()
 
 
-def test_introducing_a_vulnerable_pin_fails(tmp_path: Path) -> None:
-    """A PR that pins a version with an advisory the base lacks is blocked."""
-    base = _report(tmp_path / "base.json", _OPEN)
-    head = _report(
-        tmp_path / "head.json",
-        [*_OPEN, ("werkzeug", "3.1.8", [("CVE-2026-102598", ["3.1.9"])])],
-    )
+def test_introducing_a_vulnerable_pin_fails(harness: Harness) -> None:
+    harness.reports_for("base", _OPEN)
+    harness.reports_for("pr", [*_OPEN, _WERKZEUG])
 
-    result = _run([base], [head], tmp_path)
+    result = harness.run()
 
     assert result.returncode == 1
     assert "INTRODUCED by this PR (1)" in result.stdout
@@ -86,45 +160,119 @@ def test_introducing_a_vulnerable_pin_fails(tmp_path: Path) -> None:
     assert "::error::This PR pins 1 package version(s)" in result.stdout
 
 
-def test_new_advisory_on_an_existing_package_counts_as_introduced(tmp_path: Path) -> None:
+def test_new_advisory_on_an_existing_package_counts_as_introduced(harness: Harness) -> None:
     """Same package, different advisory id: the base never had it, so it blocks."""
-    base = _report(tmp_path / "base.json", [("pyjwt", "2.13.0", [("PYSEC-2026-4145", [])])])
-    head = _report(tmp_path / "head.json", [("pyjwt", "2.12.0", [("PYSEC-2026-0001", [])])])
+    harness.reports_for("base", [("pyjwt", "2.13.0", [("PYSEC-2026-4145", [])])])
+    harness.reports_for("pr", [("pyjwt", "2.12.0", [("PYSEC-2026-0001", [])])])
 
-    result = _run([base], [head], tmp_path)
+    result = harness.run()
 
     assert result.returncode == 1
     assert "PYSEC-2026-0001" in result.stdout
 
 
-def test_clean_head_and_base_pass_quietly(tmp_path: Path) -> None:
-    base = _report(tmp_path / "base.json", [])
-    head = _report(tmp_path / "head.json", [])
+def test_clean_head_and_base_pass_quietly(harness: Harness) -> None:
+    harness.reports_for("base", _CLEAN)
+    harness.reports_for("pr", _CLEAN)
 
-    result = _run([base], [head], tmp_path)
+    result = harness.run()
 
-    assert result.returncode == 0
+    assert result.returncode == 0, result.stdout + result.stderr
     assert "No new advisories introduced" in result.stdout
-    assert not (tmp_path / "summary.md").exists()
+    assert not harness.summary.exists()
 
 
-def test_findings_merge_across_multiple_reports_and_tolerate_missing_files(
-    tmp_path: Path,
-) -> None:
-    """The scan audits two resolution sets per side; a report pip-audit never wrote is empty."""
-    base_a = _report(tmp_path / "base-a.json", _OPEN[:1])
-    base_b = _report(tmp_path / "base-b.json", _OPEN[1:])
-    head_a = _report(tmp_path / "head-a.json", _OPEN)
-    missing = tmp_path / "never-written.json"
+def test_package_names_compare_case_insensitively(harness: Harness) -> None:
+    harness.reports_for("base", [("PyJWT", "2.13.0", [("PYSEC-2026-4145", [])])])
+    harness.reports_for("pr", [("pyjwt", "2.13.0", [("PYSEC-2026-4145", [])])])
 
-    result = _run([base_a, base_b], [head_a, missing], tmp_path)
+    assert harness.run().returncode == 0
 
-    assert result.returncode == 0, result.stdout
+
+# ── The base side failing must not block an innocent PR ─────────────
+
+
+def test_base_export_failure_warns_and_passes(harness: Harness) -> None:
+    """main's lockfile not exporting is not the PR's fault: warn, list, pass."""
+    (harness.base / ".export-fails").touch()
+    harness.reports_for("pr", _OPEN)
+
+    result = harness.run()
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "::warning::Could not audit the base branch's uv.lock" in result.stdout
+    assert "Failed to parse `uv.lock`" in result.stdout
+    assert "::warning::3 advisory/advisories are open on this PR's uv.lock" in result.stdout
     assert "::error::" not in result.stdout
+    assert "Baseline unavailable" in harness.summary.read_text()
 
 
-def test_package_names_compare_case_insensitively(tmp_path: Path) -> None:
-    base = _report(tmp_path / "base.json", [("PyJWT", "2.13.0", [("PYSEC-2026-4145", [])])])
-    head = _report(tmp_path / "head.json", [("pyjwt", "2.13.0", [("PYSEC-2026-4145", [])])])
+def test_base_pip_audit_crash_warns_and_passes(harness: Harness) -> None:
+    harness.reports_for("base", None)  # no fixture → stub pip-audit exits 2, writes nothing
+    harness.reports_for("pr", _CLEAN)
 
-    assert _run([base], [head], tmp_path).returncode == 0
+    result = harness.run()
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "pip-audit wrote no report" in result.stdout
+    assert "No advisories on the PR head (baseline unavailable" in result.stdout
+
+
+# ── The head side failing is the PR's problem and must fail loudly ──
+
+
+def test_head_export_failure_fails(harness: Harness) -> None:
+    (harness.head / ".export-fails").touch()
+    harness.reports_for("base", _CLEAN)
+
+    result = harness.run()
+
+    assert result.returncode == 1
+    assert "::error::Could not audit the PR head's uv.lock" in result.stdout
+    assert "uv export (main set) failed" in result.stdout
+
+
+def test_head_missing_report_fails(harness: Harness) -> None:
+    harness.reports_for("base", _CLEAN)
+    harness.reports_for("pr", None)
+
+    result = harness.run()
+
+    assert result.returncode == 1
+    assert "pip-audit wrote no report for pr-main-req.txt" in result.stdout
+
+
+# ── Malformed reports are a clean error, never a traceback ──────────
+
+
+@pytest.mark.parametrize(
+    ("raw", "why"),
+    [
+        ("{not json", "is not valid JSON"),
+        ('{"fixes": []}', "no 'dependencies' list"),
+        ('{"dependencies": ["urllib3"]}', "dependency entry is not an object"),
+        ('{"dependencies": [{"name": "urllib3", "vulns": [{"no_id": 1}]}]}', "malformed vuln"),
+    ],
+    ids=["not-json", "no-dependencies", "entry-not-object", "vuln-without-id"],
+)
+def test_malformed_head_report_is_a_clean_error(harness: Harness, raw: str, why: str) -> None:
+    harness.reports_for("base", _CLEAN)
+    harness.reports_for("pr", None, raw=raw)
+
+    result = harness.run()
+
+    assert result.returncode == 1
+    assert "::error::Could not audit the PR head's uv.lock" in result.stdout
+    assert why in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_malformed_base_report_counts_as_no_baseline(harness: Harness) -> None:
+    harness.reports_for("base", None, raw="{not json")
+    harness.reports_for("pr", _CLEAN)
+
+    result = harness.run()
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "::warning::Could not audit the base branch's uv.lock" in result.stdout
+    assert "Traceback" not in result.stderr

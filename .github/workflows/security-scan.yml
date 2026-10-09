@@ -161,65 +161,23 @@ jobs:
             echo "uv.lock not changed; skipping OSV scan."
             exit 0
           fi
-          # audit <checkout dir> <report prefix>: pip-audit the full locked
-          # resolution of one checkout into /tmp/<prefix>-*.json.
-          #
-          # Drop editable local packages (the project itself + sdks/*) before
-          # auditing. pip-audit can't hash an editable path requirement and
-          # errors out when one is present, so without this filter any PR that
-          # actually changes uv.lock fails here. We only want to audit
-          # third-party pinned packages anyway — OSV has no advisories for
-          # local source. Filtering all `-e` lines (rather than naming each
-          # workspace member) keeps this correct if members are added later.
-          # The project declares mutually exclusive extras (antigravity's
-          # protobuf>=7 conflicts with cwsandbox/modal/databricks and the lint
-          # group), so --all-extras alone exits 2 before pip-audit ever runs,
-          # blocking every gated downstream job for untrusted uv.lock PRs.
-          # Audit the full compatible resolution sets instead: everything
-          # except antigravity (with every dependency group, since
-          # default-groups is empty), then antigravity plus the `all` extra
-          # (which selects the locked databricks-sdk fork). Together they
-          # cover every registry package/version tuple in uv.lock.
-          #
-          # pip-audit exits 1 when it finds advisories but still writes the
-          # JSON report; a missing report therefore means the audit itself
-          # broke (resolution or network), which must fail loudly rather than
-          # pass as "no findings".
-          audit() {
-            local dir="$1" prefix="$2"
-            (
-              cd "$dir"
-              uv export --frozen --format requirements-txt \
-                --all-extras --no-extra antigravity --all-groups > "/tmp/$prefix-full.txt"
-              grep -v '^-e ' "/tmp/$prefix-full.txt" > "/tmp/$prefix-req.txt"
-              uv export --frozen --format requirements-txt \
-                --extra antigravity --extra all --no-default-groups > "/tmp/$prefix-antigravity.txt"
-              grep -v '^-e ' "/tmp/$prefix-antigravity.txt" > "/tmp/$prefix-ag-req.txt"
-            )
-            uvx pip-audit --requirement "/tmp/$prefix-req.txt" --no-deps \
-              --format json --output "/tmp/$prefix-report.json" || true
-            uvx pip-audit --requirement "/tmp/$prefix-ag-req.txt" --no-deps \
-              --format json --output "/tmp/$prefix-ag-report.json" || true
-            for report in "/tmp/$prefix-report.json" "/tmp/$prefix-ag-report.json"; do
-              if [ ! -s "$report" ]; then
-                echo "::error::pip-audit wrote no report for $dir ($report); the audit did not run."
-                exit 1
-              fi
-            done
-          }
-          audit "$GITHUB_WORKSPACE/pr" head
           if [ ! -f "$DELTA" ]; then
             # Before osv-delta.py lands on main the scanner checkout lacks it:
-            # fall back to judging the head on its own (bootstrap).
+            # fall back to judging the head on its own (bootstrap). Mirrors the
+            # script's export sets; see its docstring for why there are two.
             echo "::warning::osv-delta.py not on main yet; auditing the PR head without a baseline."
-            uvx pip-audit --requirement /tmp/head-req.txt --no-deps
-            uvx pip-audit --requirement /tmp/head-ag-req.txt --no-deps
+            cd "$GITHUB_WORKSPACE/pr"
+            uv export --frozen --format requirements-txt \
+              --all-extras --no-extra antigravity --all-groups | grep -v '^-e ' > /tmp/uv-req.txt
+            uv export --frozen --format requirements-txt \
+              --extra antigravity --extra all --no-default-groups | grep -v '^-e ' > /tmp/uv-req-ag.txt
+            uvx pip-audit --requirement /tmp/uv-req.txt --no-deps
+            uvx pip-audit --requirement /tmp/uv-req-ag.txt --no-deps
             exit 0
           fi
-          audit "$GITHUB_WORKSPACE/base" base
-          BASE_REPORTS="/tmp/base-report.json /tmp/base-ag-report.json" \
-          HEAD_REPORTS="/tmp/head-report.json /tmp/head-ag-report.json" \
-            python3 "$DELTA"
+          # Exports, audits and diffs both sides; the head failing to audit is
+          # an error, the base failing is a warning (not the PR's fault).
+          python3 "$DELTA" --base "$GITHUB_WORKSPACE/base" --head "$GITHUB_WORKSPACE/pr"
 
       - name: Semgrep (changed files, local rules)
         if: ${{ steps.gate.outputs.scan == 'true' }}
