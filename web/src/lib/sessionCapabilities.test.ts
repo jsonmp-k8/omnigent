@@ -68,6 +68,15 @@ describe("effortLevelsForFamily", () => {
     ]);
     expect(effortLevelsForFamily("gemini")).toEqual(["low", "medium", "high"]);
     expect(effortLevelsForFamily("copilot")).toEqual(["low", "medium", "high", "xhigh"]);
+    expect(effortLevelsForFamily("pi")).toEqual([
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
   });
 
   it("offers no ladder for none, codex-native (per-model), unknown, or absent", () => {

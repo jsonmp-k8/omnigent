@@ -56,7 +56,7 @@ interface HarnessCatalogWire {
   setup_steps?: Record<string, SetupStepWire[]>;
 }
 
-interface HarnessCatalog {
+export interface HarnessCatalog {
   /** harness id → picker label, merged over the built-in defaults. */
   labels: Record<string, string>;
   /** harness spelling → ordered setup steps (install/auth) the server describes. */

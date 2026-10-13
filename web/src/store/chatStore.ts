@@ -130,7 +130,7 @@ import { uploadFile } from "@/lib/filesApi";
 import { attachmentKey } from "@/lib/attachments";
 import type { ActiveResponse } from "./types";
 import { supportsEffortControl } from "@/lib/sessionCapabilities";
-import { fetchHarnessCatalog } from "@/lib/agentLabels";
+import { fetchHarnessCatalog, type HarnessCatalog } from "@/lib/agentLabels";
 import { claudePermissionModeFromSession } from "@/lib/claudePermissionMode";
 import { codexApprovalModeFromSession } from "@/lib/codexApprovalMode";
 import { codexPlanModeFromSession, isCodexNativeSession } from "@/lib/codexPlanMode";
@@ -1863,30 +1863,55 @@ export function consumePendingInitialPrompt(conversationId: string): PendingInit
   return prompt;
 }
 
+const HARNESS_CATALOG_QUERY = {
+  queryKey: ["harness-labels"] as const,
+  queryFn: fetchHarnessCatalog,
+  staleTime: 30_000,
+};
+
 /**
  * The reasoning-effort family a session's harness declares in ``/v1/harnesses``.
  *
  * A non-native SDK harness (claude-sdk, codex) carries no wrapper label, so
  * ``supportsEffortControl`` needs the declared family to know the session takes
  * an effort override. Native harnesses keep their wrapper-label gate (as in
- * ChatPage), so they resolve to ``null`` here too. Reads the cached harness
- * catalog; ``null`` when the map is unavailable or the harness declares no family.
+ * ChatPage), so they resolve to ``null`` here too. Refreshes the harness
+ * catalog when stale, but a failed refresh falls back to the cached catalog —
+ * the same data the picker is already rendering from — rather than treating
+ * the harness as unsupported. ``null`` only when no catalog is available at
+ * all or the harness declares no family.
  */
 async function effortFamilyForSession(
   session: { harness?: string | null } | null | undefined,
 ): Promise<string | null> {
   if (queryClient === null || !session?.harness) return null;
   if (nativeCodingAgentForHarness(session.harness)) return null;
+  let catalog: HarnessCatalog | undefined;
   try {
-    const catalog = await queryClient.fetchQuery({
-      queryKey: ["harness-labels"],
-      queryFn: fetchHarnessCatalog,
-      staleTime: 30_000,
-    });
-    return catalog.effortFamilies[session.harness] ?? null;
+    catalog = await queryClient.fetchQuery(HARNESS_CATALOG_QUERY);
   } catch {
-    return null;
+    catalog = queryClient.getQueryData<HarnessCatalog>(HARNESS_CATALOG_QUERY.queryKey);
   }
+  return catalog?.effortFamilies[session.harness] ?? null;
+}
+
+/**
+ * Synchronous variant for the hydration path: the declared family from the
+ * catalog already in cache, or ``undefined`` when no catalog has loaded yet.
+ * Never awaits — the transcript must not wait on ``/v1/harnesses``. When the
+ * catalog is absent it is prefetched in the background for the next lookup.
+ */
+function cachedEffortFamilyForSession(
+  session: { harness?: string | null } | null | undefined,
+): string | null | undefined {
+  if (queryClient === null || !session?.harness) return null;
+  if (nativeCodingAgentForHarness(session.harness)) return null;
+  const catalog = queryClient.getQueryData<HarnessCatalog>(HARNESS_CATALOG_QUERY.queryKey);
+  if (catalog === undefined) {
+    void queryClient.prefetchQuery(HARNESS_CATALOG_QUERY);
+    return undefined;
+  }
+  return catalog.effortFamilies[session.harness] ?? null;
 }
 
 export const useChatStore = create<ChatState>((_rootSet, get) => ({
@@ -4377,7 +4402,13 @@ async function bindStream(
     const snapshotNativeMessageIds = nativeCompletedMessageIds(items);
     snapshotNativeMessageIds.forEach((messageId) => ignoredNativeMessageIds.add(messageId));
 
-    const canApplyEffort = supportsEffortControl(session, await effortFamilyForSession(session));
+    // The session row's reasoning_effort is the server's truth; the harness
+    // catalog only gates whether a control is shown. Read the family from cache
+    // so hydration never waits on /v1/harnesses, and keep the server's value
+    // when no catalog has loaded yet rather than blanking a real setting.
+    const cachedFamily = cachedEffortFamilyForSession(session);
+    const canApplyEffort =
+      cachedFamily === undefined ? true : supportsEffortControl(session, cachedFamily);
     const effectiveEffort = canApplyEffort ? (session.reasoningEffort ?? null) : null;
 
     const snapshotBlocks = itemsToBlocks(items);

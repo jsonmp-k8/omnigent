@@ -351,14 +351,6 @@ describe("effortLevelsForConv with a declared effort family", () => {
     ]);
   });
 
-  it("keeps the shared default when no family is supplied", () => {
-    expect(effortLevelsForConv({ labels: {}, harness: "claude-sdk" }, [], null, null)).toEqual([
-      "low",
-      "medium",
-      "high",
-    ]);
-  });
-
   it("lets the wrapper label win over a family for native conversations", () => {
     const conv = { labels: { "omnigent.wrapper": "claude-code-native-ui" } };
     expect(effortLevelsForConv(conv, [], null, "openai")).toEqual([

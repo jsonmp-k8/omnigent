@@ -57,6 +57,10 @@ and steers messages while the agent is busy.
 - Hover the model/effort pill to see the tooltip; click it to open configuration.
 - In configuration, open the model picker, the effort picker, or the permission
   mode menu.
+- For a custom `claude-sdk` or `codex` agent session, open configuration and
+  pick an effort rung; the ladder is the harness's declared family (anthropic
+  or openai) and the pick persists on the session. This is the in-session
+  dial, distinct from the new-session composer's effort choice.
 - For a Codex session, open the Terminal view and change effort there, then
   return to Chat.
 - Type `/` in the message box; attach files with the button, by paste, or by

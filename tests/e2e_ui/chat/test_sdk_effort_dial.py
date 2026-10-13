@@ -1,17 +1,13 @@
 """E2E: a claude-sdk session gets the composer's reasoning-effort dial.
 
-The dial used to be gated on native wrapper labels alone, so a session on an
-SDK harness (``claude-sdk``, ``codex``) never showed it even though its
-executor already honors the session's ``reasoning_effort``. The gate now also
-reads the harness's declared effort family from ``/v1/harnesses``
-(``claude-sdk`` → ``anthropic``).
+A real Claude SDK session exposes the Anthropic effort ladder and persists a
+selected value without sending a turn. The composer gate reads the harness's
+declared effort family from ``/v1/harnesses`` (``claude-sdk`` → ``anthropic``),
+so this runs on the real web SPA against a live server + runner with a real
+``claude-sdk`` agent bundle: the catalog supplies the family and the runner
+keeps the composer gear live. No LLM turn is needed:
 
-Driven on the real web SPA against a live server + runner with a real
-``claude-sdk`` agent bundle, so ``/v1/harnesses`` supplies the anthropic family
-and the runner keeps the composer gear live. No LLM turn is needed — the dial
-and its persistence are exercised before any message is sent:
-
-1. the config gear opens and offers an Effort section (it did not before);
+1. the config gear opens and offers an Effort section;
 2. the ladder is the anthropic family's (``max`` present — an ``openai`` or the
    base 3-level ladder would not offer it);
 3. picking ``max`` persists ``reasoning_effort == "max"`` on the session row.
@@ -19,9 +15,6 @@ and its persistence are exercised before any message is sent:
 
 from __future__ import annotations
 
-import io
-import json
-import tarfile
 import time
 import uuid
 
@@ -29,17 +22,17 @@ import httpx
 import yaml
 from playwright.sync_api import Page, expect
 
+from tests._helpers.session import bind_session_runner, bundle_files, post_session_bundle
 from tests.e2e_ui.conftest import _ensure_runner_online, _server_state
 
 _COMPOSER_PLACEHOLDER = "Send a message…"
 
 
-def _build_claude_sdk_bundle(name: str, mock_llm_server_url: str) -> bytes:
-    """Build a one-file claude-sdk agent bundle wired at the mock LLM.
+def _claude_sdk_bundle(name: str, mock_llm_server_url: str) -> bytes:
+    """A one-file claude-sdk agent bundle wired at the mock LLM.
 
     :param name: Agent name (unique per test run).
     :param mock_llm_server_url: Mock server base URL WITHOUT ``/v1``.
-    :returns: The ``.tar.gz`` bundle bytes for multipart upload.
     """
     config = {
         "name": name,
@@ -50,32 +43,16 @@ def _build_claude_sdk_bundle(name: str, mock_llm_server_url: str) -> bytes:
             "auth": {"type": "api_key", "api_key": "mock-key", "base_url": mock_llm_server_url},
         },
     }
-    with io.BytesIO() as buf:
-        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            yaml_bytes = yaml.safe_dump(config, sort_keys=False).encode()
-            info = tarfile.TarInfo(f"{name}.yaml")
-            info.size = len(yaml_bytes)
-            tar.addfile(info, io.BytesIO(yaml_bytes))
-        return buf.getvalue()
+    return bundle_files({f"{name}.yaml": yaml.safe_dump(config, sort_keys=False).encode()})
 
 
 def _create_claude_sdk_session(base_url: str, runner_id: str, mock_llm_server_url: str) -> str:
     """Create a runner-bound session for a fresh claude-sdk agent."""
-    bundle = _build_claude_sdk_bundle(f"sdk-effort-{uuid.uuid4().hex[:8]}", mock_llm_server_url)
-    create_resp = httpx.post(
-        f"{base_url}/v1/sessions",
-        data={"metadata": json.dumps({})},
-        files={"bundle": ("agent.tar.gz", bundle, "application/gzip")},
-        timeout=30.0,
-    )
+    bundle = _claude_sdk_bundle(f"sdk-effort-{uuid.uuid4().hex[:8]}", mock_llm_server_url)
+    create_resp = post_session_bundle(httpx.post, f"{base_url}/v1/sessions", bundle, timeout=30.0)
     create_resp.raise_for_status()
     session_id = create_resp.json()["session_id"]
-    patch_resp = httpx.patch(
-        f"{base_url}/v1/sessions/{session_id}",
-        json={"runner_id": runner_id},
-        timeout=10.0,
-    )
-    patch_resp.raise_for_status()
+    bind_session_runner(httpx.patch, base_url, session_id, runner_id, timeout=10.0)
     return session_id
 
 
