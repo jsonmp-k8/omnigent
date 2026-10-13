@@ -12,15 +12,13 @@
 #     (pnpm `minimumReleaseAge`, uv `exclude-newer = "P7D"`), so a compromised
 #     or yanked release has a window to surface before it is pinned.
 #
-# Layout rules, learned the hard way:
-#   - Declare each lockfile ONCE, at its root. The pnpm workspace has a single
-#     root pnpm-lock.yaml and the uv workspace a single root uv.lock; listing
-#     members as their own directories produced PRs that changed a package.json
-#     without the lockfile (pre-commit then failed on the mismatch) and
-#     duplicate ungrouped PRs from the undeclared root.
+# Layout invariants (tests/scripts/test_dependabot_config.py checks them):
+#   - Declare each lockfile once, at its workspace root, so manifests and locks
+#     update together: the pnpm workspace is one root pnpm-lock.yaml, the uv
+#     workspace one root uv.lock.
 #   - uv.lock is handled by the `uv` ecosystem, not `pip`, security PRs included.
 #   - Composite actions under .github/actions/* carry their own `uses:` pins,
-#     so github-actions must list that directory as well as the root.
+#     so github-actions lists that directory as well as the root.
 #   - Review routing comes from .github/CODEOWNERS (the `reviewers` key is
 #     deprecated); labels named here must already exist in the repo.
 version: 2
@@ -44,16 +42,8 @@ updates:
       python-security:
         applies-to: security-updates
         patterns: ["*"]
-      # The mlflow release train cross-pins mlflow, mlflow-skinny and
-      # mlflow-tracing to one version (see uv.toml); they must move together.
-      mlflow:
-        applies-to: version-updates
-        patterns: ["mlflow", "mlflow-skinny", "mlflow-tracing"]
-        update-types: ["minor", "patch"]
-      opentelemetry:
-        applies-to: version-updates
-        patterns: ["opentelemetry-*"]
-        update-types: ["minor", "patch"]
+      # One group, so the cross-pinned mlflow / mlflow-skinny / mlflow-tracing
+      # train (see uv.toml) moves inside the same PR as everything else.
       python-minor-patch:
         applies-to: version-updates
         patterns: ["*"]
@@ -234,3 +224,4 @@ updates:
     groups:
       pre-commit-hooks:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
