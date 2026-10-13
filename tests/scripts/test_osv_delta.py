@@ -1,9 +1,9 @@
-"""Tests for the OSV advisory delta judge in the Security Scan.
+"""Tests for the added-pins OSV audit in the Security Scan.
 
-The script shells out to ``uv export`` and ``pip-audit``; both are replaced
-here by small stub executables so every branch of the workflow path (export
-failure, missing report, malformed report, the delta verdicts) runs end to
-end through the real script without network or a real lockfile.
+``pip-audit`` is replaced by a stub executable, so every branch of the
+workflow path -- pin extraction from both lockfiles, the single audit call,
+missing/malformed reports, fail-closed errors -- runs end to end through the
+real script without network.
 """
 
 from __future__ import annotations
@@ -13,62 +13,54 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / ".github/scripts/security-scan/osv-delta.py"
 
-# Stub `uv`: `uv export ...` prints a few requirement lines (one editable, to
-# prove it is filtered) unless the checkout contains `.export-fails`.
-_UV_STUB = """\
-import pathlib, sys
-if pathlib.Path(".export-fails").exists():
-    sys.stderr.write("error: Failed to parse `uv.lock`\\n")
-    sys.exit(2)
-print("-e .")
-print("urllib3==2.7.0")
-print("pyjwt==2.13.0")
-"""
-
-# Stub `pip-audit`: copies <reports dir>/<requirements stem>.json to --output.
-# A missing fixture means "pip-audit crashed before writing a report".
+# Stub `pip-audit`: records the requirements it was given, then copies the
+# fixture report named by OSV_STUB_REPORT to --output (or writes nothing when
+# OSV_STUB_REPORT is unset, modelling a crash before the report).
 _PIP_AUDIT_STUB = """\
 import os, pathlib, shutil, sys
 args = sys.argv[1:]
 req = pathlib.Path(args[args.index("--requirement") + 1])
 out = pathlib.Path(args[args.index("--output") + 1])
 assert "--no-deps" in args and "json" in args
-assert "-e ." not in req.read_text(), "editable requirement leaked into the audit"
-fixture = pathlib.Path(os.environ["OSV_STUB_REPORTS"]) / (req.stem + ".json")
-if not fixture.exists():
-    sys.stderr.write("ERROR: resolution failed\\n")
+pathlib.Path(os.environ["OSV_STUB_SEEN"]).write_text(req.read_text())
+fixture = os.environ.get("OSV_STUB_REPORT")
+if not fixture:
+    sys.stderr.write("ERROR: resolver exploded\\n")
     sys.exit(2)
 shutil.copy(fixture, out)
-sys.exit(1 if "vulns" in fixture.read_text() else 0)
+sys.exit(1 if "PYSEC" in pathlib.Path(fixture).read_text() else 0)
 """
 
-_OPEN = [
-    ("urllib3", "2.7.0", [("PYSEC-2026-4177", ["2.8.0"])]),
-    ("pyjwt", "2.13.0", [("PYSEC-2026-4145", ["2.14.0"]), ("CVE-2026-102275", ["2.15.0"])]),
-]
-_CLEAN: list[Any] = []
-_WERKZEUG = ("werkzeug", "3.1.8", [("CVE-2026-102598", ["3.1.9"])])
+
+def _lock(*packages: tuple[str, str, str]) -> str:
+    """Build a uv.lock from ``(name, version, source)`` triples (source: registry|editable)."""
+    body = ['version = 1\nrevision = 3\nrequires-python = ">=3.12"\n']
+    for name, version, source in packages:
+        src = (
+            'source = { registry = "https://pypi.org/simple" }'
+            if source == "registry"
+            else 'source = { editable = "." }'
+        )
+        body.append(f'[[package]]\nname = "{name}"\nversion = "{version}"\n{src}\n')
+    return "\n".join(body)
 
 
-def _report_json(deps: list[tuple[str, str, list[tuple[str, list[str]]]]]) -> str:
+def _report(deps: list[tuple[str, str, list[tuple[str, list[str]]]]]) -> str:
     return json.dumps(
         {
             "dependencies": [
                 {
-                    "name": name,
-                    "version": version,
-                    "vulns": [
-                        {"id": vid, "fix_versions": fixes, "aliases": []} for vid, fixes in vulns
-                    ],
+                    "name": n,
+                    "version": v,
+                    "vulns": [{"id": i, "fix_versions": f, "aliases": []} for i, f in vulns],
                 }
-                for name, version, vulns in deps
+                for n, v, vulns in deps
             ],
             "fixes": [],
         }
@@ -76,51 +68,45 @@ def _report_json(deps: list[tuple[str, str, list[tuple[str, list[str]]]]]) -> st
 
 
 class Harness:
-    """Two fake checkouts plus stub tools; ``run`` executes the real script."""
-
     def __init__(self, tmp_path: Path) -> None:
-        self.base = tmp_path / "base"
-        self.head = tmp_path / "pr"
-        self.reports = tmp_path / "reports"
-        self.work = tmp_path / "work"
+        self.tmp = tmp_path
+        self.base_lock = tmp_path / "base" / "uv.lock"
+        self.head_lock = tmp_path / "pr" / "uv.lock"
+        self.seen = tmp_path / "seen-requirements.txt"
         self.summary = tmp_path / "summary.md"
-        for d in (self.base, self.head, self.reports, self.work):
-            d.mkdir()
-        (tmp_path / "uv_stub.py").write_text(_UV_STUB)
-        (tmp_path / "pip_audit_stub.py").write_text(_PIP_AUDIT_STUB)
+        for p in (self.base_lock, self.head_lock):
+            p.parent.mkdir()
+        stub = tmp_path / "pip_audit_stub.py"
+        stub.write_text(_PIP_AUDIT_STUB)
         self.env = {
             **os.environ,
-            "OSV_DELTA_UV": f"{sys.executable} {tmp_path / 'uv_stub.py'}",
-            "OSV_DELTA_PIP_AUDIT": f"{sys.executable} {tmp_path / 'pip_audit_stub.py'}",
-            "OSV_STUB_REPORTS": str(self.reports),
+            "OSV_DELTA_PIP_AUDIT": f"{sys.executable} {stub}",
+            "OSV_STUB_SEEN": str(self.seen),
             "GITHUB_STEP_SUMMARY": str(self.summary),
         }
+        self.env.pop("OSV_STUB_REPORT", None)
 
-    def reports_for(self, side: str, deps: list[Any] | None, *, raw: str | None = None) -> None:
-        """Provide the two per-set reports for ``side`` ('base' or 'pr').
+    def report(self, deps: list) -> None:
+        path = self.tmp / "report.json"
+        path.write_text(_report(deps))
+        self.env["OSV_STUB_REPORT"] = str(path)
 
-        ``deps=None`` provides nothing (pip-audit "crashes"); ``raw`` writes
-        the given text verbatim instead of a well-formed report.
-        """
-        for name in ("main", "antigravity"):
-            path = self.reports / f"{side}-{name}-req.json"
-            if raw is not None:
-                path.write_text(raw)
-            elif deps is not None:
-                # Put all findings in the main set; the antigravity set is clean.
-                path.write_text(_report_json(deps if name == "main" else []))
+    def raw_report(self, text: str) -> None:
+        path = self.tmp / "report.json"
+        path.write_text(text)
+        self.env["OSV_STUB_REPORT"] = str(path)
 
     def run(self) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 sys.executable,
                 str(SCRIPT),
-                "--base",
-                str(self.base),
-                "--head",
-                str(self.head),
+                "--base-lock",
+                str(self.base_lock),
+                "--head-lock",
+                str(self.head_lock),
                 "--work",
-                str(self.work),
+                str(self.tmp / "work"),
             ],
             env=self.env,
             capture_output=True,
@@ -128,151 +114,153 @@ class Harness:
             check=False,
         )
 
+    def audited(self) -> list[str]:
+        return self.seen.read_text().split() if self.seen.exists() else []
+
 
 @pytest.fixture
-def harness(tmp_path: Path) -> Harness:
+def h(tmp_path: Path) -> Harness:
     return Harness(tmp_path)
 
 
-def test_single_advisory_bump_passes_while_others_remain_open(harness: Harness) -> None:
-    """The deadlock case: fixing urllib3 must pass even though pyjwt is still open."""
-    harness.reports_for("base", _OPEN)
-    harness.reports_for("pr", _OPEN[1:])  # urllib3 fixed, pyjwt untouched
-
-    result = harness.run()
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "Resolved by this PR (1)" in result.stdout
-    assert "::warning::2 advisory/advisories remain open" in result.stdout
-    assert "::error::" not in result.stdout
-    assert "Resolved 1" in harness.summary.read_text()
+_BASE = (
+    ("urllib3", "2.7.0", "registry"),
+    ("pyjwt", "2.13.0", "registry"),
+    ("omnigent", "0.18.0.dev0", "editable"),
+)
 
 
-def test_introducing_a_vulnerable_pin_fails(harness: Harness) -> None:
-    harness.reports_for("base", _OPEN)
-    harness.reports_for("pr", [*_OPEN, _WERKZEUG])
+def test_unchanged_pins_are_not_audited_even_with_open_advisories(h: Harness) -> None:
+    """The deadlock case: a PR that moves only urllib3 is judged on urllib3 alone."""
+    h.base_lock.write_text(_lock(*_BASE))
+    h.head_lock.write_text(_lock(("urllib3", "2.8.0", "registry"), *_BASE[1:]))
+    h.report([("urllib3", "2.8.0", [])])
 
-    result = harness.run()
-
-    assert result.returncode == 1
-    assert "INTRODUCED by this PR (1)" in result.stdout
-    assert "werkzeug" in result.stdout
-    assert "::error::This PR pins 1 package version(s)" in result.stdout
-
-
-def test_new_advisory_on_an_existing_package_counts_as_introduced(harness: Harness) -> None:
-    """Same package, different advisory id: the base never had it, so it blocks."""
-    harness.reports_for("base", [("pyjwt", "2.13.0", [("PYSEC-2026-4145", [])])])
-    harness.reports_for("pr", [("pyjwt", "2.12.0", [("PYSEC-2026-0001", [])])])
-
-    result = harness.run()
-
-    assert result.returncode == 1
-    assert "PYSEC-2026-0001" in result.stdout
-
-
-def test_clean_head_and_base_pass_quietly(harness: Harness) -> None:
-    harness.reports_for("base", _CLEAN)
-    harness.reports_for("pr", _CLEAN)
-
-    result = harness.run()
+    result = h.run()
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "No new advisories introduced" in result.stdout
-    assert not harness.summary.exists()
+    assert h.audited() == ["urllib3==2.8.0"]  # pyjwt 2.13.0 (still vulnerable) not audited
+    assert "No advisories on the 1 added/changed pin(s)" in result.stdout
+    assert "Audited 1" in h.summary.read_text()
 
 
-def test_package_names_compare_case_insensitively(harness: Harness) -> None:
-    harness.reports_for("base", [("PyJWT", "2.13.0", [("PYSEC-2026-4145", [])])])
-    harness.reports_for("pr", [("pyjwt", "2.13.0", [("PYSEC-2026-4145", [])])])
+def test_added_vulnerable_pin_fails(h: Harness) -> None:
+    h.base_lock.write_text(_lock(*_BASE))
+    h.head_lock.write_text(_lock(*_BASE, ("werkzeug", "3.1.8", "registry")))
+    h.report([("werkzeug", "3.1.8", [("PYSEC-2026-1", ["3.1.9"])])])
 
-    assert harness.run().returncode == 0
-
-
-# ── The base side failing must not block an innocent PR ─────────────
-
-
-def test_base_export_failure_warns_and_passes(harness: Harness) -> None:
-    """main's lockfile not exporting is not the PR's fault: warn, list, pass."""
-    (harness.base / ".export-fails").touch()
-    harness.reports_for("pr", _OPEN)
-
-    result = harness.run()
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "::warning::Could not audit the base branch's uv.lock" in result.stdout
-    assert "Failed to parse `uv.lock`" in result.stdout
-    assert "::warning::3 advisory/advisories are open on this PR's uv.lock" in result.stdout
-    assert "::error::" not in result.stdout
-    assert "Baseline unavailable" in harness.summary.read_text()
-
-
-def test_base_pip_audit_crash_warns_and_passes(harness: Harness) -> None:
-    harness.reports_for("base", None)  # no fixture → stub pip-audit exits 2, writes nothing
-    harness.reports_for("pr", _CLEAN)
-
-    result = harness.run()
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "pip-audit wrote no report" in result.stdout
-    assert "No advisories on the PR head (baseline unavailable" in result.stdout
-
-
-# ── The head side failing is the PR's problem and must fail loudly ──
-
-
-def test_head_export_failure_fails(harness: Harness) -> None:
-    (harness.head / ".export-fails").touch()
-    harness.reports_for("base", _CLEAN)
-
-    result = harness.run()
+    result = h.run()
 
     assert result.returncode == 1
-    assert "::error::Could not audit the PR head's uv.lock" in result.stdout
-    assert "uv export (main set) failed" in result.stdout
+    assert h.audited() == ["werkzeug==3.1.8"]
+    assert "werkzeug  3.1.8  PYSEC-2026-1  3.1.9" in result.stdout
+    assert "::error::1 advisory/advisories on pin(s) this PR adds or changes" in result.stdout
 
 
-def test_head_missing_report_fails(harness: Harness) -> None:
-    harness.reports_for("base", _CLEAN)
-    harness.reports_for("pr", None)
+def test_downgrade_to_a_vulnerable_version_counts_as_changed(h: Harness) -> None:
+    h.base_lock.write_text(_lock(("pyjwt", "2.15.1", "registry")))
+    h.head_lock.write_text(_lock(("pyjwt", "2.13.0", "registry")))
+    h.report([("pyjwt", "2.13.0", [("PYSEC-2026-4145", ["2.14.0"])])])
 
-    result = harness.run()
+    assert h.run().returncode == 1
+    assert h.audited() == ["pyjwt==2.13.0"]
+
+
+def test_no_pin_changes_skips_pip_audit_entirely(h: Harness) -> None:
+    h.base_lock.write_text(_lock(*_BASE))
+    h.head_lock.write_text(_lock(*_BASE))
+
+    result = h.run()
+
+    assert result.returncode == 0
+    assert "nothing to audit" in result.stdout
+    assert h.audited() == []
+
+
+def test_editable_and_path_sources_are_ignored(h: Harness) -> None:
+    h.base_lock.write_text(_lock(*_BASE))
+    h.head_lock.write_text(_lock(*_BASE[:2], ("omnigent", "0.19.0", "editable")))
+
+    result = h.run()
+
+    assert result.returncode == 0
+    assert h.audited() == []
+
+
+def test_missing_base_lock_audits_every_head_pin(h: Harness) -> None:
+    """A PR introducing uv.lock has no baseline: every registry pin is its own."""
+    h.head_lock.write_text(_lock(*_BASE))
+    h.report([])
+
+    result = h.run()
+
+    assert result.returncode == 0, result.stdout
+    assert h.audited() == ["pyjwt==2.13.0", "urllib3==2.7.0"]
+
+
+# ── Fail-closed: anything that stops the audit is an error, never a pass ──
+
+
+def test_missing_head_lock_is_an_error(h: Harness) -> None:
+    h.base_lock.write_text(_lock(*_BASE))
+
+    result = h.run()
 
     assert result.returncode == 1
-    assert "pip-audit wrote no report for pr-main-req.txt" in result.stdout
+    assert "::error::OSV audit could not run" in result.stdout
+    assert "does not exist" in result.stdout
 
 
-# ── Malformed reports are a clean error, never a traceback ──────────
+@pytest.mark.parametrize(
+    ("text", "why"),
+    [
+        ("this is = not [[ toml", "not readable TOML"),
+        ('version = 1\n[[other]]\nname = "x"\n', "no [[package]] entries"),
+        ('[[package]]\nname = "x"\nsource = { registry = "r" }\n', "without name/version"),
+    ],
+    ids=["bad-toml", "not-a-lock", "entry-missing-version"],
+)
+def test_malformed_lockfile_is_a_clean_error(h: Harness, text: str, why: str) -> None:
+    h.base_lock.write_text(_lock(*_BASE))
+    h.head_lock.write_text(text)
+
+    result = h.run()
+
+    assert result.returncode == 1
+    assert why in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_pip_audit_writing_no_report_is_an_error(h: Harness) -> None:
+    h.base_lock.write_text(_lock(*_BASE))
+    h.head_lock.write_text(_lock(*_BASE, ("werkzeug", "3.1.9", "registry")))
+    # No OSV_STUB_REPORT → the stub exits 2 without writing.
+
+    result = h.run()
+
+    assert result.returncode == 1
+    assert "pip-audit wrote no report (exit 2)" in result.stdout
+    assert "resolver exploded" in result.stdout
 
 
 @pytest.mark.parametrize(
     ("raw", "why"),
     [
-        ("{not json", "is not valid JSON"),
+        ("{not json", "not valid JSON"),
         ('{"fixes": []}', "no 'dependencies' list"),
-        ('{"dependencies": ["urllib3"]}', "dependency entry is not an object"),
-        ('{"dependencies": [{"name": "urllib3", "vulns": [{"no_id": 1}]}]}', "malformed vuln"),
+        ('{"dependencies": ["werkzeug"]}', "no 'dependencies' list"),
+        ('{"dependencies": [{"name": "werkzeug", "vulns": [{"no_id": 1}]}]}', "malformed vuln"),
     ],
     ids=["not-json", "no-dependencies", "entry-not-object", "vuln-without-id"],
 )
-def test_malformed_head_report_is_a_clean_error(harness: Harness, raw: str, why: str) -> None:
-    harness.reports_for("base", _CLEAN)
-    harness.reports_for("pr", None, raw=raw)
+def test_malformed_report_is_a_clean_error(h: Harness, raw: str, why: str) -> None:
+    h.base_lock.write_text(_lock(*_BASE))
+    h.head_lock.write_text(_lock(*_BASE, ("werkzeug", "3.1.9", "registry")))
+    h.raw_report(raw)
 
-    result = harness.run()
+    result = h.run()
 
     assert result.returncode == 1
-    assert "::error::Could not audit the PR head's uv.lock" in result.stdout
+    assert "::error::OSV audit could not run" in result.stdout
     assert why in result.stdout
-    assert "Traceback" not in result.stderr
-
-
-def test_malformed_base_report_counts_as_no_baseline(harness: Harness) -> None:
-    harness.reports_for("base", None, raw="{not json")
-    harness.reports_for("pr", _CLEAN)
-
-    result = harness.run()
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "::warning::Could not audit the base branch's uv.lock" in result.stdout
     assert "Traceback" not in result.stderr
