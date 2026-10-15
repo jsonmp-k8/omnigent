@@ -1,10 +1,10 @@
 """Unit tests for the signer process's pure pieces (``model_signer_service``).
 
-The relay's TLS/socket path is covered by the protocol and process tests;
-this file covers what those cannot reach cheaply: the strict response-head
-parser's rejections, the request-header policy, the fake provider's
-Responses payloads, config loading, the owned-directory cleanup guard, the
-supervisor's stdin command handling, and ``main()``'s exit mapping.
+The relay's TLS/socket path and the strict HTTP parsers are covered by the
+protocol and process tests; this file covers what those cannot reach
+cheaply: the fake provider's Responses payloads, config loading, the
+owned-directory cleanup guard, the supervisor's stdin command handling, and
+``main()``'s exit mapping.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ import pytest
 from omnigent.inner import model_signer_service as svc
 from omnigent.inner.model_auth import PROVIDER_AUTH_REQUIRED, ProviderAuthRequired
 from omnigent.inner.model_egress import FrozenModelRoute
-from omnigent.inner.model_signing import SigningRejected
 
 _ROUTE = FrozenModelRoute(method="POST", host="api.example.test", path="/v1/responses")
 
@@ -36,151 +35,6 @@ async def test_static_credential_returns_its_token_and_ignores_invalidation() ->
     assert await cred.token_for_request() == "tok"
     cred.invalidate_after_unauthorized()
     assert await cred.token_for_request() == "tok"
-
-
-# ── Strict response head ───────────────────────────────────────────────────
-
-
-def _head(status: bytes, *headers: bytes) -> svc._ParsedResponse:
-    return svc._parse_strict_response_head(
-        status, b"".join(h + b"\r\n" for h in headers) + b"\r\n"
-    )
-
-
-def test_response_head_keeps_only_allow_listed_and_ratelimit_headers() -> None:
-    parsed = _head(
-        b"HTTP/1.1 200 OK\r\n",
-        b"Content-Type: application/json",
-        b"X-RateLimit-Remaining: 9",
-        b"Set-Cookie: a=b",
-        b"Server: nginx",
-        b"Content-Length: 12",
-    )
-    assert parsed.status == 200
-    assert parsed.headers == (
-        ("Content-Type", "application/json"),
-        ("X-RateLimit-Remaining", "9"),
-    )
-    assert parsed.content_length == 12
-    assert parsed.chunked is False
-
-
-def test_response_head_accepts_chunked_without_length() -> None:
-    parsed = _head(b"HTTP/1.1 200\r\n", b"Transfer-Encoding: chunked")
-    assert parsed.chunked is True
-    assert parsed.content_length is None
-
-
-@pytest.mark.parametrize(
-    ("status", "headers", "why"),
-    [
-        (b"HTTP/1.0 200 OK\r\n", (), "malformed upstream status line"),
-        (b"HTTP/1.1 999 X\r\n", (), "malformed upstream status line"),
-        (
-            b"HTTP/1.1 200 OK\r\n",
-            (b"Transfer-Encoding: chunked", b"Content-Length: 3"),
-            "ambiguous",
-        ),
-        (
-            b"HTTP/1.1 200 OK\r\n",
-            (b"Transfer-Encoding: gzip",),
-            "unsupported upstream response transfer",
-        ),
-        (
-            b"HTTP/1.1 200 OK\r\n",
-            (b"Content-Length: 1x",),
-            "invalid upstream response Content-Length",
-        ),
-        (
-            b"HTTP/1.1 200 OK\r\n",
-            (b"Content-Length: " + b"9" * 21,),
-            "invalid upstream response Content-Length",
-        ),
-        (
-            b"HTTP/1.1 200 OK\r\n",
-            (b"Content-Length: " + str(svc._MAX_RESPONSE_BODY_BYTES + 1).encode(),),
-            "exceeds the configured limit",
-        ),
-    ],
-    ids=[
-        "http10",
-        "bad-status",
-        "te+cl",
-        "gzip-te",
-        "non-decimal-cl",
-        "cl-too-long",
-        "cl-over-limit",
-    ],
-)
-def test_response_head_rejections(status: bytes, headers: tuple[bytes, ...], why: str) -> None:
-    with pytest.raises(ValueError, match=why):
-        _head(status, *headers)
-
-
-def test_response_head_rejects_duplicate_non_repeatable_headers() -> None:
-    with pytest.raises(SigningRejected, match="duplicate"):
-        _head(b"HTTP/1.1 200 OK\r\n", b"Content-Type: a", b"Content-Type: b")
-
-
-# ── Strict request headers: the transport/routing policy ──────────────────
-
-
-def _request_headers(*lines: bytes) -> tuple[list[tuple[str, str]], int]:
-    return svc._parse_strict_request_headers(b"".join(line + b"\r\n" for line in lines) + b"\r\n")
-
-
-@pytest.mark.parametrize(
-    "header",
-    [
-        b"Connection: close",
-        b"Proxy-Authorization: Basic x",
-        b"Proxy-Foo: bar",
-        b"Sec-WebSocket-Key: x",
-        b"X-Forwarded-For: 1.2.3.4",
-        b"Transfer-Encoding: chunked",
-        b"Upgrade: h2c",
-        b"Expect: 100-continue",
-    ],
-)
-def test_request_headers_reject_transport_and_routing_headers(header: bytes) -> None:
-    with pytest.raises(SigningRejected):
-        _request_headers(b"Content-Length: 2", header)
-
-
-@pytest.mark.parametrize(
-    ("line", "why"),
-    [
-        (b"Content-Length: 1x", "Content-Length"),
-        (b"Content-Length: " + b"1" * 21, "exceeds the configured limit"),
-        (b"Content-Length: ", "Content-Length"),
-        (b"Content-Length:  2", "ambiguous header whitespace"),
-        (b"Bad Name: x", "invalid header name"),
-        (b"X: \x01", "invalid header value"),
-        (b" X: y", "malformed header line"),
-    ],
-    ids=["non-decimal", "too-long", "empty", "double-space", "bad-name", "ctl-value", "folded"],
-)
-def test_request_header_line_rejections(line: bytes, why: str) -> None:
-    with pytest.raises(SigningRejected, match=why):
-        _request_headers(line)
-
-
-def test_request_headers_require_content_length_and_reject_lf_only() -> None:
-    with pytest.raises(SigningRejected, match="Content-Length"):
-        _request_headers(b"Host: a")
-    with pytest.raises(SigningRejected, match="CRLF"):
-        svc._parse_strict_header_lines(b"Host: a\n\r\n\r\n")
-    with pytest.raises(SigningRejected, match="incomplete"):
-        svc._parse_strict_header_lines(b"Host: a\r\n")
-
-
-def test_request_line_must_match_the_frozen_route_exactly() -> None:
-    assert svc._parse_strict_request_line(b"POST /v1/responses HTTP/1.1\r\n", _ROUTE) == (
-        "POST",
-        "/v1/responses",
-    )
-    with pytest.raises(SigningRejected):
-        svc._parse_strict_request_line(b"GET /v1/responses HTTP/1.1\r\n", _ROUTE)
 
 
 # ── Fake provider payloads ─────────────────────────────────────────────────
