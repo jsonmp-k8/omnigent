@@ -615,7 +615,7 @@ async def test_summarize_tolerates_an_unresolvable_databricks_profile(
     llm: _FakeLlm, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def _boom(profile: str) -> Any:
-        raise OSError("no ~/.databrickscfg")
+        raise OSError("no Databricks profile configured")
 
     monkeypatch.setattr(
         "omnigent.runtime.credentials.databricks.resolve_databricks_workspace", _boom
