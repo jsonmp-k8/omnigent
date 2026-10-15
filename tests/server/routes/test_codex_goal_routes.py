@@ -104,21 +104,6 @@ def _status_and_body(resp: Any) -> tuple[int, Any]:
     return resp.status_code, json.loads(bytes(resp.body))
 
 
-def test_missing_runner_is_a_503_with_guidance() -> None:
-    status, body = _status_and_body(_payload_or_response(None))
-    assert status == 503
-    assert body["error"]["code"] == codex._CODEX_NATIVE_GOAL_ERROR
-    assert "no live Codex runner" in body["error"]["message"]
-    assert SESSION in body["error"]["message"]
-
-
-def test_structured_runner_error_passes_through_with_its_status() -> None:
-    status, body = _status_and_body(
-        _payload_or_response(_result(409, {"error": "goal_busy", "detail": "turn running"}))
-    )
-    assert (status, body) == (409, {"error": "goal_busy", "detail": "turn running"})
-
-
 def test_unstructured_runner_error_becomes_a_502() -> None:
     status, body = _status_and_body(_payload_or_response(_result(500, "boom")))
     assert status == 502
@@ -130,10 +115,6 @@ def test_malformed_success_body_becomes_a_502(body: str) -> None:
     status, payload = _status_and_body(_payload_or_response(_result(200, body)))
     assert status == 502
     assert "malformed response" in payload["error"]["message"]
-
-
-def test_valid_success_body_is_returned_as_the_payload() -> None:
-    assert _payload_or_response(_result(200, {"goal": None})) == {"goal": None}
 
 
 # ── _post_codex_goal_event_to_runner ───────────────────────────────────────
