@@ -2157,59 +2157,111 @@ describe("chatStore — switchTo", () => {
     };
   }
 
-  it("hydrates an SDK session's saved effort without waiting on the harness catalog", async () => {
-    seedSession("conv_sdk_eff", []);
-    let catalogRequests = 0;
-    const session = sdkSessionFetch("conv_sdk_eff", "high");
-    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input).split("?")[0] === "/v1/harnesses") {
-        catalogRequests += 1;
-        return new Promise<Response>(() => {}); // a stalled catalog request
+  it.each(["anthropic", "none", "unavailable"])(
+    "hydrates an SDK session's saved effort without a catalog, but waits for %s before PATCHing",
+    async (family) => {
+      seedSession("conv_sdk_eff", []);
+      let catalogRequests = 0;
+      let resolveCatalog!: (response: Response) => void;
+      const catalogResponse = new Promise<Response>((resolve) => {
+        resolveCatalog = resolve;
+      });
+      onTestFinished(() => client.clear());
+      const session = sdkSessionFetch("conv_sdk_eff", "high");
+      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).split("?")[0] === "/v1/harnesses") {
+          catalogRequests += 1;
+          return catalogResponse;
+        }
+        return session(input, init);
+      });
+
+      await useChatStore.getState().switchTo("conv_sdk_eff");
+
+      // The transcript settled and the server's value is shown; the catalog was
+      // only prefetched in the background for the next lookup.
+      expect(useChatStore.getState().sessionReasoningEffort).toBe("high");
+      expect(catalogRequests).toBe(1);
+      fetchMock.mockClear();
+
+      const picked = vi.fn();
+      const pick = useChatStore.getState().setEffort("max").then(picked);
+      const patches = () =>
+        fetchMock.mock.calls
+          .filter(
+            ([u, init]) => String(u) === "/v1/sessions/conv_sdk_eff" && init?.method === "PATCH",
+          )
+          .map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>);
+      await tick();
+      expect(patches()).toEqual([]);
+      expect(picked).not.toHaveBeenCalled();
+
+      resolveCatalog(
+        family === "unavailable"
+          ? mockResponse({ error: "catalog down" }, { ok: false, status: 503 })
+          : mockResponse({ data: [{ id: "claude-sdk", capabilities: { effort: family } }] }),
+      );
+      await pick;
+      expect(catalogRequests).toBe(1);
+      expect(patches()).toEqual(family === "anthropic" ? [{ reasoning_effort: "max" }] : []);
+      expect(useChatStore.getState().sessionReasoningEffort).toBe(
+        family === "anthropic" ? "max" : null,
+      );
+    },
+  );
+
+  it.each(["fails", "never resolves"])(
+    "keeps PATCHing an SDK session's effort when the catalog refresh %s but a cached catalog exists",
+    async (refresh) => {
+      seedSession("conv_sdk_stale", []);
+      // A catalog the picker already rendered from, now past its staleTime.
+      client.setQueryData(
+        ["harness-labels"],
+        {
+          labels: {},
+          setupSteps: {},
+          acpHarnesses: new Set<string>(),
+          effortFamilies: { "claude-sdk": "anthropic" },
+        },
+        { updatedAt: Date.now() - 60_000 },
+      );
+      const session = sdkSessionFetch("conv_sdk_stale", null);
+      const refreshCatalog = vi.fn(() =>
+        refresh === "never resolves"
+          ? new Promise<Response>(() => {})
+          : mockResponse({ error: "catalog down" }, { ok: false, status: 503 }),
+      );
+      onTestFinished(() => client.clear());
+      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).split("?")[0] === "/v1/harnesses") {
+          return refreshCatalog();
+        }
+        return session(input, init);
+      });
+      await useChatStore.getState().switchTo("conv_sdk_stale");
+      fetchMock.mockClear();
+
+      const picked = vi.fn();
+      const pick = useChatStore.getState().setEffort("high").then(picked);
+
+      const patches = () =>
+        fetchMock.mock.calls
+          .filter(
+            ([u, init]) => String(u) === "/v1/sessions/conv_sdk_stale" && init?.method === "PATCH",
+          )
+          .map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>);
+      await vi.waitFor(() => {
+        expect(patches()).toEqual([expect.objectContaining({ reasoning_effort: "high" })]);
+        expect(picked).toHaveBeenCalledOnce();
+      });
+      await pick;
+      expect(refreshCatalog).toHaveBeenCalledOnce();
+      if (refresh === "never resolves") {
+        expect(client.getQueryState(["harness-labels"])?.fetchStatus).toBe("fetching");
       }
-      return session(input, init);
-    });
-
-    await useChatStore.getState().switchTo("conv_sdk_eff");
-
-    // The transcript settled and the server's value is shown; the catalog was
-    // only prefetched in the background for the next lookup.
-    expect(useChatStore.getState().sessionReasoningEffort).toBe("high");
-    expect(catalogRequests).toBe(1);
-  });
-
-  it("keeps PATCHing an SDK session's effort when the catalog refresh fails but a cached catalog exists", async () => {
-    seedSession("conv_sdk_stale", []);
-    // A catalog the picker already rendered from, now past its staleTime.
-    client.setQueryData(
-      ["harness-labels"],
-      {
-        labels: {},
-        setupSteps: {},
-        acpHarnesses: new Set<string>(),
-        effortFamilies: { "claude-sdk": "anthropic" },
-      },
-      { updatedAt: Date.now() - 60_000 },
-    );
-    const session = sdkSessionFetch("conv_sdk_stale", null);
-    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input).split("?")[0] === "/v1/harnesses") {
-        return mockResponse({ error: "catalog down" }, { ok: false, status: 503 });
-      }
-      return session(input, init);
-    });
-    await useChatStore.getState().switchTo("conv_sdk_stale");
-    fetchMock.mockClear();
-
-    await useChatStore.getState().setEffort("high");
-
-    const patches = fetchMock.mock.calls
-      .filter(
-        ([u, init]) => String(u) === "/v1/sessions/conv_sdk_stale" && init?.method === "PATCH",
-      )
-      .map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>);
-    expect(patches).toEqual([expect.objectContaining({ reasoning_effort: "high" })]);
-    expect(useChatStore.getState().sessionReasoningEffort).toBe("high");
-  });
+      expect(useChatStore.getState().sessionReasoningEffort).toBe("high");
+    },
+  );
 
   it("loadMoreHistory settles on the conversation that scrolled, not the visible one", async () => {
     // Backgrounding is not staleness. Resolving the target after the await left

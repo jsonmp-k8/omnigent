@@ -1870,16 +1870,9 @@ const HARNESS_CATALOG_QUERY = {
 };
 
 /**
- * The reasoning-effort family a session's harness declares in ``/v1/harnesses``.
- *
- * A non-native SDK harness (claude-sdk, codex) carries no wrapper label, so
- * ``supportsEffortControl`` needs the declared family to know the session takes
- * an effort override. Native harnesses keep their wrapper-label gate (as in
- * ChatPage), so they resolve to ``null`` here too. Refreshes the harness
- * catalog when stale, but a failed refresh falls back to the cached catalog —
- * the same data the picker is already rendering from — rather than treating
- * the harness as unsupported. ``null`` only when no catalog is available at
- * all or the harness declares no family.
+ * Resolve the SDK harness's declared family from the same catalog as the picker.
+ * Use cached data immediately and refresh stale entries in the background.
+ * Native harnesses keep their wrapper-label gate; no cache still awaits discovery.
  */
 async function effortFamilyForSession(
   session: { harness?: string | null } | null | undefined,
@@ -1888,7 +1881,10 @@ async function effortFamilyForSession(
   if (nativeCodingAgentForHarness(session.harness)) return null;
   let catalog: HarnessCatalog | undefined;
   try {
-    catalog = await queryClient.fetchQuery(HARNESS_CATALOG_QUERY);
+    catalog = await queryClient.ensureQueryData({
+      ...HARNESS_CATALOG_QUERY,
+      revalidateIfStale: true,
+    });
   } catch {
     catalog = queryClient.getQueryData<HarnessCatalog>(HARNESS_CATALOG_QUERY.queryKey);
   }
