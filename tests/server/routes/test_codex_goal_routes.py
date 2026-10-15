@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -22,9 +22,11 @@ from starlette.datastructures import State
 from omnigent._wrapper_labels import CODEX_NATIVE_WRAPPER_VALUE, WRAPPER_LABEL_KEY
 from omnigent.entities import Conversation
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.server.host_registry import RunnerExitReports
 from omnigent.server.routes._sessions.helpers import _HostLaunchAttempt
 from omnigent.server.routes.codex import sessions as codex
 from omnigent.server.routes.sessions import _RunnerForwardResult
+from omnigent.stores import ConversationStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from tests.server.helpers import create_session_for_agent, create_test_agent
 
@@ -43,12 +45,17 @@ def _conv(**overrides: Any) -> Conversation:
     return Conversation(**base)
 
 
-class _Store:
+class _FakeStore:
     def __init__(self, conv: Conversation | None) -> None:
         self.conv = conv
 
     def get_conversation(self, session_id: str) -> Conversation | None:
         return self.conv
+
+
+def _Store(conv: Conversation | None) -> ConversationStore:
+    """A store that only knows one conversation, typed for the helpers' signatures."""
+    return cast(ConversationStore, _FakeStore(conv))
 
 
 def _result(status: int, body: Any) -> _RunnerForwardResult:
@@ -204,7 +211,7 @@ async def test_wait_for_existing_runner_delegates_with_the_bound_id(
         conv=_conv(runner_id="r1"),
         runner_router=None,
         tunnel_registry=None,
-        runner_exit_reports="reports",
+        runner_exit_reports=cast(RunnerExitReports, "reports"),
     )
     assert got is sentinel
     assert seen == {
