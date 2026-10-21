@@ -1064,6 +1064,8 @@ class SqlMessageReaction(OmnigentBase):
         (part of the PK, so it cannot be ``NULL``).
     :param rating: ``1`` = up, ``2`` = down (see ``enum_codecs.REACTION_RATING``).
     :param note: Optional free text, e.g. what was wrong with a thumbs-down.
+    :param harness: The session's harness when the reaction was given, or ``None``.
+    :param model: The session's model when the reaction was given, or ``None``.
     :param created_at: Unix epoch seconds the reaction was first given.
     :param updated_at: Unix epoch microseconds of the last change.
     """
@@ -1082,6 +1084,10 @@ class SqlMessageReaction(OmnigentBase):
     created_by: Mapped[str] = mapped_column(String(128), primary_key=True, server_default="")
     rating: Mapped[int] = mapped_column(SmallInteger)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Attribution snapshot at reaction time: a session's model can change
+    # later, so the row records what actually answered.
+    harness: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[int] = mapped_column(Integer)
     updated_at: Mapped[int] = mapped_column(BigInteger)
     __table_args__ = (CheckConstraint("rating IN (1, 2)", name="ck_message_reactions_rating"),)

@@ -52,16 +52,19 @@ def create_reactions_router(
         raise ValueError("conversation_store is required when permission_store is provided")
     router = APIRouter()
 
-    async def _require_session_access(user_id: str | None, session_id: str) -> None:
+    async def _require_session_access(user_id: str | None, session_id: str) -> Any:
+        """Gate access and return the conversation (``None`` without a store)."""
         if permission_store is not None:
             assert conversation_store is not None
             await require_access(
                 user_id, session_id, LEVEL_READ, permission_store, conversation_store
             )
-        if conversation_store is not None:
-            conversation = await asyncio.to_thread(conversation_store.get_conversation, session_id)
-            if conversation is None:
-                raise session_not_found()
+        if conversation_store is None:
+            return None
+        conversation = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        if conversation is None:
+            raise session_not_found()
+        return conversation
 
     @router.get("/sessions/{session_id}/reactions")
     async def list_reactions(request: Request, session_id: str) -> list[dict[str, Any]]:
@@ -91,8 +94,12 @@ def create_reactions_router(
         :returns: The persisted reaction.
         """
         user_id = get_user_id(request, auth_provider)
-        await _require_session_access(user_id, session_id)
+        conversation = await _require_session_access(user_id, session_id)
         note = body.note.strip() if body.note else None
+        # Snapshot attribution from the session row, never from the client: a
+        # later /model switch must not rewrite which model earned the rating.
+        harness = getattr(conversation, "harness", None)
+        model = getattr(conversation, "model_override", None)
         reaction = await asyncio.to_thread(
             store.set,
             session_id,
@@ -100,6 +107,8 @@ def create_reactions_router(
             body.rating,
             note or None,
             attribution_user(user_id),
+            harness,
+            model,
         )
         return asdict(reaction)
 
