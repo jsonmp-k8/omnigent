@@ -28,6 +28,8 @@ def _to_entity(row: SqlMessageReaction) -> MessageReaction:
         response_id=row.response_id,
         rating=decode_reaction_rating(row.rating),
         note=row.note,
+        harness=row.harness,
+        model=row.model,
         created_by=row.created_by or None,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -59,6 +61,8 @@ class SqlAlchemyReactionStore(ReactionStore):
         rating: str,
         note: str | None = None,
         created_by: str | None = None,
+        harness: str | None = None,
+        model: str | None = None,
     ) -> MessageReaction:
         """Create or replace a reaction. See base class for contract."""
         code = encode_reaction_rating(rating)
@@ -73,6 +77,8 @@ class SqlAlchemyReactionStore(ReactionStore):
                     response_id=response_id,
                     created_by=created_by or _ANONYMOUS,
                     rating=code,
+                    harness=harness,
+                    model=model,
                     note=note,
                     created_at=now_us // 1_000_000,
                     updated_at=now_us,
@@ -81,6 +87,8 @@ class SqlAlchemyReactionStore(ReactionStore):
             else:
                 row.rating = code
                 row.note = note
+                row.harness = harness
+                row.model = model
                 row.updated_at = now_us
             return _to_entity(row)
 

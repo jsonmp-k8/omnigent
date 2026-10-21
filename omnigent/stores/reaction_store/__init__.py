@@ -29,6 +29,8 @@ class ReactionStore(ABC):
         rating: str,
         note: str | None = None,
         created_by: str | None = None,
+        harness: str | None = None,
+        model: str | None = None,
     ) -> MessageReaction:
         """Create or replace the caller's reaction to a response.
 
@@ -37,6 +39,8 @@ class ReactionStore(ABC):
         :param rating: ``"up"`` or ``"down"``.
         :param note: Optional free text; ``None`` clears a previous note.
         :param created_by: The reacting user, or ``None`` in single-user mode.
+        :param harness: Harness that answered, snapshotted now; ``None`` if unknown.
+        :param model: Model that answered, snapshotted now; ``None`` if unknown.
         :returns: The persisted :class:`MessageReaction`.
         """
         ...

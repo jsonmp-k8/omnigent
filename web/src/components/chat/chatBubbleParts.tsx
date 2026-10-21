@@ -29,6 +29,8 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useReactions, useSetReaction } from "@/hooks/useReactions";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
+import { isFeatureEnabled } from "@/lib/capabilities";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -1006,7 +1008,10 @@ function AssistantBubble({
   // patched optimistically. Hidden until the turn has settled.
   // Only a settled, successful turn is rateable; an errored or streaming
   // bubble must not fetch reactions either (its retry controls own the wire).
-  const canReact = !!conversationId && bubble.lifecycle === "completed" && !bubble.error;
+  // Deployments opt in (OMNIGENT_FEATURES=message_reactions); off by default.
+  const reactionsEnabled = isFeatureEnabled(useServerInfo(), "message_reactions");
+  const canReact =
+    reactionsEnabled && !!conversationId && bubble.lifecycle === "completed" && !bubble.error;
   const reactions = useReactions(canReact ? conversationId : null);
   const setReaction = useSetReaction(conversationId);
   const reaction = reactions.byResponse.get(bubble.responseId) ?? null;

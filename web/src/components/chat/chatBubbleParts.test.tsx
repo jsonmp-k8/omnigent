@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ConversationScopeContext } from "@/components/chat/conversationScope";
+import { CapabilitiesContext } from "@/lib/CapabilitiesContext";
+import type { ServerInfo } from "@/lib/capabilities";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bubble } from "@/lib/renderItems";
 import { useChatStore, type ChatState } from "@/store/chatStore";
@@ -678,6 +680,10 @@ describe("AssistantBubble copy", () => {
   });
 });
 
+// Reactions are a deployment opt-in; the bubble tests run with the flag on.
+// Module-level so the context value is stable across renders.
+const REACTIONS_ON = { features: { message_reactions: true } } as unknown as ServerInfo;
+
 describe("AssistantBubble reactions", () => {
   const bubble: Extract<Bubble, { kind: "assistant" }> = {
     kind: "assistant",
@@ -719,11 +725,13 @@ describe("AssistantBubble reactions", () => {
     useChatStore.setState({ conversationId: null });
   });
 
-  function renderBubble() {
+  function renderBubble(b: typeof bubble = bubble, isLastAssistant = false) {
     return render(
-      <QueryClientProvider client={new QueryClient()}>
-        <BubbleView bubble={bubble} isLastAssistant={false} />
-      </QueryClientProvider>,
+      <CapabilitiesContext.Provider value={REACTIONS_ON}>
+        <QueryClientProvider client={new QueryClient()}>
+          <BubbleView bubble={b} isLastAssistant={isLastAssistant} />
+        </QueryClientProvider>
+      </CapabilitiesContext.Provider>,
     );
   }
 
@@ -775,11 +783,17 @@ describe("AssistantBubble reactions", () => {
   });
 
   it("hides the thumbs while the response is still streaming", () => {
+    renderBubble({ ...bubble, lifecycle: "streaming" }, true);
+    expect(screen.queryByTestId("react-up")).toBeNull();
+  });
+
+  it("hides the thumbs entirely when the deployment has not enabled reactions", () => {
     render(
       <QueryClientProvider client={new QueryClient()}>
-        <BubbleView bubble={{ ...bubble, lifecycle: "streaming" }} isLastAssistant />
+        <BubbleView bubble={bubble} isLastAssistant={false} />
       </QueryClientProvider>,
     );
     expect(screen.queryByTestId("react-up")).toBeNull();
+    expect(screen.getByTestId("copy-message-link")).toBeInTheDocument();
   });
 });

@@ -41,6 +41,8 @@ def upgrade() -> None:
         sa.Column("created_by", sa.String(length=128), nullable=False, server_default=""),
         sa.Column("rating", sa.SmallInteger(), nullable=False),
         sa.Column("note", sa.Text(), nullable=True),
+        sa.Column("harness", sa.String(length=64), nullable=True),
+        sa.Column("model", sa.String(length=256), nullable=True),
         sa.Column("created_at", sa.Integer(), nullable=False),
         sa.Column("updated_at", sa.BigInteger(), nullable=False),
         sa.PrimaryKeyConstraint("workspace_id", "conversation_id", "response_id", "created_by"),
