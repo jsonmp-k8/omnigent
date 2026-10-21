@@ -4512,7 +4512,6 @@ def server(
         file_store=file_store,
         artifact_store=artifact_store,
         comment_store=comment_store,
-        reaction_store=reaction_store,
         policy_store=policy_store,
         caps=caps,
     )
