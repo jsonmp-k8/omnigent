@@ -113,6 +113,7 @@ from omnigent.server.routes.imports import create_imports_router
 from omnigent.server.routes.policy_registry import create_policy_registry_router
 from omnigent.server.routes.preferences import create_preferences_router
 from omnigent.server.routes.projects import create_projects_router
+from omnigent.server.routes.reactions import create_reactions_router
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
 from omnigent.server.routes.scheduled_tasks import create_scheduled_tasks_router
 from omnigent.server.routes.session_mcp_servers import create_session_mcp_servers_router
@@ -152,6 +153,7 @@ from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.policy_store import PolicyStore
 from omnigent.stores.preference_store import PreferenceStore
 from omnigent.stores.project_store import ProjectStore
+from omnigent.stores.reaction_store import ReactionStore
 from omnigent.stores.scheduled_task_store import ScheduledTaskStore
 
 _logger = logging.getLogger(__name__)
@@ -1329,6 +1331,7 @@ def create_app(
     agent_cache: AgentCache,
     runner_tunnel_tokens: frozenset[str] | None = None,
     comment_store: CommentStore | None = None,
+    reaction_store: ReactionStore | None = None,
     policy_store: PolicyStore | None = None,
     permission_store: PermissionStore | None = None,
     scheduled_task_store: ScheduledTaskStore | None = None,
@@ -1381,6 +1384,8 @@ def create_app(
         token-bound runner id, which is the shared remote-server
         behavior.
     :param comment_store: Store for per-conversation review comments.
+    :param reaction_store: Store for thumbs up/down reactions on assistant
+        responses; ``None`` leaves the reaction routes unmounted.
     :param policy_store: Store for server-persisted policies
         (session-scoped and server-wide defaults). ``None``
         disables both the session policy and default policy
@@ -3429,6 +3434,17 @@ def create_app(
         prefix="/v1",
         tags=["session_mcp_servers"],
     )
+    if reaction_store is not None:
+        app.include_router(
+            create_reactions_router(
+                reaction_store,
+                auth_provider=auth_provider,
+                permission_store=permission_store,
+                conversation_store=conversation_store,
+            ),
+            prefix="/v1",
+            tags=["reactions"],
+        )
     if comment_store is not None:
         app.include_router(
             create_comments_router(
