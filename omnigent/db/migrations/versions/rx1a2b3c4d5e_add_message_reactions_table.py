@@ -18,6 +18,11 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.mysql import BINARY as MySQLBinary
+
+# BYTEA/BLOB elsewhere, BINARY(16) on MySQL: a BLOB cannot be a primary-key
+# column there without a prefix length, and this column leads the PK.
+_UUID16 = sa.LargeBinary(length=16).with_variant(MySQLBinary(16), "mysql")
 
 revision: str = "rx1a2b3c4d5e"
 down_revision: str | None = "nf12ab34cd56"
@@ -36,7 +41,7 @@ def upgrade() -> None:
     op.create_table(
         "message_reactions",
         sa.Column("workspace_id", sa.BigInteger(), nullable=False, server_default="0"),
-        sa.Column("conversation_id", sa.LargeBinary(16), nullable=False),
+        sa.Column("conversation_id", _UUID16, nullable=False),
         sa.Column("response_id", sa.String(length=64), nullable=False),
         sa.Column("created_by", sa.String(length=128), nullable=False, server_default=""),
         sa.Column("rating", sa.SmallInteger(), nullable=False),

@@ -1331,7 +1331,6 @@ def create_app(
     agent_cache: AgentCache,
     runner_tunnel_tokens: frozenset[str] | None = None,
     comment_store: CommentStore | None = None,
-    reaction_store: ReactionStore | None = None,
     policy_store: PolicyStore | None = None,
     permission_store: PermissionStore | None = None,
     scheduled_task_store: ScheduledTaskStore | None = None,
@@ -1362,6 +1361,9 @@ def create_app(
     host_sharded: bool = False,
     *,
     preference_store: PreferenceStore | None = None,
+    # Keyword-only: appending here never shifts the positional slots callers
+    # like tests/server/routes/test_preferences.py rely on.
+    reaction_store: ReactionStore | None = None,
 ) -> FastAPI:
     """
     Build and return the FastAPI application with all routes mounted.
