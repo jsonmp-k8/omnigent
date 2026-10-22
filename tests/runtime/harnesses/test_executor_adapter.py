@@ -2990,6 +2990,24 @@ async def test_subprocess_tracking_uses_validated_session_without_telemetry(
     ]
 
 
+def test_interrupt_budgets_nest_from_codex_to_the_runner_post() -> None:
+    """The Codex confirm must fit inside the adapter's event slice, which must fit
+    inside the runner's interrupt POST, or an unconfirmed stop surfaces as a POST
+    timeout instead of the 409 the adapter reports."""
+    from omnigent.inner.codex_executor import (
+        _INTERRUPT_CONFIRM_SECONDS,
+        _INTERRUPT_REQUEST_SECONDS,
+    )
+    from omnigent.runner.app import _HARNESS_INTERRUPT_POST_TIMEOUT_S
+    from omnigent.runtime.harnesses._executor_adapter import _INTERRUPT_EVENT_SLICE_S
+
+    codex_total = _INTERRUPT_REQUEST_SECONDS + _INTERRUPT_CONFIRM_SECONDS
+    assert codex_total < _INTERRUPT_EVENT_SLICE_S < _HARNESS_INTERRUPT_POST_TIMEOUT_S, (
+        f"codex {codex_total}s, adapter slice {_INTERRUPT_EVENT_SLICE_S}s, "
+        f"runner POST {_HARNESS_INTERRUPT_POST_TIMEOUT_S}s"
+    )
+
+
 class _InterruptRecordingExecutor(Executor):
     """Minimal executor that records ``interrupt_session`` and can stall in it."""
 

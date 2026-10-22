@@ -196,6 +196,43 @@ def test_session_dropping_harnesses_declare_a_rebuilt_thread() -> None:
         assert caps[harness].resume_after_pause is PauseResume.NEW_TURN, harness
 
 
+def test_resume_after_pause_defaults_follow_the_integration_mode() -> None:
+    """Only the harnesses whose behaviour differs from their mode declare the axis."""
+    from omnigent.harness_plugins import _RESUME_AFTER_PAUSE_BY_MODE
+
+    caps = harness_capabilities()
+    differing = sorted(
+        harness
+        for harness, capability in caps.items()
+        if capability.resume_after_pause
+        is not _RESUME_AFTER_PAUSE_BY_MODE[capability.integration_mode]
+    )
+    assert differing == ["hermes", "kimi", "open-responses", "openai-agents"]
+
+
+def test_pause_docs_matrix_matches_the_declarations() -> None:
+    """The matrix in docs/PAUSE_RESUME_CANCEL.md is a rendering of the declarations."""
+    from pathlib import Path
+
+    doc = Path(__file__).resolve().parents[1] / "docs" / "PAUSE_RESUME_CANCEL.md"
+    rows: dict[str, tuple[str, ...]] = {}
+    for line in doc.read_text(encoding="utf-8").splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) == 5 and cells[0] not in ("harness", "") and not cells[0].startswith("-"):
+            rows[cells[0]] = tuple(cells[1:])
+
+    expected = {
+        harness: (
+            c.as_dict()["integration_mode"],
+            c.as_dict()["pause"],
+            c.as_dict()["resume_after_pause"],
+            str(c.as_dict()["cancel"]).lower(),
+        )
+        for harness, c in harness_capabilities().items()
+    }
+    assert rows == expected, "regenerate the matrix with the snippet at the end of the doc"
+
+
 def test_cli_harnesses_that_only_kill_the_process_keep_their_thread() -> None:
     """Killing the vendor CLI is not dropping its session.
 

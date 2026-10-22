@@ -73,8 +73,9 @@ What the caller sees:
 - The harness answers the runner's interrupt with 204 when a runner turn was
   cancelled or the inner agent confirmed its stop, and with 409 when there was
   no runner turn and the inner agent could not confirm one. The runner logs a
-  409 as an interrupt the harness did not accept and answers the server with
-  503, the same shape its native-TUI interrupt handlers use for a failed stop.
+  refused interrupt and answers the server with the same 409, so the condition
+  carries one status code end to end; the server surfaces it as "couldn't
+  interrupt, try again".
 - When a runner turn was cancelled but the inner agent did not confirm, the
   runner turn is torn down regardless and the unconfirmed stop is only logged.
 - A stop that takes longer than the interrupt budget keeps running in the

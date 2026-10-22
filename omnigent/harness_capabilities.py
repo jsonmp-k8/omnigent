@@ -146,12 +146,14 @@ class HarnessCapabilities:
         is a *declared* claim; the harness bench's interrupt probe verifies it
         live and flags drift when a harness does not honor it.
     :param pause: What Pause does to the vendor agent — ``ends-run`` for every
-        harness that honors an interrupt today. Forced to ``unsupported`` when
-        *interrupt* is ``False``, whatever was declared.
+        harness that honors an interrupt today. When *interrupt* is ``False``
+        this is normalized to ``unsupported`` silently: a declared value is
+        not an error, because the dataclass default cannot tell a declaration
+        from an omission.
     :param resume_after_pause: What the turn after a Pause continues —
         ``same-thread`` when the vendor keeps its own conversation across the
         interrupt, ``new-turn`` when the vendor session is dropped and rebuilt
-        from the Omnigent transcript. Forced to ``unsupported`` with *pause*.
+        from the Omnigent transcript. Normalized to ``unsupported`` with *pause*.
     :param cancel: Whether Cancel is supported. ``True`` for every harness:
         Omnigent's own turn teardown records the cancellation and its cause
         even when the vendor ignores the interrupt.

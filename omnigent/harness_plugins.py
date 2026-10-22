@@ -333,7 +333,6 @@ _BUILTIN_NATIVE_PROVIDERS: tuple[NativeHarnessProvider, ...] = tuple(
 # module that implements it; the derivable axes (model_family, subagents) are
 # asserted against their source in tests/test_harness_capabilities.py so the
 # table cannot silently drift. See designs/harness-modular-registry-proposal.md.
-_C = HarnessCapabilities
 _IM = IntegrationMode
 _EL = Elicitation
 _RS = Resume
@@ -343,6 +342,24 @@ _AU = AuthModel
 _FH = ForkHistory
 _ID = InstructionDelivery
 _PR = PauseResume
+
+# A resident vendor (native TUI/server, ACP subprocess) keeps its conversation
+# across an interrupt; an SDK or CLI harness drops its session and rebuilds the
+# thread from the Omnigent transcript. Entries that differ declare it.
+_RESUME_AFTER_PAUSE_BY_MODE: dict[IntegrationMode, PauseResume] = {
+    _IM.NATIVE_TUI: _PR.SAME_THREAD,
+    _IM.NATIVE_SERVER: _PR.SAME_THREAD,
+    _IM.ACP_SUBPROCESS: _PR.SAME_THREAD,
+    _IM.SDK_IN_PROCESS: _PR.NEW_TURN,
+    _IM.CLI_SUBPROCESS: _PR.NEW_TURN,
+}
+
+
+def _C(integration_mode: IntegrationMode, *args: object, **kwargs: object) -> HarnessCapabilities:
+    """Declare a built-in harness, defaulting ``resume_after_pause`` by integration mode."""
+    kwargs.setdefault("resume_after_pause", _RESUME_AFTER_PAUSE_BY_MODE[integration_mode])
+    return HarnessCapabilities(integration_mode, *args, **kwargs)  # type: ignore[arg-type]
+
 
 # Bench shell-tool provocation prompts (moved off the bench's hardcoded
 # _NATIVE_TOOL_PROVOCATION table): the generic variant, and a Bash-specific one
@@ -367,7 +384,6 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=True,
         interrupt=True,
         streaming=True,
-        resume_after_pause=_PR.SAME_THREAD,
         fork_history=_FH.REBUILD,
         shell_tool_name="Bash",
         shell_tool_prompt=_BASH_PROMPT,
@@ -383,7 +399,6 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=True,
         interrupt=True,
         streaming=True,
-        resume_after_pause=_PR.SAME_THREAD,
         fork_history=_FH.REBUILD,
         shell_tool_name="shell",
         shell_tool_prompt=_SHELL_PROMPT,
@@ -405,7 +420,6 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=False,
         interrupt=True,
         streaming=True,
-        resume_after_pause=_PR.SAME_THREAD,
         fork_history=_FH.REBUILD,
         shell_tool_name="Bash",
         shell_tool_prompt=_BASH_PROMPT,
@@ -422,7 +436,6 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=False,
         interrupt=True,
         streaming=False,
-        resume_after_pause=_PR.SAME_THREAD,
         fork_history=_FH.PREAMBLE,
         # No shell-tool provocation: cursor-native was intentionally absent from
         # the bench's table (its tool probe is skipped), so leave shell_tool_* None.
@@ -441,7 +454,6 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=False,
         interrupt=True,
         streaming=False,
-        resume_after_pause=_PR.SAME_THREAD,
         fork_history=_FH.NONE,
         shell_tool_name="shell",
         shell_tool_prompt=_SHELL_PROMPT,
@@ -457,7 +469,6 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=False,
         interrupt=True,
         streaming=True,
-        resume_after_pause=_PR.SAME_THREAD,
         fork_history=_FH.NONE,
         shell_tool_name="run_command",
         shell_tool_prompt=_SHELL_PROMPT,
@@ -473,7 +484,6 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=False,
         interrupt=True,
         streaming=True,
-        resume_after_pause=_PR.SAME_THREAD,
         fork_history=_FH.NONE,
         shell_tool_name="developer__shell",
         shell_tool_prompt=_SHELL_PROMPT,
@@ -490,7 +500,6 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=False,
         interrupt=True,
         streaming=False,
-        resume_after_pause=_PR.SAME_THREAD,
         fork_history=_FH.REBUILD,
         shell_tool_name="run_shell_command",
         shell_tool_prompt=_SHELL_PROMPT,
@@ -506,7 +515,6 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=False,
         interrupt=True,
         streaming=True,
-        resume_after_pause=_PR.SAME_THREAD,
         fork_history=_FH.NONE,
         shell_tool_name="Bash",
         shell_tool_prompt=_BASH_PROMPT,
@@ -522,7 +530,6 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=True,
         interrupt=True,
         streaming=True,
-        resume_after_pause=_PR.SAME_THREAD,
         fork_history=_FH.PREAMBLE,
         # NATIVE_SERVER, not driven by the bench's native-tui tool probe, so
         # shell_tool_* stay None.
@@ -559,7 +566,6 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=True,
         interrupt=True,
         streaming=False,
-        resume_after_pause=_PR.SAME_THREAD,
         steering=True,
         live_queue=True,
         images=True,
@@ -586,7 +592,6 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=False,
         interrupt=True,
         streaming=True,
-        resume_after_pause=_PR.SAME_THREAD,
         fork_history=_FH.REBUILD,
         shell_tool_name="terminal",
         shell_tool_prompt=_SHELL_PROMPT,
@@ -682,7 +687,6 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=False,
         interrupt=True,
         streaming=True,
-        resume_after_pause=_PR.SAME_THREAD,
         instruction_delivery=_ID.FIRST_USER_PREFIX,
     ),
     "goose": _C(
@@ -695,7 +699,6 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=False,
         interrupt=True,
         streaming=True,
-        resume_after_pause=_PR.SAME_THREAD,
         instruction_delivery=_ID.FIRST_USER_PREFIX,
     ),
     "qwen": _C(
@@ -708,7 +711,6 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=False,
         interrupt=True,
         streaming=True,
-        resume_after_pause=_PR.SAME_THREAD,
         instruction_delivery=_ID.FIRST_USER_PREFIX,
     ),
     "kimi": _C(

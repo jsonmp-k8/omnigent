@@ -5791,9 +5791,8 @@ async def test_interrupt_rejected_by_the_harness_is_not_reported_as_delivered(
 ) -> None:
     """A busy vendor whose harness refuses the interrupt is a failed stop.
 
-    The runner answers the server with the same 503 shape its native-TUI
-    interrupt handlers use, logs the refusal, and does not claim the session
-    was idle.
+    The runner answers the server with the harness's own 409, logs the
+    refusal, and does not claim the session was idle.
     """
     conv_id = f"conv_{uuid.uuid4().hex}"
 
@@ -5830,7 +5829,7 @@ async def test_interrupt_rejected_by_the_harness_is_not_reported_as_delivered(
                 json={"type": "interrupt"},
             )
 
-    assert int_resp.status_code == 503, int_resp.text
+    assert int_resp.status_code == 409, int_resp.text
     assert int_resp.json()["error"] == "interrupt_not_delivered"
     forwarded = [body for body in harness_client.patched_events if body.get("type") == "interrupt"]
     assert forwarded, "the interrupt must still be attempted against the busy vendor"
