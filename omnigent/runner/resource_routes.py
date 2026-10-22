@@ -1660,7 +1660,7 @@ def register_resource_routes(
                         _logger.warning(
                             "Download of %s aborted: file shrank while streaming "
                             "(sent %d of %d announced bytes)",
-                            resolved,
+                            resolved.name,
                             size - remaining,
                             size,
                         )
