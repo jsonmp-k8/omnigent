@@ -5333,7 +5333,12 @@ def _publish_sandbox_status(*args: Any, **kwargs: Any) -> None:
 
 
 def _publish_sandbox_status_impl(
-    session_id: str, stage: str, error: str | None = None, *, provider: str | None = None
+    session_id: str,
+    stage: str,
+    error: str | None = None,
+    *,
+    provider: str | None = None,
+    details: str | None = None,
 ) -> None:
     """
     Publish a typed :class:`SessionSandboxStatusEvent` and update the
@@ -5359,6 +5364,9 @@ def _publish_sandbox_status_impl(
         ``None`` for non-terminal stages.
     :param provider: Sandbox provider being launched, e.g. ``"arclet"``.
         Later stages keep the cached launch's provider when omitted.
+    :param details: What the user needs to do when *stage* is
+        ``"action_required"``, e.g. ``"Sign in on your laptop."``. ``None`` for
+        other stages.
     """
     # "ready" evicts: from then on the session looks like any
     # host-bound session and the snapshot carries no launch state.
@@ -5370,6 +5378,7 @@ def _publish_sandbox_status_impl(
             "stage": stage,
             "error": error,
             "provider": provider or (previous.provider if previous else None),
+            "details": details if stage == "action_required" else None,
         }
     )
     log = _logger.error if stage == "failed" else _logger.info
@@ -5380,6 +5389,8 @@ def _publish_sandbox_status_impl(
             "sandbox_launch_failed" if stage == "failed" else "sandbox_launch_stage",
             session_id=session_id,
             stage=(previous.stage if previous else "unknown") if stage == "failed" else stage,
+            # Every stage row names the sandbox, even when the launch's host never connects.
+            provider=status.provider,
         ),
     )
     if status.stage == "ready":
@@ -5392,6 +5403,7 @@ def _publish_sandbox_status_impl(
         stage=status.stage,
         error=status.error,
         provider=status.provider,
+        details=status.details,
     )
     session_stream.publish(session_id, event.model_dump())
 
@@ -6455,7 +6467,7 @@ async def _provision_managed_sandbox(
     """
     from omnigent.server.managed_hosts import launch_managed_host, relaunch_managed_host
 
-    def _on_stage(stage: str) -> None:
+    def _on_stage(stage: str, details: str | None = None) -> None:
         """
         Relay a launch-pipeline stage to the session's progress surface.
 
@@ -6464,8 +6476,9 @@ async def _provision_managed_sandbox(
         :func:`_publish_sandbox_status` is thread-safe.
 
         :param stage: The stage just entered, e.g. ``"cloning"``.
+        :param details: What the user needs to do, for ``"action_required"``.
         """
-        _publish_sandbox_status(session_id, stage)
+        _publish_sandbox_status(session_id, stage, details=details)
 
     try:
         if relaunch_host is not None:
