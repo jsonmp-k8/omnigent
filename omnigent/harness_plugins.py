@@ -721,6 +721,9 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=False,
         interrupt=True,
         streaming=True,
+        # The interrupt kills the CLI process but keeps the cached ``-S`` id,
+        # so the next turn resumes the same kimi session.
+        resume_after_pause=_PR.SAME_THREAD,
         instruction_delivery=_ID.NOT_DELIVERED,
     ),
     "hermes": _C(
@@ -733,6 +736,8 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         subagents=False,
         interrupt=True,
         streaming=True,
+        # The interrupt kills the CLI process but keeps the session map entry.
+        resume_after_pause=_PR.SAME_THREAD,
         instruction_delivery=_ID.FIRST_USER_PREFIX,
     ),
     "copilot": _C(

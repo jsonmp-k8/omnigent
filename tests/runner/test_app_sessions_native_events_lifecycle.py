@@ -5789,12 +5789,11 @@ class _RejectingHarnessClient(_ScriptedHarnessClient):
 async def test_interrupt_rejected_by_the_harness_is_not_reported_as_delivered(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A 404 from the harness must not read as a landed Pause.
+    """A busy vendor whose harness refuses the interrupt is a failed stop.
 
-    ``httpx`` does not raise on status, so an interrupt the harness refused
-    looked exactly like one it accepted: the runner answered a bare 204 and
-    suppressed its own "found no turn running" log, leaving a silent no-op that
-    was *less* diagnosable than before the forward existed.
+    The runner answers the server with the same 503 shape its native-TUI
+    interrupt handlers use, logs the refusal, and does not claim the session
+    was idle.
     """
     conv_id = f"conv_{uuid.uuid4().hex}"
 
@@ -5831,13 +5830,14 @@ async def test_interrupt_rejected_by_the_harness_is_not_reported_as_delivered(
                 json={"type": "interrupt"},
             )
 
-    assert int_resp.status_code == 204, int_resp.text
+    assert int_resp.status_code == 503, int_resp.text
+    assert int_resp.json()["error"] == "interrupt_not_delivered"
     forwarded = [body for body in harness_client.patched_events if body.get("type") == "interrupt"]
     assert forwarded, "the interrupt must still be attempted against the busy vendor"
     messages = " | ".join(record.getMessage() for record in caplog.records)
     assert "rejected by the harness" in messages, (
         f"a refused interrupt must be logged as refused; log was: {messages}"
     )
-    assert "found no turn running" in messages, (
-        f"a refused interrupt must not be reported as a landed Pause; log was: {messages}"
+    assert "found no turn running" not in messages, (
+        f"a busy session must not be logged as idle; log was: {messages}"
     )

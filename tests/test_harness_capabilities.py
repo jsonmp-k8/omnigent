@@ -125,6 +125,28 @@ def test_pause_is_unsupported_exactly_where_interrupt_is() -> None:
             assert capability.pause is PauseSemantics.UNSUPPORTED, harness
 
 
+def test_a_record_without_interrupt_cannot_declare_pause() -> None:
+    """The invariant is structural: a bench or plugin record cannot publish
+    ``ends-run`` for a harness it says cannot be interrupted."""
+    capability = HarnessCapabilities(
+        IntegrationMode.SDK_IN_PROCESS,
+        Elicitation.NONE,
+        Resume.COLD_ONLY,
+        EffortFamily.NONE,
+        ModelFamily.MULTI,
+        AuthModel.OWN_AUTH,
+        subagents=False,
+        interrupt=False,
+        streaming=False,
+        pause=PauseSemantics.ENDS_RUN,
+        resume_after_pause=PauseResume.SAME_THREAD,
+    )
+
+    assert capability.pause is PauseSemantics.UNSUPPORTED
+    assert capability.resume_after_pause is PauseResume.UNSUPPORTED
+    assert capability.as_dict()["pause"] == "unsupported"
+
+
 def test_no_harness_claims_pause_suspends_a_turn() -> None:
     """``suspends`` is reserved: no harness freezes a turn mid-step today.
 
@@ -164,14 +186,27 @@ def test_native_harnesses_resume_the_same_vendor_thread_after_a_pause() -> None:
 def test_session_dropping_harnesses_declare_a_rebuilt_thread() -> None:
     """Harnesses whose interrupt closes the vendor session must say so.
 
-    Each of these calls ``close_session()`` (or kills the CLI) from
-    ``interrupt_session``, so the next turn starts a fresh vendor session and
-    replays Omnigent's history. Declaring ``same-thread`` would promise callers
-    a continuation the harness cannot give.
+    Each of these calls ``close_session()`` from ``interrupt_session``, so the
+    next turn starts a fresh vendor session and replays Omnigent's history.
+    Declaring ``same-thread`` would promise callers a continuation the harness
+    cannot give.
     """
     caps = harness_capabilities()
-    for harness in ("claude-sdk", "codex", "copilot", "cursor", "pi", "kimi", "hermes"):
+    for harness in ("antigravity", "claude-sdk", "codex", "copilot", "cursor", "pi"):
         assert caps[harness].resume_after_pause is PauseResume.NEW_TURN, harness
+
+
+def test_cli_harnesses_that_only_kill_the_process_keep_their_thread() -> None:
+    """Killing the vendor CLI is not dropping its session.
+
+    kimi keeps its cached ``-S`` resume id and hermes keeps its session map
+    across ``interrupt_session``; only ``close_session`` clears them. The next
+    turn therefore lands in the same vendor thread, and the declaration must
+    say so.
+    """
+    caps = harness_capabilities()
+    for harness in ("kimi", "hermes"):
+        assert caps[harness].resume_after_pause is PauseResume.SAME_THREAD, harness
 
 
 def test_pi_harnesses_declare_the_pi_effort_family() -> None:

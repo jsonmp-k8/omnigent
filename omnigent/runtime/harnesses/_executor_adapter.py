@@ -220,6 +220,8 @@ class ExecutorAdapter(HarnessApp):
         # until completion; drained before recovery and on shutdown.
         self._bg_tasks: set[asyncio.Task[bool]] = set()
         self._abandoned_executor_cleanup: asyncio.Task[bool] | None = None
+        # A Pause teardown that outran its response slice; awaited before the next turn.
+        self._pending_inner_interrupt: asyncio.Task[bool] | None = None
         # Consecutive orphaned-callback counter and reset guard for the Tier-1 SDK watchdog.
         self._orphan_callback_count = 0
         self._resyncing = False
@@ -243,6 +245,7 @@ class ExecutorAdapter(HarnessApp):
         Lazily constructs the executor on the first call; subsequent calls reuse the cached
         instance. Installs stable tool/elicitation/policy bridges once on first use.
         """
+        await self._await_pending_inner_interrupt()
         executor = self._ensure_executor()
         messages = _translate_input_to_messages(request.input)
         # Stamp session_key on every message so the inner executor keys its client consistently,
@@ -589,13 +592,14 @@ class ExecutorAdapter(HarnessApp):
         """Cancel the turn and drop the inner executor session synchronously.
 
         Extends the base handler to also call ``interrupt_session`` — ensuring the in-flight
-        generation stops even when the run loop is blocked awaiting the first token.
+        generation stops even when the run loop is blocked awaiting the first token. The
+        base 404 is absorbed when an executor exists: the inner agent can outlive the
+        harness turn, and the executor is then the only thing left to stop.
 
-        The base 404s when no turn is in flight, but an inner agent routinely outlives the
-        harness turn: a native TUI keeps generating after ``run_turn`` unwound, and Pause
-        arrives exactly then. Letting that 404 escape would skip ``interrupt_session`` and
-        leave the vendor running, so it is absorbed as long as there is an executor to stop;
-        with neither a turn nor an executor the 404 still surfaces.
+        :returns: 204 when a turn was cancelled or the inner session confirmed its stop.
+        :raises OmnigentError: 404 with neither a turn nor an executor; 409 when there
+            was no turn and the inner session reported nothing to stop, so the Pause
+            did not land anywhere.
         """
         interrupted_turn = True
         try:
@@ -605,30 +609,40 @@ class ExecutorAdapter(HarnessApp):
                 raise
             interrupted_turn = False
             response = Response(status_code=status.HTTP_204_NO_CONTENT)
-        await self._interrupt_inner_session(had_in_flight_turn=interrupted_turn)
+        stopped = await self._interrupt_inner_session()
+        if stopped is False:
+            if interrupted_turn:
+                _logger.warning(
+                    "inner session %s did not confirm its stop; the runner turn is torn down",
+                    self._session_key,
+                )
+            else:
+                raise OmnigentError(
+                    "the inner session had nothing to interrupt or did not confirm the stop",
+                    code=ErrorCode.CONFLICT,
+                )
         return response
 
-    async def _interrupt_inner_session(self, *, had_in_flight_turn: bool) -> None:
+    async def _interrupt_inner_session(self) -> bool | None:
         """Stop the inner session without holding the Pause response past its budget.
 
         ``interrupt_session`` confirms the stop and then reaps the inner process; only the
         confirm belongs on the response path. Past :data:`_INTERRUPT_EVENT_SLICE_S` the
         teardown keeps running as a tracked background task rather than being cancelled
-        mid-terminate, which would strand the subprocess.
+        mid-terminate, which would strand the subprocess; :meth:`run_turn` waits for it
+        before the executor serves another turn.
 
-        :param had_in_flight_turn: Whether the base handler found a turn to cancel; when it
-            did not, an executor reporting nothing to stop means the Pause found no agent.
+        :returns: What ``interrupt_session`` reported, or ``None`` when it is still
+            running or failed, so the caller cannot tell either way.
         """
         executor = self._executor
         if executor is None:
-            return
+            return None
         task = asyncio.ensure_future(executor.interrupt_session(self._session_key))
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
         try:
-            stopped = await asyncio.wait_for(
-                asyncio.shield(task), timeout=_INTERRUPT_EVENT_SLICE_S
-            )
+            return await asyncio.wait_for(asyncio.shield(task), timeout=_INTERRUPT_EVENT_SLICE_S)
         except TimeoutError:
             _logger.warning(
                 "interrupt of inner session %s did not finish within %.1fs; "
@@ -636,14 +650,11 @@ class ExecutorAdapter(HarnessApp):
                 self._session_key,
                 _INTERRUPT_EVENT_SLICE_S,
             )
-            return
+            self._pending_inner_interrupt = task
+            return None
         except Exception:  # best-effort: the runner floor does not depend on it
             _logger.exception("interrupt of inner session %s failed", self._session_key)
-            return
-        if not stopped and not had_in_flight_turn:
-            _logger.warning(
-                "interrupt of inner session %s found no turn to stop", self._session_key
-            )
+            return None
 
     async def _prepare_turn_retry(self) -> bool:
         """Wait for confirmed teardown without cancelling the background reap."""
@@ -1020,6 +1031,19 @@ class ExecutorAdapter(HarnessApp):
         if self._executor is None:
             self._executor = self._executor_factory()
         return self._executor
+
+    async def _await_pending_inner_interrupt(self) -> None:
+        """Let a Pause teardown that outran its response slice finish before the next turn.
+
+        Otherwise the executor could start generating again while its previous session
+        is still being interrupted and reaped underneath it.
+        """
+        pending = self._pending_inner_interrupt
+        if pending is None:
+            return
+        self._pending_inner_interrupt = None
+        with contextlib.suppress(Exception):
+            await asyncio.shield(pending)
 
     def _translate_event(self, event: ExecutorEvent, ctx: TurnContext) -> None:
         """Translate one inner ExecutorEvent into Omnigent SSE events via ``ctx.emit``."""

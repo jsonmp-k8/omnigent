@@ -3043,6 +3043,44 @@ async def test_interrupt_without_a_runner_turn_still_stops_the_inner_session() -
     )
 
 
+async def test_interrupt_without_a_turn_that_the_inner_session_cannot_confirm_409s() -> None:
+    """A Pause that reached neither a runner turn nor a stopping agent is not a 204."""
+    from omnigent.errors import ErrorCode, OmnigentError
+    from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+
+    executor = _InterruptRecordingExecutor(stopped=False)
+    adapter = ExecutorAdapter(lambda: executor, session_key="conv_unconfirmed")
+    adapter._executor = executor
+
+    with pytest.raises(OmnigentError) as excinfo:
+        await adapter._handle_interrupt_event()
+
+    assert excinfo.value.code is ErrorCode.CONFLICT, excinfo.value.code
+    assert executor.interrupted == ["conv_unconfirmed"]
+
+
+async def test_slow_inner_interrupt_is_awaited_before_the_executor_serves_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A teardown still running past the response slice must finish before the next turn."""
+    from omnigent.runtime.harnesses import _executor_adapter
+    from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+
+    monkeypatch.setattr(_executor_adapter, "_INTERRUPT_EVENT_SLICE_S", 0.05)
+    executor = _InterruptRecordingExecutor(delay=0.3)
+    adapter = ExecutorAdapter(lambda: executor, session_key="conv_pending")
+    adapter._executor = executor
+
+    await adapter._handle_interrupt_event()
+    pending = adapter._pending_inner_interrupt
+    assert pending is not None and not pending.done()
+
+    await adapter._await_pending_inner_interrupt()
+
+    assert pending.done()
+    assert adapter._pending_inner_interrupt is None
+
+
 async def test_interrupt_with_neither_turn_nor_executor_still_404s() -> None:
     """With nothing to stop, the base handler's fail-loud 404 must survive."""
     from omnigent.errors import ErrorCode, OmnigentError

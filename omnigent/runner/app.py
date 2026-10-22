@@ -23,7 +23,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 if TYPE_CHECKING:
     # Type-only import: the runner keeps codex deps out of its runtime import
@@ -1140,6 +1140,10 @@ _session_histories_ref: dict[str, list[_JsonObject]] = {}
 # ``_publish_event`` are visible by the time the producer's await
 # call returns, so tests don't need to subscribe to the HTTP
 # ``/stream`` endpoint just to assert on emitted events).
+#: What an interrupt/stop achieved: a turn torn down or the harness accepting
+#: the forwarded interrupt, a busy harness refusing it, or nothing running.
+_InterruptOutcome = Literal["delivered", "rejected", "idle"]
+
 _session_event_queues_ref: dict[str, asyncio.Queue[_JsonObject | None]] = {}
 
 
@@ -4024,25 +4028,23 @@ def create_runner_app(
 
         Releases the harness's parked policy/tool future so its ``run_turn``
         unwinds. A dead or wedged harness logs and is swallowed — the
-        runner-side floor does not depend on this succeeding.
-
-        The harness answers 4xx when it had nothing to interrupt. httpx does not
-        raise on status, so that has to be read off the response — otherwise a
-        rejected interrupt is indistinguishable from a delivered one and the
-        caller reports a Pause that never reached the agent.
+        runner-side floor does not depend on this succeeding. A 4xx answer
+        means the harness had nothing to interrupt; httpx does not raise on
+        status, so it is read off the response.
 
         :param conv_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
         :param turn_epoch: Turn generation captured before resolving its harness.
-        :returns: ``True`` when the harness accepted the interrupt; ``False``
-            when there was no live harness, a newer turn bound meanwhile, the
-            POST failed, or the harness rejected it.
+        :returns: ``True`` when the harness accepted the interrupt, or when a
+            newer turn bound meanwhile (the turn this interrupt targeted is
+            already gone); ``False`` when there was no live harness, the POST
+            failed, or the harness rejected it.
         """
         if process_manager is None:
             return False
         try:
             harness_client = await process_manager.get_client(conv_id, "any")
             if _turn_bind_epoch.get(conv_id, 0) != turn_epoch:
-                return False
+                return True
             response = await harness_client.post(
                 f"/v1/sessions/{conv_id}/events",
                 json={"type": "interrupt"},
@@ -4074,13 +4076,16 @@ def create_runner_app(
             return False
         return True
 
-    async def _cancel_inprocess_turn(conv_id: str, *, forward_to_busy_vendor: bool = True) -> bool:
+    async def _cancel_inprocess_turn(
+        conv_id: str, *, forward_to_busy_vendor: bool = True
+    ) -> _InterruptOutcome:
         """Cancel this session's live turn and forward the interrupt downstream.
 
         :param conv_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
-        :returns: ``True`` when an interrupt was delivered somewhere (a runner
-            turn was torn down, or a still-busy vendor agent was asked to stop);
-            ``False`` when there was genuinely nothing running to interrupt.
+        :returns: ``"delivered"`` when a runner turn was torn down or the harness
+            accepted the forwarded interrupt; ``"rejected"`` when the session
+            was busy but the harness did not accept it; ``"idle"`` when there
+            was nothing running to interrupt.
         """
         # Distinguish "no live turn" (absent) from a stream-mode turn (present as
         # the None sentinel — driven by the AP request's consumption of
@@ -4089,7 +4094,7 @@ def create_runner_app(
         # interrupt must be forwarded for either.
         if conv_id not in _active_turns:
             if not forward_to_busy_vendor:
-                return False
+                return "idle"
             return await _forward_interrupt_to_busy_vendor(conv_id)
         target = _active_turns.get(conv_id)
         turn_epoch = _turn_bind_epoch.get(conv_id, 0)
@@ -4099,27 +4104,26 @@ def create_runner_app(
             # later messages) — sweep it, tokens included.
             _sweep_dead_turn_slot(conv_id, target)
             if not forward_to_busy_vendor:
-                return False
+                return "idle"
             return await _forward_interrupt_to_busy_vendor(conv_id)
         _interrupted_sessions.add(conv_id)
-        await _forward_harness_interrupt(conv_id, turn_epoch=turn_epoch)
+        forwarded = await _forward_harness_interrupt(conv_id, turn_epoch=turn_epoch)
         # Floor: force-cancel the runner Task when we own one. In stream mode
         # there is no Task here — ``_resync_turn_state`` owns the sentinel pop,
         # and direct interrupt/stop callers rely on the forwarded interrupt
-        # ending proxy_stream.
+        # ending proxy_stream, so its answer is the only delivery signal.
         if isinstance(target, asyncio.Task):
             await _cancel_active_turn(conv_id, expected_task=target)
-        return True
+            return "delivered"
+        return "delivered" if forwarded else "rejected"
 
-    async def _forward_interrupt_to_busy_vendor(conv_id: str) -> bool:
+    async def _forward_interrupt_to_busy_vendor(conv_id: str) -> _InterruptOutcome:
         """Forward an interrupt for a vendor agent that outlived the runner turn.
 
         A native harness's agent keeps generating in its own TUI/server after
         the runner's turn object is gone, so "no runner turn" does not mean "not
-        busy" — ``_native_turn_in_flight`` is the authority there. Returning
-        early instead is what made Pause a silent no-op on the native harnesses
-        with no :class:`NativeInterruptRunner` handler; the harness's own
-        ``interrupt_session`` still reaches the vendor's cancel, so forward to it.
+        busy" — ``_native_turn_in_flight`` is the authority there, and the
+        harness's own ``interrupt_session`` still reaches the vendor's cancel.
 
         Deliberately does not add to ``_interrupted_sessions``: that token is
         consumed by ``_cancel_active_turn`` when it tears a runner Task down, and
@@ -4127,11 +4131,11 @@ def create_runner_app(
         next turn's cancellation bookkeeping.
 
         :param conv_id: Session/conversation identifier.
-        :returns: ``True`` when the interrupt reached the harness, ``False`` when
-            the session was not reported busy or the harness did not accept it.
+        :returns: ``"idle"`` when the session was not reported busy, else whether
+            the harness accepted the interrupt.
         """
         if not _native_turn_in_flight(conv_id):
-            return False
+            return "idle"
         _logger.info(
             "Interrupt for %s has no runner turn but its native agent still "
             "reports %s; forwarding to the harness.",
@@ -4149,7 +4153,20 @@ def create_runner_app(
                 conv_id,
                 extra={"session_id": conv_id},
             )
-        return delivered
+        return "delivered" if delivered else "rejected"
+
+    def _interrupt_not_delivered_response(conv_id: str, action: str) -> JSONResponse:
+        """The failed-stop shape the native-TUI interrupt handlers already use."""
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "interrupt_not_delivered",
+                "detail": (
+                    f"{action} for session {conv_id} was not accepted by its harness; "
+                    "the agent may still be generating."
+                ),
+            },
+        )
 
     async def _resync_turn_state(
         conv_id: str, reason: str, *, owner_response_id: str | None = None
@@ -6740,7 +6757,10 @@ def create_runner_app(
             _interrupt_resp = await _native_interrupt_runner.interrupt(_harness, conversation_id)
             if _interrupt_resp is not None:
                 return _interrupt_resp
-            if not await _cancel_inprocess_turn(conversation_id):
+            outcome = await _cancel_inprocess_turn(conversation_id)
+            if outcome == "rejected":
+                return _interrupt_not_delivered_response(conversation_id, "Interrupt")
+            if outcome == "idle":
                 _logger.info(
                     "Interrupt for %s found no turn running.",
                     conversation_id,
@@ -6898,7 +6918,10 @@ def create_runner_app(
             _stop_resp = await _native_interrupt_runner.stop(_harness, conversation_id)
             if _stop_resp is not None:
                 return _stop_resp
-            if not await _cancel_inprocess_turn(conversation_id):
+            outcome = await _cancel_inprocess_turn(conversation_id)
+            if outcome == "rejected":
+                return _interrupt_not_delivered_response(conversation_id, "Stop")
+            if outcome == "idle":
                 _logger.info(
                     "Stop for %s found no turn running.",
                     conversation_id,

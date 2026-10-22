@@ -34,12 +34,14 @@ They are declared in `omnigent/harness_plugins.py` and typed in
 | `new-turn`    | The vendor session was dropped; the next turn rebuilds it from Omnigent's transcript. The conversation is preserved — the vendor's own thread is not. |
 | `unsupported` | There is nothing to resume. |
 
-`same-thread` describes the normal Pause. The ACP harnesses (`goose`, `qwen`,
-`grok`, `jcode`, …) fall back to terminating the subprocess when Pause arrives
-before the session handshake finished, or when the `session/cancel` send itself
-fails; that kills the vendor thread, so those degraded paths behave as
-`new-turn`. A client should treat `same-thread` as "the thread survives a Pause
-that lands", not as a guarantee against a vendor that is already broken.
+`same-thread` describes the normal Pause. `goose` and `qwen` fall back to
+terminating their subprocess when the `session/cancel` send fails; that kills
+the vendor thread, so that degraded path behaves as `new-turn`. The generic ACP
+harnesses (`acp`, `grok`, `jcode`) only send `session/cancel` and report a
+failed send as an undelivered Pause. `kimi` and `hermes` kill their CLI process
+but keep the cached session id, so the next turn resumes the same vendor thread.
+A client should treat `same-thread` as "the thread survives a Pause that
+lands", not as a guarantee against a vendor that is already broken.
 
 **`cancel`** — always `true`. Cancel is a framework floor, not a per-vendor
 feature: Omnigent's own turn teardown records the cancellation and its cause
@@ -51,7 +53,8 @@ Every harness stops and abandons the turn, so `ends-run` is the honest value
 across the board. A true suspend needs the vendor to checkpoint a partially
 executed turn and continue it — an interrupt plus a resumable thread is not the
 same thing, because the abandoned request must not silently continue. That
-distinction is exactly why the `new-turn` harnesses drop the vendor session: a
+distinction is exactly why the `new-turn` harnesses (`antigravity`,
+`claude-sdk`, `codex`, `copilot`, `cursor`, `pi`) drop the vendor session: a
 resumed vendor thread receives only the latest user message and would skip the
 runner's `[System: interrupted]` marker, quietly picking the abandoned request
 back up.
@@ -62,45 +65,66 @@ Pause waits for the agent to be *observed* stopping rather than assuming it did.
 For Codex, `turn/interrupt` returning only proves the app server received the
 ask, so `CodexExecutor.interrupt_session` then waits for the turn to be seen
 ending — off the reader task's own markers, which keep arriving even when
-nothing is consuming `run_turn`. An unconfirmed stop is logged and returned as
-`False`, so a Pause that did not land is reported rather than assumed.
+nothing is consuming `run_turn`. A turn the reader already saw end gets no
+interrupt at all.
+
+What the caller sees:
+
+- The harness answers the runner's interrupt with 204 when a runner turn was
+  cancelled or the inner agent confirmed its stop, and with 409 when there was
+  no runner turn and the inner agent could not confirm one. The runner logs a
+  409 as an interrupt the harness did not accept and answers the server with
+  503, the same shape its native-TUI interrupt handlers use for a failed stop.
+- When a runner turn was cancelled but the inner agent did not confirm, the
+  runner turn is torn down regardless and the unconfirmed stop is only logged.
+- A stop that takes longer than the interrupt budget keeps running in the
+  background; the response does not wait for the process reap.
 
 A native agent also keeps generating in its own process after the runner's turn
 object is gone. "No runner turn" therefore does not mean "not busy": when the
 session still reports an in-flight status, the interrupt is forwarded to the
-harness so it reaches the vendor's own cancel.
+harness so it reaches the vendor's own cancel. Two consequences of forwarding
+late:
+
+- On the SDK harnesses that drop their session on interrupt, a Pause that
+  arrives just after a turn finished still drops the warm session, so the next
+  turn starts cold.
+- On `antigravity-native`, agy's cancel is a no-op for a step that is waiting
+  on a user interaction (ask-question / command-permission). Such a Pause is
+  accepted but the step stays blocked until the question is answered or denied
+  through the interaction bridge.
 
 ## Per-harness matrix
 
-| harness            | integration mode | pause    | resume_after_pause | cancel    |
-|--------------------|------------------|----------|--------------------|-----------|
-| acp                | acp-subprocess   | ends-run | same-thread        | supported |
-| antigravity        | sdk-in-process   | ends-run | new-turn           | supported |
-| antigravity-native | native-tui       | ends-run | same-thread        | supported |
-| claude-native      | native-tui       | ends-run | same-thread        | supported |
-| claude-sdk         | sdk-in-process   | ends-run | new-turn           | supported |
-| codex              | cli-subprocess   | ends-run | new-turn           | supported |
-| codex-native       | native-tui       | ends-run | same-thread        | supported |
-| copilot            | sdk-in-process   | ends-run | new-turn           | supported |
-| cursor             | sdk-in-process   | ends-run | new-turn           | supported |
-| cursor-native      | native-tui       | ends-run | same-thread        | supported |
-| devin-native       | native-tui       | ends-run | same-thread        | supported |
-| goose              | acp-subprocess   | ends-run | same-thread        | supported |
-| goose-native       | native-tui       | ends-run | same-thread        | supported |
-| grok               | acp-subprocess   | ends-run | same-thread        | supported |
-| hermes             | cli-subprocess   | ends-run | new-turn           | supported |
-| hermes-native      | native-tui       | ends-run | same-thread        | supported |
-| jcode              | acp-subprocess   | ends-run | same-thread        | supported |
-| kimi               | cli-subprocess   | ends-run | new-turn           | supported |
-| kimi-native        | native-tui       | ends-run | same-thread        | supported |
-| kiro-native        | native-tui       | ends-run | same-thread        | supported |
-| open-responses     | sdk-in-process   | ends-run | same-thread        | supported |
-| openai-agents      | sdk-in-process   | ends-run | same-thread        | supported |
-| opencode-native    | native-server    | ends-run | same-thread        | supported |
-| pi                 | cli-subprocess   | ends-run | new-turn           | supported |
-| pi-native          | native-tui       | ends-run | same-thread        | supported |
-| qwen               | acp-subprocess   | ends-run | same-thread        | supported |
-| qwen-native        | native-tui       | ends-run | same-thread        | supported |
+| harness            | integration mode | pause    | resume_after_pause | cancel |
+|--------------------|------------------|----------|--------------------|--------|
+| acp                | acp-subprocess   | ends-run | same-thread        | true   |
+| antigravity        | sdk-in-process   | ends-run | new-turn           | true   |
+| antigravity-native | native-tui       | ends-run | same-thread        | true   |
+| claude-native      | native-tui       | ends-run | same-thread        | true   |
+| claude-sdk         | sdk-in-process   | ends-run | new-turn           | true   |
+| codex              | cli-subprocess   | ends-run | new-turn           | true   |
+| codex-native       | native-tui       | ends-run | same-thread        | true   |
+| copilot            | sdk-in-process   | ends-run | new-turn           | true   |
+| cursor             | sdk-in-process   | ends-run | new-turn           | true   |
+| cursor-native      | native-tui       | ends-run | same-thread        | true   |
+| devin-native       | native-tui       | ends-run | same-thread        | true   |
+| goose              | acp-subprocess   | ends-run | same-thread        | true   |
+| goose-native       | native-tui       | ends-run | same-thread        | true   |
+| grok               | acp-subprocess   | ends-run | same-thread        | true   |
+| hermes             | cli-subprocess   | ends-run | same-thread        | true   |
+| hermes-native      | native-tui       | ends-run | same-thread        | true   |
+| jcode              | acp-subprocess   | ends-run | same-thread        | true   |
+| kimi               | cli-subprocess   | ends-run | same-thread        | true   |
+| kimi-native        | native-tui       | ends-run | same-thread        | true   |
+| kiro-native        | native-tui       | ends-run | same-thread        | true   |
+| open-responses     | sdk-in-process   | ends-run | same-thread        | true   |
+| openai-agents      | sdk-in-process   | ends-run | same-thread        | true   |
+| opencode-native    | native-server    | ends-run | same-thread        | true   |
+| pi                 | cli-subprocess   | ends-run | new-turn           | true   |
+| pi-native          | native-tui       | ends-run | same-thread        | true   |
+| qwen               | acp-subprocess   | ends-run | same-thread        | true   |
+| qwen-native        | native-tui       | ends-run | same-thread        | true   |
 
 Regenerate from the declarations rather than editing by hand:
 
@@ -108,6 +132,7 @@ Regenerate from the declarations rather than editing by hand:
 python -c "
 from omnigent.harness_plugins import harness_capabilities
 for h, c in sorted(harness_capabilities().items()):
-    print(h, c.pause.value, c.resume_after_pause.value, c.cancel)
+    d = c.as_dict()
+    print(h, d['integration_mode'], d['pause'], d['resume_after_pause'], str(d['cancel']).lower())
 "
 ```

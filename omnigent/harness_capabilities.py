@@ -146,13 +146,12 @@ class HarnessCapabilities:
         is a *declared* claim; the harness bench's interrupt probe verifies it
         live and flags drift when a harness does not honor it.
     :param pause: What Pause does to the vendor agent — ``ends-run`` for every
-        harness that honors an interrupt today, ``unsupported`` where the
-        interrupt never reaches the vendor. Always ``unsupported`` when
-        *interrupt* is ``False``.
+        harness that honors an interrupt today. Forced to ``unsupported`` when
+        *interrupt* is ``False``, whatever was declared.
     :param resume_after_pause: What the turn after a Pause continues —
         ``same-thread`` when the vendor keeps its own conversation across the
         interrupt, ``new-turn`` when the vendor session is dropped and rebuilt
-        from the Omnigent transcript.
+        from the Omnigent transcript. Forced to ``unsupported`` with *pause*.
     :param cancel: Whether Cancel is supported. ``True`` for every harness:
         Omnigent's own turn teardown records the cancellation and its cause
         even when the vendor ignores the interrupt.
@@ -202,6 +201,12 @@ class HarnessCapabilities:
     shell_tool_name: str | None = None
     shell_tool_prompt: str | None = None
     instruction_delivery: InstructionDelivery = InstructionDelivery.UNKNOWN
+
+    def __post_init__(self) -> None:
+        # Pause cannot end a run the harness has no way to interrupt.
+        if not self.interrupt:
+            object.__setattr__(self, "pause", PauseSemantics.UNSUPPORTED)
+            object.__setattr__(self, "resume_after_pause", PauseResume.UNSUPPORTED)
 
     def as_dict(self) -> dict[str, str | bool | None]:
         """Return a JSON-serializable view for the ``/v1/harnesses`` catalog."""
