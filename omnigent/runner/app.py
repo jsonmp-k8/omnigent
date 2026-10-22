@@ -1136,12 +1136,6 @@ _session_agent_ids_ref: dict[str, str] = {}
 _session_histories_ref: dict[str, list[_JsonObject]] = {}
 
 
-# Module-level ref to _session_event_queues. Populated inside
-# create_runner_app; used by tests to inspect the queue an SSE
-# subscriber would have read (events published synchronously by
-# ``_publish_event`` are visible by the time the producer's await
-# call returns, so tests don't need to subscribe to the HTTP
-# ``/stream`` endpoint just to assert on emitted events).
 class _InterruptOutcome(Enum):
     """What an interrupt or stop achieved."""
 
@@ -1150,9 +1144,25 @@ class _InterruptOutcome(Enum):
     IDLE = "idle"  # nothing was running
 
 
-#: Bound on the interrupt POST to a harness; under the server's 5s stop deadline.
-_HARNESS_INTERRUPT_POST_TIMEOUT_S = 3.0
+class _ForwardResult(Enum):
+    """How the harness answered a forwarded interrupt."""
 
+    DELIVERED = "delivered"  # 2xx, or the turn it targeted is already gone
+    NO_TURN = "no_turn"  # 404: the harness has nothing to interrupt
+    REJECTED = "rejected"  # the harness refused (409 or another error), or was unreachable
+
+
+#: Bound on the interrupt POST to a harness: above the harness's interrupt-event
+#: slice with room for transport overhead, under the server's 5s stop deadline.
+_HARNESS_INTERRUPT_POST_TIMEOUT_S = 4.0
+
+
+# Module-level ref to _session_event_queues. Populated inside
+# create_runner_app; used by tests to inspect the queue an SSE
+# subscriber would have read (events published synchronously by
+# ``_publish_event`` are visible by the time the producer's await
+# call returns, so tests don't need to subscribe to the HTTP
+# ``/stream`` endpoint just to assert on emitted events).
 _session_event_queues_ref: dict[str, asyncio.Queue[_JsonObject | None]] = {}
 
 
@@ -4032,28 +4042,27 @@ def create_runner_app(
                 )
         return True
 
-    async def _forward_harness_interrupt(conv_id: str, *, turn_epoch: int) -> bool:
+    async def _forward_harness_interrupt(conv_id: str, *, turn_epoch: int) -> _ForwardResult:
         """Best-effort POST ``{"type":"interrupt"}`` to a conversation's harness.
 
         Releases the harness's parked policy/tool future so its ``run_turn``
         unwinds. A dead or wedged harness logs and is swallowed — the
-        runner-side floor does not depend on this succeeding. A 4xx answer
-        means the harness had nothing to interrupt; httpx does not raise on
-        status, so it is read off the response.
+        runner-side floor does not depend on this succeeding. httpx does not
+        raise on status, so the harness's answer is read off the response.
 
         :param conv_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
         :param turn_epoch: Turn generation captured before resolving its harness.
-        :returns: ``True`` when the harness accepted the interrupt, or when a
-            newer turn bound meanwhile (the turn this interrupt targeted is
-            already gone); ``False`` when there was no live harness, the POST
-            failed, or the harness rejected it.
+        :returns: ``DELIVERED`` on a 2xx, or when a newer turn bound meanwhile
+            (the turn this interrupt targeted is already gone); ``NO_TURN`` when
+            the harness answered 404; ``REJECTED`` on any other answer, a
+            failed POST, or no live harness.
         """
         if process_manager is None:
-            return False
+            return _ForwardResult.REJECTED
         try:
             harness_client = await process_manager.get_client(conv_id, "any")
             if _turn_bind_epoch.get(conv_id, 0) != turn_epoch:
-                return True
+                return _ForwardResult.DELIVERED
             response = await harness_client.post(
                 f"/v1/sessions/{conv_id}/events",
                 json={"type": "interrupt"},
@@ -4065,7 +4074,7 @@ def create_runner_app(
                 conv_id,
                 extra={"session_id": conv_id},
             )
-            return False
+            return _ForwardResult.REJECTED
         except Exception:  # best-effort: harness may have exited
             _logger.warning(
                 "Interrupt forward to harness failed for %s",
@@ -4073,7 +4082,14 @@ def create_runner_app(
                 exc_info=True,
                 extra={"session_id": conv_id},
             )
-            return False
+            return _ForwardResult.REJECTED
+        if response.status_code == 404:
+            _logger.info(
+                "Interrupt forward for %s: the harness reports no turn",
+                conv_id,
+                extra={"session_id": conv_id},
+            )
+            return _ForwardResult.NO_TURN
         if response.status_code >= 400:
             _logger.warning(
                 "Interrupt forward for %s rejected by the harness (HTTP %s)",
@@ -4081,8 +4097,8 @@ def create_runner_app(
                 response.status_code,
                 extra={"session_id": conv_id},
             )
-            return False
-        return True
+            return _ForwardResult.REJECTED
+        return _ForwardResult.DELIVERED
 
     async def _cancel_inprocess_turn(
         conv_id: str, *, forward_to_busy_vendor: bool = True
@@ -4123,24 +4139,20 @@ def create_runner_app(
         if isinstance(target, asyncio.Task):
             await _cancel_active_turn(conv_id, expected_task=target)
             return _InterruptOutcome.DELIVERED
-        return _InterruptOutcome.DELIVERED if forwarded else _InterruptOutcome.REJECTED
+        if forwarded is _ForwardResult.REJECTED:
+            return _InterruptOutcome.REJECTED
+        return _InterruptOutcome.DELIVERED
 
     async def _forward_interrupt_to_busy_vendor(conv_id: str) -> _InterruptOutcome:
-        """Forward an interrupt for a vendor agent that outlived the runner turn.
+        """Forward an interrupt when the native agent is still busy after the runner turn ended.
 
-        A native harness's agent keeps generating in its own TUI/server after
-        the runner's turn object is gone, so "no runner turn" does not mean "not
-        busy" — ``_native_turn_in_flight`` is the authority there, and the
-        harness's own ``interrupt_session`` still reaches the vendor's cancel.
-
-        Deliberately does not add to ``_interrupted_sessions``: that token is
-        consumed by ``_cancel_active_turn`` when it tears a runner Task down, and
-        there is no Task here — setting it would leave a stale token to taint the
-        next turn's cancellation bookkeeping.
+        ``_native_turn_in_flight`` is the authority on "busy"; the harness's own
+        ``interrupt_session`` reaches the vendor's cancel. Does not set
+        ``_interrupted_sessions``: there is no Task to consume it.
 
         :param conv_id: Session/conversation identifier.
-        :returns: ``IDLE`` when the session was not reported busy, else whether
-            the harness accepted the interrupt.
+        :returns: ``IDLE`` when neither the session status nor the harness
+            reports a turn, else whether the harness accepted the interrupt.
         """
         if not _native_turn_in_flight(conv_id):
             return _InterruptOutcome.IDLE
@@ -4151,17 +4163,20 @@ def create_runner_app(
             _native_pane_status.get(conv_id),
             extra={"session_id": conv_id},
         )
-        delivered = await _forward_harness_interrupt(
+        forwarded = await _forward_harness_interrupt(
             conv_id, turn_epoch=_turn_bind_epoch.get(conv_id, 0)
         )
-        if not delivered:
+        if forwarded is _ForwardResult.NO_TURN:
+            return _InterruptOutcome.IDLE
+        if forwarded is _ForwardResult.REJECTED:
             _logger.warning(
                 "Interrupt for %s was not accepted by its harness; the native "
                 "agent may still be generating.",
                 conv_id,
                 extra={"session_id": conv_id},
             )
-        return _InterruptOutcome.DELIVERED if delivered else _InterruptOutcome.REJECTED
+            return _InterruptOutcome.REJECTED
+        return _InterruptOutcome.DELIVERED
 
     def _interrupt_not_delivered_response(conv_id: str, action: str) -> JSONResponse:
         """A refused interrupt is a conflict with a still-busy agent, as the harness reports it."""

@@ -198,16 +198,35 @@ def test_session_dropping_harnesses_declare_a_rebuilt_thread() -> None:
 
 def test_resume_after_pause_defaults_follow_the_integration_mode() -> None:
     """Only the harnesses whose behaviour differs from their mode declare the axis."""
-    from omnigent.harness_plugins import _RESUME_AFTER_PAUSE_BY_MODE
+    from omnigent.harness_capabilities import RESUME_AFTER_PAUSE_BY_MODE
 
     caps = harness_capabilities()
     differing = sorted(
         harness
         for harness, capability in caps.items()
         if capability.resume_after_pause
-        is not _RESUME_AFTER_PAUSE_BY_MODE[capability.integration_mode]
+        is not RESUME_AFTER_PAUSE_BY_MODE[capability.integration_mode]
     )
     assert differing == ["hermes", "kimi", "open-responses", "openai-agents"]
+
+
+def test_cancel_cannot_be_declared_away() -> None:
+    """Cancel is a framework floor, so a record declaring otherwise is normalized."""
+    capability = HarnessCapabilities(
+        IntegrationMode.SDK_IN_PROCESS,
+        Elicitation.NONE,
+        Resume.COLD_ONLY,
+        EffortFamily.NONE,
+        ModelFamily.MULTI,
+        AuthModel.OWN_AUTH,
+        subagents=False,
+        interrupt=True,
+        streaming=True,
+        cancel=False,
+    )
+
+    assert capability.cancel is True
+    assert capability.as_dict()["cancel"] is True
 
 
 def test_pause_docs_matrix_matches_the_declarations() -> None:

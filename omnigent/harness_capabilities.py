@@ -131,6 +131,19 @@ class InstructionDelivery(str, Enum):
     UNKNOWN = "unknown"
 
 
+#: What ``resume_after_pause`` means when a harness does not declare it: a
+#: resident vendor (native TUI/server, ACP subprocess) keeps its conversation
+#: across an interrupt; an SDK or CLI harness drops its session and rebuilds the
+#: thread from the Omnigent transcript. Harnesses that differ declare the axis.
+RESUME_AFTER_PAUSE_BY_MODE: dict[IntegrationMode, PauseResume] = {
+    IntegrationMode.NATIVE_TUI: PauseResume.SAME_THREAD,
+    IntegrationMode.NATIVE_SERVER: PauseResume.SAME_THREAD,
+    IntegrationMode.ACP_SUBPROCESS: PauseResume.SAME_THREAD,
+    IntegrationMode.SDK_IN_PROCESS: PauseResume.NEW_TURN,
+    IntegrationMode.CLI_SUBPROCESS: PauseResume.NEW_TURN,
+}
+
+
 @dataclass(frozen=True)
 class HarnessCapabilities:
     """The declared feature set one harness supports.
@@ -153,10 +166,12 @@ class HarnessCapabilities:
     :param resume_after_pause: What the turn after a Pause continues —
         ``same-thread`` when the vendor keeps its own conversation across the
         interrupt, ``new-turn`` when the vendor session is dropped and rebuilt
-        from the Omnigent transcript. Normalized to ``unsupported`` with *pause*.
-    :param cancel: Whether Cancel is supported. ``True`` for every harness:
-        Omnigent's own turn teardown records the cancellation and its cause
-        even when the vendor ignores the interrupt.
+        from the Omnigent transcript. Defaults by integration mode
+        (:data:`RESUME_AFTER_PAUSE_BY_MODE`); normalized to ``unsupported``
+        with *pause*.
+    :param cancel: Always ``True``, whatever is declared: Omnigent's own turn
+        teardown records the cancellation and its cause even when the vendor
+        ignores the interrupt.
     :param streaming: Whether the harness forwards token-level deltas (vs a
         single complete blob). Declared claim; verified by the bench's
         streaming probe.
@@ -193,7 +208,8 @@ class HarnessCapabilities:
     interrupt: bool
     streaming: bool
     pause: PauseSemantics = PauseSemantics.ENDS_RUN
-    resume_after_pause: PauseResume = PauseResume.NEW_TURN
+    # ``None`` means "as the integration mode implies"; resolved in ``__post_init__``.
+    resume_after_pause: PauseResume | None = None
     cancel: bool = True
     steering: bool | None = None
     live_queue: bool | None = None
@@ -205,10 +221,22 @@ class HarnessCapabilities:
     instruction_delivery: InstructionDelivery = InstructionDelivery.UNKNOWN
 
     def __post_init__(self) -> None:
+        if self.resume_after_pause is None:
+            object.__setattr__(
+                self, "resume_after_pause", RESUME_AFTER_PAUSE_BY_MODE[self.integration_mode]
+            )
         # Pause cannot end a run the harness has no way to interrupt.
         if not self.interrupt:
             object.__setattr__(self, "pause", PauseSemantics.UNSUPPORTED)
             object.__setattr__(self, "resume_after_pause", PauseResume.UNSUPPORTED)
+        # Cancel is a framework floor: the turn teardown records it whatever the vendor does.
+        object.__setattr__(self, "cancel", True)
+
+    @property
+    def resume_after_pause_value(self) -> PauseResume:
+        """The resolved axis; never ``None`` after construction."""
+        assert self.resume_after_pause is not None
+        return self.resume_after_pause
 
     def as_dict(self) -> dict[str, str | bool | None]:
         """Return a JSON-serializable view for the ``/v1/harnesses`` catalog."""
@@ -223,7 +251,7 @@ class HarnessCapabilities:
             "interrupt": self.interrupt,
             "streaming": self.streaming,
             "pause": self.pause.value,
-            "resume_after_pause": self.resume_after_pause.value,
+            "resume_after_pause": self.resume_after_pause_value.value,
             "cancel": self.cancel,
             "steering": self.steering,
             "live_queue": self.live_queue,

@@ -4299,18 +4299,11 @@ class _CodexAppServerSession:
         )
 
     def turn_stopped(self, turn_id: str) -> bool:
-        """Whether *turn_id* has been observed to stop generating.
-
-        Read off the reader task's markers, not the turn generator's, so this
-        answers even while nothing is consuming ``run_turn`` — the case Pause
-        hits when the runner already tore its turn down.
+        """Whether the reader has seen *turn_id* end (completed, terminally failed or
+        transport dead). Clearing ``active_turn_id`` is deliberately not a stop.
 
         :param turn_id: The turn asked to stop, e.g. ``"turn_abc123"``.
-        :returns: ``True`` once the app server ended the turn (completed or
-            terminally failed) or the transport died. The generator clearing
-            :attr:`active_turn_id` is deliberately NOT a stop — it unwinds
-            before the app server does, so treating it as one would confirm a
-            Pause while Codex was still generating.
+        :returns: ``True`` once the app server ended the turn or the transport died.
         """
         if self._transport_error is not None or not self._started:
             return True
@@ -4932,15 +4925,11 @@ class CodexExecutor(Executor):
 
         ``turn/interrupt`` returning proves only that the app server received
         the ask, so the turn is then watched until it is observed stopping
-        (:meth:`_CodexAppServerSession.await_turn_stopped`). An unconfirmed
-        stop is logged and returned as ``False``.
-
-        The session is always dropped afterwards (resetting ``thread_id``) so
-        the next turn starts a fresh thread and replays full history. A resumed
-        thread sends only the latest user message, which would bypass the
-        runner's "[System: interrupted]" marker and silently continue the
-        abandoned request. See claude_sdk_executor.interrupt_session for the
-        rationale, and the ``resume_after_pause`` capability Codex publishes.
+        (:meth:`_CodexAppServerSession.await_turn_stopped`). The session is
+        always dropped afterwards so the next turn replays full history; a
+        resumed thread would skip the runner's "[System: interrupted]" marker
+        (see claude_sdk_executor.interrupt_session and Codex's
+        ``resume_after_pause`` capability).
 
         :param session_key: The Omnigent session id to interrupt.
         :returns: ``True`` when the turn was confirmed stopped and the session

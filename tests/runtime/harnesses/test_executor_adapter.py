@@ -3011,16 +3011,18 @@ def test_interrupt_budgets_nest_from_codex_to_the_runner_post() -> None:
 class _InterruptRecordingExecutor(Executor):
     """Minimal executor that records ``interrupt_session`` and can stall in it."""
 
-    def __init__(self, *, stopped: bool = True, delay: float = 0.0) -> None:
+    def __init__(self, *, stopped: bool = True, delay: float = 0.0, raises: bool = False) -> None:
         """
         Record interrupt calls, optionally stalling to model a slow teardown.
 
         :param stopped: What ``interrupt_session`` reports back.
         :param delay: Seconds to stall inside ``interrupt_session``.
+        :param raises: Fail the interrupt instead of reporting an outcome.
         """
         self.interrupted: list[str] = []
         self._stopped = stopped
         self._delay = delay
+        self._raises = raises
 
     async def run_turn(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
         """Never driven by these tests."""
@@ -3032,6 +3034,8 @@ class _InterruptRecordingExecutor(Executor):
         self.interrupted.append(session_key)
         if self._delay:
             await asyncio.sleep(self._delay)
+        if self._raises:
+            raise RuntimeError("inner session gone")
         return self._stopped
 
 
@@ -3061,12 +3065,16 @@ async def test_interrupt_without_a_runner_turn_still_stops_the_inner_session() -
     )
 
 
-async def test_interrupt_without_a_turn_that_the_inner_session_cannot_confirm_409s() -> None:
-    """A Pause that reached neither a runner turn nor a stopping agent is not a 204."""
+@pytest.mark.parametrize("failure", ["unconfirmed", "raises"])
+async def test_interrupt_without_a_turn_that_the_inner_session_cannot_confirm_409s(
+    failure: str,
+) -> None:
+    """A Pause that reached neither a runner turn nor a stopping agent is not a 204,
+    whether the inner session said so or failed outright."""
     from omnigent.errors import ErrorCode, OmnigentError
     from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
 
-    executor = _InterruptRecordingExecutor(stopped=False)
+    executor = _InterruptRecordingExecutor(stopped=False, raises=failure == "raises")
     adapter = ExecutorAdapter(lambda: executor, session_key="conv_unconfirmed")
     adapter._executor = executor
 
@@ -3080,7 +3088,8 @@ async def test_interrupt_without_a_turn_that_the_inner_session_cannot_confirm_40
 async def test_slow_inner_interrupt_is_awaited_before_the_executor_serves_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A teardown still running past the response slice must finish before the next turn."""
+    """Every teardown still running past the response slice must finish before the
+    next turn, including one left behind by an earlier overlapping Pause."""
     from omnigent.runtime.harnesses import _executor_adapter
     from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
 
@@ -3089,14 +3098,18 @@ async def test_slow_inner_interrupt_is_awaited_before_the_executor_serves_again(
     adapter = ExecutorAdapter(lambda: executor, session_key="conv_pending")
     adapter._executor = executor
 
+    # Two Pauses in a row: a slow first teardown must not be forgotten when the
+    # second one also runs over.
     await adapter._handle_interrupt_event()
-    pending = adapter._pending_inner_interrupt
-    assert pending is not None and not pending.done()
+    await adapter._handle_interrupt_event()
+    pending = list(adapter._pending_inner_interrupts)
+    assert len(pending) == 2 and not any(task.done() for task in pending)
 
     await adapter._await_pending_inner_interrupt()
 
-    assert pending.done()
-    assert adapter._pending_inner_interrupt is None
+    assert all(task.done() for task in pending)
+    assert not adapter._pending_inner_interrupts
+    assert executor.interrupted == ["conv_pending", "conv_pending"]
 
 
 async def test_interrupt_with_neither_turn_nor_executor_still_404s() -> None:

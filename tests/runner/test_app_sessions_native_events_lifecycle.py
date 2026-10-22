@@ -5763,11 +5763,13 @@ async def test_interrupt_reaches_a_native_agent_that_outlived_the_runner_turn(
 
 
 class _RejectingHarnessClient(_ScriptedHarnessClient):
-    """Scripted client whose harness answers the interrupt POST with 404.
+    """Scripted client whose harness answers the interrupt POST with ``status_code``.
 
-    Models the real scaffold's fail-loud response when it has neither an
-    in-flight turn nor an inner session to stop.
+    409 models the adapter refusing a Pause its inner session could not confirm;
+    404 models an older scaffold with neither a turn nor an inner session.
     """
+
+    status_code = 409
 
     async def post(self, url: str, *, json: dict[str, Any], timeout: Any = None) -> Any:
         """Record the body and reject it the way the harness scaffold would."""
@@ -5775,7 +5777,7 @@ class _RejectingHarnessClient(_ScriptedHarnessClient):
         self.patched_events.append(json)
 
         class _Response:
-            status_code = 404
+            status_code = _RejectingHarnessClient.status_code
             headers: dict[str, str] = {}
             content = b""
 
@@ -5786,8 +5788,21 @@ class _RejectingHarnessClient(_ScriptedHarnessClient):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("harness_status", "expected_status", "expected_log"),
+    [
+        (409, 409, "rejected by the harness"),
+        # A harness older than the contract answers 404 for "no turn"; that is
+        # idle, not a refusal, so mixed versions keep their 204.
+        (404, 204, "reports no turn"),
+    ],
+    ids=["refused", "no-turn"],
+)
 async def test_interrupt_rejected_by_the_harness_is_not_reported_as_delivered(
     caplog: pytest.LogCaptureFixture,
+    harness_status: int,
+    expected_status: int,
+    expected_log: str,
 ) -> None:
     """A busy vendor whose harness refuses the interrupt is a failed stop.
 
@@ -5795,6 +5810,7 @@ async def test_interrupt_rejected_by_the_harness_is_not_reported_as_delivered(
     refusal, and does not claim the session was idle.
     """
     conv_id = f"conv_{uuid.uuid4().hex}"
+    _RejectingHarnessClient.status_code = harness_status
 
     spec = AgentSpec(
         spec_version=1,
@@ -5829,14 +5845,11 @@ async def test_interrupt_rejected_by_the_harness_is_not_reported_as_delivered(
                 json={"type": "interrupt"},
             )
 
-    assert int_resp.status_code == 409, int_resp.text
-    assert int_resp.json()["error"] == "interrupt_not_delivered"
+    assert int_resp.status_code == expected_status, int_resp.text
+    if expected_status == 409:
+        assert int_resp.json()["error"] == "interrupt_not_delivered"
     forwarded = [body for body in harness_client.patched_events if body.get("type") == "interrupt"]
     assert forwarded, "the interrupt must still be attempted against the busy vendor"
     messages = " | ".join(record.getMessage() for record in caplog.records)
-    assert "rejected by the harness" in messages, (
-        f"a refused interrupt must be logged as refused; log was: {messages}"
-    )
-    assert "found no turn running" not in messages, (
-        f"a busy session must not be logged as idle; log was: {messages}"
-    )
+    assert expected_log in messages, f"log was: {messages}"
+    assert ("found no turn running" in messages) == (expected_status == 204), messages

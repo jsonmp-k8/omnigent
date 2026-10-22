@@ -71,15 +71,23 @@ interrupt at all.
 What the caller sees:
 
 - The harness answers the runner's interrupt with 204 when a runner turn was
-  cancelled or the inner agent confirmed its stop, and with 409 when there was
-  no runner turn and the inner agent could not confirm one. The runner logs a
-  refused interrupt and answers the server with the same 409, so the condition
-  carries one status code end to end; the server surfaces it as "couldn't
-  interrupt, try again".
+  cancelled or the inner agent confirmed its stop, 409 when there was no
+  runner turn and the inner agent could not confirm one, and 404 when it has
+  nothing at all to interrupt. The runner treats a 404 as "nothing running"
+  and a 409 as a refusal, which it answers the server with as its own 409.
+- The server surfaces that 409 on both Pause and Stop as a conflict ("the
+  agent did not accept the interrupt and may still be running; try again")
+  and does not emit `session.interrupted`. A runner that is unreachable or
+  fails outright is handled as before: the session is reported interrupted and
+  the fence is lifted so the turn's remaining output is not dropped.
 - When a runner turn was cancelled but the inner agent did not confirm, the
   runner turn is torn down regardless and the unconfirmed stop is only logged.
 - A stop that takes longer than the interrupt budget keeps running in the
-  background; the response does not wait for the process reap.
+  background; the response does not wait for the process reap, and the next
+  turn waits for every such teardown to finish first.
+- Harnesses older than this contract answer 404 when they have no turn; the
+  runner reads that as idle, so mixed versions do not turn Pause or Stop into
+  an error.
 
 A native agent also keeps generating in its own process after the runner's turn
 object is gone. "No runner turn" therefore does not mean "not busy": when the

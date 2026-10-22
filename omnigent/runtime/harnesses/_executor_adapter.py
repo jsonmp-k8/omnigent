@@ -19,6 +19,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Sequence
+from enum import Enum
 from typing import Any
 
 from fastapi import Response, status
@@ -84,10 +85,19 @@ _MCP_TOOL_NAME_PREFIX = "mcp__"
 # slice never fires first and inject a CancelledError that bypasses the SIGKILL fallback.
 INTERRUPT_TIMEOUT_S = 3.0
 _INTERRUPT_SLICE_S = 3.0
-# A live Pause holds the runner's interrupt POST open, and that POST is bounded at
-# 3.0s. Stay under it so a slow teardown reports as a delivered interrupt rather than
-# a POST timeout: the stop is worth waiting for, the subprocess reap behind it is not.
+# Below the runner's interrupt POST timeout; the reap continues in the background.
 _INTERRUPT_EVENT_SLICE_S = 2.5
+
+
+class _InnerStop(Enum):
+    """What ``interrupt_session`` told the Pause handler, kept apart from "still reaping"."""
+
+    CONFIRMED = "confirmed"
+    UNCONFIRMED = "unconfirmed"
+    PENDING = "pending"  # ran past the slice; the teardown continues in the background
+    FAILED = "failed"  # raised
+    ABSENT = "absent"  # no executor to stop
+
 
 # Interrupting an executor abandoned by an abnormal exit usually fails because the
 # harness is already gone -- that absence is what abandoned it. Its socket refuses or
@@ -220,8 +230,8 @@ class ExecutorAdapter(HarnessApp):
         # until completion; drained before recovery and on shutdown.
         self._bg_tasks: set[asyncio.Task[bool]] = set()
         self._abandoned_executor_cleanup: asyncio.Task[bool] | None = None
-        # A Pause teardown that outran its response slice; awaited before the next turn.
-        self._pending_inner_interrupt: asyncio.Task[bool] | None = None
+        # Pause teardowns that outran their response slice; all awaited before the next turn.
+        self._pending_inner_interrupts: set[asyncio.Task[bool]] = set()
         # Consecutive orphaned-callback counter and reset guard for the Tier-1 SDK watchdog.
         self._orphan_callback_count = 0
         self._resyncing = False
@@ -609,8 +619,8 @@ class ExecutorAdapter(HarnessApp):
                 raise
             interrupted_turn = False
             response = Response(status_code=status.HTTP_204_NO_CONTENT)
-        stopped = await self._interrupt_inner_session()
-        if stopped is False:
+        stop = await self._interrupt_inner_session()
+        if stop in (_InnerStop.UNCONFIRMED, _InnerStop.FAILED):
             if interrupted_turn:
                 _logger.warning(
                     "inner session %s did not confirm its stop; the runner turn is torn down",
@@ -623,7 +633,7 @@ class ExecutorAdapter(HarnessApp):
                 )
         return response
 
-    async def _interrupt_inner_session(self) -> bool | None:
+    async def _interrupt_inner_session(self) -> _InnerStop:
         """Stop the inner session without holding the Pause response past its budget.
 
         ``interrupt_session`` confirms the stop and then reaps the inner process; only the
@@ -632,17 +642,21 @@ class ExecutorAdapter(HarnessApp):
         mid-terminate, which would strand the subprocess; :meth:`run_turn` waits for it
         before the executor serves another turn.
 
-        :returns: What ``interrupt_session`` reported, or ``None`` when it is still
-            running or failed, so the caller cannot tell either way.
+        :returns: ``CONFIRMED`` / ``UNCONFIRMED`` as ``interrupt_session`` reported;
+            ``PENDING`` when it is still running (the confirm itself fits the slice, so
+            only the reap can run over); ``FAILED`` when it raised; ``ABSENT`` with no
+            executor to stop.
         """
         executor = self._executor
         if executor is None:
-            return None
+            return _InnerStop.ABSENT
         task = asyncio.ensure_future(executor.interrupt_session(self._session_key))
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
         try:
-            return await asyncio.wait_for(asyncio.shield(task), timeout=_INTERRUPT_EVENT_SLICE_S)
+            stopped = await asyncio.wait_for(
+                asyncio.shield(task), timeout=_INTERRUPT_EVENT_SLICE_S
+            )
         except TimeoutError:
             _logger.warning(
                 "interrupt of inner session %s did not finish within %.1fs; "
@@ -650,11 +664,13 @@ class ExecutorAdapter(HarnessApp):
                 self._session_key,
                 _INTERRUPT_EVENT_SLICE_S,
             )
-            self._pending_inner_interrupt = task
-            return None
+            self._pending_inner_interrupts.add(task)
+            task.add_done_callback(self._pending_inner_interrupts.discard)
+            return _InnerStop.PENDING
         except Exception:  # best-effort: the runner floor does not depend on it
             _logger.exception("interrupt of inner session %s failed", self._session_key)
-            return None
+            return _InnerStop.FAILED
+        return _InnerStop.CONFIRMED if stopped else _InnerStop.UNCONFIRMED
 
     async def _prepare_turn_retry(self) -> bool:
         """Wait for confirmed teardown without cancelling the background reap."""
@@ -1033,17 +1049,16 @@ class ExecutorAdapter(HarnessApp):
         return self._executor
 
     async def _await_pending_inner_interrupt(self) -> None:
-        """Let a Pause teardown that outran its response slice finish before the next turn.
+        """Let every Pause teardown that outran its response slice finish before the next turn.
 
-        Otherwise the executor could start generating again while its previous session
-        is still being interrupted and reaped underneath it.
+        Otherwise the executor could start generating again while a previous session is
+        still being interrupted and reaped underneath it. Overlapping Pauses each leave
+        a task behind, so all of them are awaited, not only the latest.
         """
-        pending = self._pending_inner_interrupt
-        if pending is None:
+        pending = [task for task in self._pending_inner_interrupts if not task.done()]
+        if not pending:
             return
-        self._pending_inner_interrupt = None
-        with contextlib.suppress(Exception):
-            await asyncio.shield(pending)
+        await asyncio.gather(*(asyncio.shield(task) for task in pending), return_exceptions=True)
 
     def _translate_event(self, event: ExecutorEvent, ctx: TurnContext) -> None:
         """Translate one inner ExecutorEvent into Omnigent SSE events via ``ctx.emit``."""

@@ -333,6 +333,7 @@ _BUILTIN_NATIVE_PROVIDERS: tuple[NativeHarnessProvider, ...] = tuple(
 # module that implements it; the derivable axes (model_family, subagents) are
 # asserted against their source in tests/test_harness_capabilities.py so the
 # table cannot silently drift. See designs/harness-modular-registry-proposal.md.
+_C = HarnessCapabilities
 _IM = IntegrationMode
 _EL = Elicitation
 _RS = Resume
@@ -342,24 +343,6 @@ _AU = AuthModel
 _FH = ForkHistory
 _ID = InstructionDelivery
 _PR = PauseResume
-
-# A resident vendor (native TUI/server, ACP subprocess) keeps its conversation
-# across an interrupt; an SDK or CLI harness drops its session and rebuilds the
-# thread from the Omnigent transcript. Entries that differ declare it.
-_RESUME_AFTER_PAUSE_BY_MODE: dict[IntegrationMode, PauseResume] = {
-    _IM.NATIVE_TUI: _PR.SAME_THREAD,
-    _IM.NATIVE_SERVER: _PR.SAME_THREAD,
-    _IM.ACP_SUBPROCESS: _PR.SAME_THREAD,
-    _IM.SDK_IN_PROCESS: _PR.NEW_TURN,
-    _IM.CLI_SUBPROCESS: _PR.NEW_TURN,
-}
-
-
-def _C(integration_mode: IntegrationMode, *args: object, **kwargs: object) -> HarnessCapabilities:
-    """Declare a built-in harness, defaulting ``resume_after_pause`` by integration mode."""
-    kwargs.setdefault("resume_after_pause", _RESUME_AFTER_PAUSE_BY_MODE[integration_mode])
-    return HarnessCapabilities(integration_mode, *args, **kwargs)  # type: ignore[arg-type]
-
 
 # Bench shell-tool provocation prompts (moved off the bench's hardcoded
 # _NATIVE_TOOL_PROVOCATION table): the generic variant, and a Bash-specific one
