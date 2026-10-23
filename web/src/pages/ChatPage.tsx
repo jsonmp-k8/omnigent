@@ -2440,6 +2440,7 @@ function ComposerImpl(
   // Harness/agent identity shown in the status tray below the card, separate
   // from the composer's read-only model/effort label.
   const sessionHarness = useChatStore((s) => s.sessionHarness);
+  const nativeTerminalSession = useChatStore((s) => s.isNativeTerminalSession);
   const subAgentName = useChatStore((s) => s.subAgentName);
   const brainHarnessLabels = useBrainHarnessLabels();
   const harnessLabel = composerHarnessLabel(
@@ -4132,6 +4133,7 @@ function ComposerImpl(
                   modelLabelOptions={modelLabelOptions}
                   modelLabelHostId={composerSession?.hostId}
                   costRoutingEligible={costRoutingEligible}
+                  modelPickWakesSession={nativeTerminalSession && runnerOnline === false}
                   // Config changes persist server-side and apply on the next
                   // wake/turn (the runner forward is best-effort), so the gear
                   // stays live wherever a message could be sent — including
@@ -4771,6 +4773,7 @@ function SessionHarnessPicker({
   modelLabelOptions,
   modelLabelHostId,
   costRoutingEligible,
+  modelPickWakesSession,
   disabled,
   openNonce = 0,
 }: {
@@ -4790,12 +4793,15 @@ function SessionHarnessPicker({
   modelLabelOptions: readonly NativeModelOption[];
   modelLabelHostId: string | null | undefined;
   costRoutingEligible: boolean;
+  /** A model pick must first wake this native session's runner, which can take a while. */
+  modelPickWakesSession: boolean;
   disabled: boolean;
   openNonce?: number;
 }) {
   const isMobile = useIsMobileViewport();
   const [menuOpen, setMenuOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
+  const [startingSession, setStartingSession] = useState(false);
   const appliedOpenNonce = useRef(0);
   const conversationId = useChatStore((state) => state.conversationId);
   const sessionHarness = useChatStore((state) => state.sessionHarness);
@@ -4867,10 +4873,11 @@ function SessionHarnessPicker({
     setMenuOpen(false);
     setConfigOpen(false);
   }, [conversationId]);
-  const apply = async (change: () => Promise<unknown>) => {
+  const apply = async (change: () => Promise<unknown>, wakesSession = false) => {
     if (disabled || busyRef.current || pendingModelChange !== null) return;
     busyRef.current = true;
     setBusy(true);
+    setStartingSession(wakesSession);
     try {
       await change();
     } catch {
@@ -4878,6 +4885,7 @@ function SessionHarnessPicker({
     } finally {
       busyRef.current = false;
       setBusy(false);
+      setStartingSession(false);
     }
   };
   const selectModel = (modelId: string | null) =>
@@ -4900,7 +4908,7 @@ function SessionHarnessPicker({
         useChatStore.getState().conversationId === sourceSessionId
       )
         await store.setCostControlMode("off");
-    });
+    }, modelPickWakesSession);
   // Devin Fusion: the composed `fusion-…` id is the model; the lead effort is
   // baked in, so it carries no separate reasoning effort.
   const composerFusionOption = fusionOption(modelOptions);
@@ -4913,9 +4921,18 @@ function SessionHarnessPicker({
       await store.setModel(modelUid, { expectConfirmation: false });
       if (useChatStore.getState().conversationId !== sourceSessionId) return;
       if (selectedEffort !== null) await store.setEffort(null);
-    });
+    }, modelPickWakesSession);
   const configContent = (
     <>
+      {startingSession && (
+        <div
+          className="px-2 py-1 text-xs whitespace-normal text-muted-foreground"
+          role="status"
+          data-testid="composer-agent-starting-session"
+        >
+          Starting the session to switch models…
+        </div>
+      )}
       {costRoutingEligible && showModels && (
         <>
           <DropdownMenuItem
