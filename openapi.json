@@ -14545,6 +14545,21 @@
               "title": "Session Id",
               "type": "string"
             }
+          },
+          {
+            "description": "`\"full\"` (default) writes the session as it is stored. `\"none\"` writes its shape without content: turns, tool names, call ids, timing and the `sealed` markers, with every content field dropped and `redacted` set in the header. Such a file is not importable.",
+            "in": "query",
+            "name": "content",
+            "required": false,
+            "schema": {
+              "default": "full",
+              "enum": [
+                "full",
+                "none"
+              ],
+              "title": "Content",
+              "type": "string"
+            }
           }
         ],
         "responses": {

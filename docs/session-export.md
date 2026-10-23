@@ -97,6 +97,28 @@ complete:
 An auditor can therefore tell what the model saw that the readable fields do
 not carry.
 
+### Exporting the shape without the content
+
+Sometimes what a session *did* can be shared and what it *said* cannot. A
+redacted export carries the structure and drops the content:
+
+```sh
+omnigent session export --id conv_abc123 --redact
+curl "$SERVER/v1/sessions/conv_abc123/export?content=none"
+```
+
+The header gains `"redacted": true`, and every entry loses `raw`, `text`,
+`content`, `tool_input`, `tool_input_raw` and `tool_output`. What remains is
+the shape of the run: turn and sequence numbers, each entry's `kind` and
+`role`, the tool names and `call_id` pairs, timestamps, and the `sealed`
+markers, so a reader can still see where the provider withheld something as
+well as what was elided here.
+
+Such a file describes a session; it cannot restore one. `omnigent session
+import` refuses it rather than building an empty session that looks like the
+original. Redaction is all or nothing today: there is no hook to rewrite
+content rather than drop it.
+
 ### Compaction is a boundary, not a gap
 
 The entries a compaction replaced stay in the file. The `compaction` entry
@@ -112,6 +134,8 @@ replaced item id) and carries the summary it continued from.
 - The stream has no trailer. A download that stopped early (a lost connection,
   a store error mid-page) is still a valid file; check that the last `seq`
   matches the item count you expect before trusting it as complete.
+- A redacted file is not a lesser export of the same session; it is a
+  different artifact. Nothing recovers the content from it.
 - `omnigent session import` can rebuild only item types the importing server
   knows. A `note` for a type this version does not know is kept in the file
   but refused on import.

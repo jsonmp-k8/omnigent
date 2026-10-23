@@ -13,7 +13,12 @@ from typing import Any
 import httpx
 import pytest
 
-from omnigent.export import TRANSCRIPT_SCHEMA, item_from_entry, read_transcript
+from omnigent.export import (
+    CONTENT_FIELDS,
+    TRANSCRIPT_SCHEMA,
+    item_from_entry,
+    read_transcript,
+)
 from omnigent.server.routes.sessions.routes_items import _EXPORT_PAGE_SIZE
 from tests.server.helpers import create_test_agent
 
@@ -150,6 +155,58 @@ async def test_export_numbers_across_item_pages(client: httpx.AsyncClient) -> No
     # Each user message is a request of its own, so it opens a turn.
     assert [e.turn for e in transcript.entries] == list(range(1, count + 1))
     assert [e.text for e in transcript.entries][-1] == f"m{count - 1}"
+
+
+async def test_export_without_content_keeps_the_shape_and_drops_the_rest(
+    client: httpx.AsyncClient,
+) -> None:
+    """``content=none`` is for sharing what a run did when what it said cannot leave."""
+    session_id = await _seed_session(client)
+
+    resp = await client.get(f"/v1/sessions/{session_id}/export", params={"content": "none"})
+
+    assert resp.status_code == 200, resp.text
+    transcript = read_transcript(resp.text.splitlines(keepends=True))
+
+    assert transcript.header.redacted is True
+    # The shape a reader came for: turns, kinds, the tools called and how they paired.
+    assert [e.kind for e in transcript.entries] == [
+        "message",
+        "reasoning",
+        "tool_call",
+        "tool_result",
+        "message",
+    ]
+    assert [e.seq for e in transcript.entries] == [1, 2, 3, 4, 5]
+    call, result = transcript.entries[2], transcript.entries[3]
+    assert call.tool == "sql"
+    assert call.call_id == result.call_id == "call_1"
+    assert transcript.entries[1].sealed is True
+    # None of what was said, asked or returned.
+    assert all(
+        getattr(entry, field) is None for entry in transcript.entries for field in CONTENT_FIELDS
+    )
+    assert "churn by region" not in resp.text
+    assert "select region" not in resp.text
+
+
+async def test_export_defaults_to_the_full_session(client: httpx.AsyncClient) -> None:
+    """The new parameter is opt-in; omitting it writes what it always wrote."""
+    session_id = await _seed_session(client)
+
+    resp = await client.get(f"/v1/sessions/{session_id}/export")
+
+    assert read_transcript(resp.text.splitlines(keepends=True)).header.redacted is False
+    assert "churn by region" in resp.text
+
+
+async def test_export_rejects_an_unknown_content_mode(client: httpx.AsyncClient) -> None:
+    """A typo must not quietly hand back the full session."""
+    session_id = await _seed_session(client)
+
+    resp = await client.get(f"/v1/sessions/{session_id}/export", params={"content": "redacted"})
+
+    assert resp.status_code == 422, resp.text
 
 
 async def test_export_unknown_session_is_404(client: httpx.AsyncClient) -> None:

@@ -43,7 +43,9 @@ the header menu), and each place is a separate entry point.
 - `export`: Export in the header menu downloads the session as an
   `omnigent.transcript/1` file from `GET /v1/sessions/{id}/export`; the CLI
   writes the same file with `omnigent session export` and reads it back with
-  `omnigent session import` (`docs/session-export.md`).
+  `omnigent session import` (`docs/session-export.md`). A redacted export
+  (`--redact`, or `?content=none`) writes the session's shape with every
+  content field dropped and `redacted` in the header; import refuses it.
 - `unread`: Mark as unread flags a session to revisit and survives a reload,
   including for the session being viewed. Its dot appears once the turn is
   idle; approval and error indicators can take precedence. A row showing the

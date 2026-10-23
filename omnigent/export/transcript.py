@@ -81,6 +81,9 @@ class TranscriptHeader(BaseModel):
     :param workspace: Absolute workspace path on the runner, if any.
     :param parent_session: Parent session id for a sub-agent session.
     :param root_session: Root of the spawn tree this session belongs to.
+    :param redacted: ``True`` when the file was written without content (see
+        :data:`CONTENT_FIELDS`). Such a file describes a session's shape only
+        and cannot be imported back into one.
     :param settings: Per-session overrides worth restoring on import
         (``model_override``, ``reasoning_effort``, ...). Only set keys appear.
     """
@@ -100,10 +103,14 @@ class TranscriptHeader(BaseModel):
     parent_session: str | None = None
     root_session: str | None = None
     settings: dict[str, Any] = Field(default_factory=dict)
+    redacted: bool = False
 
     def to_line(self) -> str:
-        """Serialize as one JSON line (unset optionals omitted)."""
-        return json.dumps(self.model_dump(by_alias=True, exclude_none=True))
+        """Serialize as one JSON line (unset optionals and false flags omitted)."""
+        payload = self.model_dump(by_alias=True, exclude_none=True)
+        if payload.get("redacted") is False:
+            del payload["redacted"]
+        return json.dumps(payload)
 
 
 class TranscriptEntry(BaseModel):
@@ -199,6 +206,16 @@ class TranscriptEntry(BaseModel):
             raise ValueError(f"{self.kind} entry cannot carry {', '.join(stray)}")
         return self
 
+    def redacted(self) -> TranscriptEntry:
+        """Return this entry with every content field dropped.
+
+        Keeps the structural fields, including ``sealed``: a reader can still see
+        that the provider withheld something, as well as what was elided here.
+
+        :returns: A copy carrying no content.
+        """
+        return self.model_copy(update=dict.fromkeys(CONTENT_FIELDS))
+
     def to_line(self) -> str:
         """Serialize as one JSON line (unset optionals and false flags omitted)."""
         payload = self.model_dump(exclude_none=True)
@@ -207,6 +224,13 @@ class TranscriptEntry(BaseModel):
                 del payload[flag]
         return json.dumps(payload)
 
+
+#: The fields that carry what was said, read or returned. A redacted export drops
+#: exactly these and keeps the rest, so the shape of a session survives: its turns,
+#: the tools it called, which entries were sealed, and when each happened.
+CONTENT_FIELDS: frozenset[str] = frozenset(
+    {"raw", "text", "content", "tool_input", "tool_input_raw", "tool_output"}
+)
 
 #: Fields every entry may carry.
 _COMMON_FIELDS: frozenset[str] = frozenset(
@@ -552,17 +576,23 @@ def iter_transcript_lines(
     items: Iterable[Mapping[str, Any]],
     *,
     exported_at: datetime | None = None,
+    redact: bool = False,
 ) -> Iterator[str]:
     """Yield the transcript one newline-terminated JSON line at a time.
 
     :param session: The session snapshot dict (see :func:`header_from_session`).
     :param items: Flat API items in chronological order.
     :param exported_at: Export time; defaults to now.
+    :param redact: Write the session's shape without its content, for sharing a
+        run where the structure may leave but the text may not.
     :returns: The header line, then one line per item.
     """
-    yield header_from_session(session, exported_at=exported_at).to_line() + "\n"
+    header = header_from_session(session, exported_at=exported_at)
+    if redact:
+        header = header.model_copy(update={"redacted": True})
+    yield header.to_line() + "\n"
     for entry in iter_transcript_entries(items):
-        yield entry.to_line() + "\n"
+        yield (entry.redacted() if redact else entry).to_line() + "\n"
 
 
 def read_transcript(lines: Iterable[str]) -> Transcript:

@@ -7359,7 +7359,13 @@ def session(ctx: click.Context) -> None:
         "Defaults to the configured server, or a local server already running."
     ),
 )
-def session_export(session_id: str, output: str | None, server: str | None) -> None:
+@click.option(
+    "--redact",
+    is_flag=True,
+    default=False,
+    help="Write the session's shape without its content. The file cannot be imported.",
+)
+def session_export(session_id: str, output: str | None, server: str | None, redact: bool) -> None:
     """Export a session transcript to a portable JSONL file.
 
     Writes an ``omnigent.transcript/1`` file (see ``docs/session-export.md``):
@@ -7370,10 +7376,16 @@ def session_export(session_id: str, output: str | None, server: str | None) -> N
     results) is marked ``sealed`` rather than silently dropped. Independent of
     ``omnigent import``, which reads native harness history.
 
+    ``--redact`` writes the same structure with every content field dropped —
+    no message text, tool arguments, tool output or raw payloads — for sharing
+    what a session did when what it said cannot leave. The header carries
+    ``redacted`` and ``omnigent session import`` refuses such a file.
+
     \b
     Examples:
       omnigent session export --id conv_abc123
       omnigent session export --id conv_abc123 --output my_session.jsonl
+      omnigent session export --id conv_abc123 --redact
       omnigent session export --id conv_abc123 --server https://myserver.com
     """
     import httpx
@@ -7435,7 +7447,7 @@ def session_export(session_id: str, output: str | None, server: str | None) -> N
         tmp_path = out_path.with_name(f".{out_path.name}.partial")
         try:
             with tmp_path.open("w", encoding="utf-8") as fh:
-                fh.writelines(iter_transcript_lines(session_data, _items()))
+                fh.writelines(iter_transcript_lines(session_data, _items(), redact=redact))
             tmp_path.replace(out_path)
         finally:
             tmp_path.unlink(missing_ok=True)
@@ -7516,6 +7528,12 @@ def _read_session_export(src_path: Path) -> tuple[_JsonObject, list[dict[str, ob
             transcript = read_transcript(fh)
     except TranscriptSchemaError as exc:
         raise click.ClickException(f"{src_path}: {exc}") from exc
+
+    if transcript.header.redacted:
+        raise click.ClickException(
+            f"{src_path}: this transcript was exported with --redact, so it carries no "
+            "content and cannot be imported. Export it again without --redact."
+        )
 
     initial_items: list[dict[str, object]] = []
     for entry in transcript.entries:
