@@ -13,7 +13,12 @@ import pytest
 import respx
 from click.testing import CliRunner
 
-from omnigent.cli import _import_item_payload, _read_session_export, cli
+from omnigent.cli import (
+    _import_item_payload,
+    _read_session_export,
+    _read_session_exports,
+    cli,
+)
 from omnigent.export import iter_transcript_lines
 from omnigent.session_import.models import IMPORT_SOURCE_LABEL_KEY
 from omnigent.stores.conversation_store import FORK_CARRY_HISTORY_LABEL_KEY
@@ -522,3 +527,82 @@ def test_import_still_reads_a_full_transcript(tmp_path: Path) -> None:
 
     assert meta["id"] == "conv_abc123"
     assert len(restored) == 1
+
+
+def test_a_bundle_reads_every_session_root_first(tmp_path: Path) -> None:
+    """A spawn tree is only self-contained if the reader sees all of it."""
+    src = tmp_path / "tree.jsonl"
+    root = {"id": "conv_root", "title": "Root", "created_at": 1_700_000_000}
+    child = {
+        "id": "conv_child",
+        "title": "Research",
+        "created_at": 1_700_000_100,
+        "parent_session_id": "conv_root",
+    }
+
+    def _items(text: str) -> list[dict[str, object]]:
+        return [
+            {
+                "id": "msg_1",
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+                "created_at": 1_700_000_000,
+            }
+        ]
+
+    src.write_text(
+        "".join(iter_transcript_lines(root, _items("root work")))
+        + "".join(iter_transcript_lines(child, _items("child work")))
+    )
+
+    sessions = _read_session_exports(src)
+
+    assert [meta["id"] for meta, _ in sessions] == ["conv_root", "conv_child"]
+    assert [meta["parent_session"] for meta, _ in sessions] == [None, "conv_root"]
+    assert len(sessions[1][1]) == 1
+
+
+def test_reading_a_bundle_as_one_session_says_what_it_is(tmp_path: Path) -> None:
+    """The single-session reader refuses rather than importing only the root."""
+    src = tmp_path / "tree.jsonl"
+    root = {"id": "conv_root", "created_at": 1_700_000_000}
+    child = {"id": "conv_child", "created_at": 1_700_000_100, "parent_session_id": "conv_root"}
+    items = [
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hi"}],
+            "created_at": 1_700_000_000,
+        }
+    ]
+    src.write_text(
+        "".join(iter_transcript_lines(root, items)) + "".join(iter_transcript_lines(child, items))
+    )
+
+    with pytest.raises(click.ClickException, match="2 sessions"):
+        _read_session_export(src)
+
+
+def test_a_redacted_session_anywhere_in_a_bundle_is_refused(tmp_path: Path) -> None:
+    """One redacted session makes the bundle unrestorable, not partly restorable."""
+    src = tmp_path / "tree.jsonl"
+    root = {"id": "conv_root", "created_at": 1_700_000_000}
+    child = {"id": "conv_child", "created_at": 1_700_000_100, "parent_session_id": "conv_root"}
+    items = [
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hi"}],
+            "created_at": 1_700_000_000,
+        }
+    ]
+    src.write_text(
+        "".join(iter_transcript_lines(root, items))
+        + "".join(iter_transcript_lines(child, items, redact=True))
+    )
+
+    with pytest.raises(click.ClickException, match="cannot be imported"):
+        _read_session_exports(src)

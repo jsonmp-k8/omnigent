@@ -594,14 +594,19 @@ def iter_transcript_lines(
         yield (entry.redacted() if redact else entry).to_line() + "\n"
 
 
-def read_transcript(lines: Iterable[str]) -> Transcript:
-    """Parse a transcript, refusing anything that is not a supported schema.
+def read_transcripts(lines: Iterable[str]) -> tuple[Transcript, ...]:
+    """Parse every session in a file, refusing anything that is not a supported schema.
+
+    A file usually holds one session. A bundle holds a spawn tree: the root,
+    then its sub-agent sessions, each introduced by its own header line. Only a
+    header carries ``schema``, so a header is what starts the next session.
 
     :param lines: The file's lines (a file object works).
-    :returns: The parsed header and entries.
-    :raises TranscriptSchemaError: If the header is missing, names an
-        unsupported schema, or a line is not a JSON object.
+    :returns: One :class:`Transcript` per session, in file order.
+    :raises TranscriptSchemaError: If the first line is not a header, a header
+        names an unsupported schema, or a line is not a valid JSON object.
     """
+    sessions: list[Transcript] = []
     header: TranscriptHeader | None = None
     entries: list[TranscriptEntry] = []
     for line_no, raw in enumerate(lines, start=1):
@@ -614,17 +619,18 @@ def read_transcript(lines: Iterable[str]) -> Transcript:
             raise TranscriptSchemaError(f"line {line_no}: not valid JSON ({exc})") from exc
         if not isinstance(record, dict):
             raise TranscriptSchemaError(f"line {line_no}: expected a JSON object")
-        if header is None:
-            schema = record.get("schema")
-            if schema is None:
-                raise TranscriptSchemaError(
-                    "line 1: missing 'schema' — not an omnigent transcript"
-                )
+        schema = record.get("schema")
+        if schema is None and header is None:
+            raise TranscriptSchemaError("line 1: missing 'schema' — not an omnigent transcript")
+        if schema is not None:
             if not isinstance(schema, str) or schema not in SUPPORTED_SCHEMAS:
                 raise TranscriptSchemaError(
                     f"unsupported transcript schema {schema!r}; "
                     f"this reader understands {sorted(SUPPORTED_SCHEMAS)}"
                 )
+            if header is not None:
+                sessions.append(Transcript(header=header, entries=tuple(entries)))
+                entries = []
             try:
                 header = TranscriptHeader.model_validate(record)
             except ValueError as exc:
@@ -636,7 +642,25 @@ def read_transcript(lines: Iterable[str]) -> Transcript:
             raise TranscriptSchemaError(f"line {line_no}: invalid entry ({exc})") from exc
     if header is None:
         raise TranscriptSchemaError("empty file — no transcript header")
-    return Transcript(header=header, entries=tuple(entries))
+    sessions.append(Transcript(header=header, entries=tuple(entries)))
+    return tuple(sessions)
+
+
+def read_transcript(lines: Iterable[str]) -> Transcript:
+    """Parse a single-session transcript.
+
+    :param lines: The file's lines (a file object works).
+    :returns: The parsed header and entries.
+    :raises TranscriptSchemaError: As :func:`read_transcripts`, and when the
+        file holds a spawn-tree bundle rather than one session.
+    """
+    sessions = read_transcripts(lines)
+    if len(sessions) > 1:
+        raise TranscriptSchemaError(
+            f"this file holds {len(sessions)} sessions (a spawn-tree bundle); "
+            "read it with read_transcripts"
+        )
+    return sessions[0]
 
 
 def _message_blocks(entry: TranscriptEntry) -> list[dict[str, Any]]:

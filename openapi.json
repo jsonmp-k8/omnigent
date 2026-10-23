@@ -15766,6 +15766,21 @@
               "title": "Compress",
               "type": "string"
             }
+          },
+          {
+            "description": "`\"tree\"` appends this session's sub-agent sessions, and theirs, each introduced by its own header line. The caller's READ on this session covers them, as it does for `GET /v1/sessions/{id}/child_sessions`.",
+            "in": "query",
+            "name": "include",
+            "required": false,
+            "schema": {
+              "default": "session",
+              "enum": [
+                "session",
+                "tree"
+              ],
+              "title": "Include",
+              "type": "string"
+            }
           }
         ],
         "responses": {

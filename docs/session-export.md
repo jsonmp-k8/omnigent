@@ -126,6 +126,27 @@ import` refuses it rather than building an empty session that looks like the
 original. Redaction is all or nothing today: there is no hook to rewrite
 content rather than drop it.
 
+### Multi-agent runs
+
+A session that spawned sub-agents is not self-contained on its own. `--tree`,
+or `?include=tree`, writes the session followed by its sub-agent sessions, each
+introduced by its own header line, so one file holds the whole spawn tree:
+
+```sh
+omnigent session export --id conv_abc123 --tree
+```
+
+Sub-agents that spawned their own are included too, and parents are always
+written before their children. Each session is numbered from its own first
+turn, and its header's `parent_session` names the session it ran under.
+
+`omnigent session import` restores the tree: the root first, then each
+sub-session under the session its parent became. A sub-session that cannot be
+created is reported and skipped rather than failing the import that already
+succeeded. Reading a bundle with the single-session reader
+(`read_transcript`) raises rather than silently returning the root; use
+`read_transcripts`.
+
 ### Compressed files
 
 A long session is mostly text, so both writers offer gzip:

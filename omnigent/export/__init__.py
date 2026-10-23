@@ -19,6 +19,7 @@ from omnigent.export.transcript import (
     iter_transcript_entries,
     iter_transcript_lines,
     read_transcript,
+    read_transcripts,
 )
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "iter_transcript_entries",
     "iter_transcript_lines",
     "read_transcript",
+    "read_transcripts",
 ]

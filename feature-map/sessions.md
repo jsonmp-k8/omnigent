@@ -58,7 +58,9 @@ the header menu), and each place is a separate entry point.
   content field dropped and `redacted` in the header; import refuses it.
   `--gzip` (or `?compress=gzip`) writes the same transcript compressed, which
   import reads back by inspecting the file's bytes rather than its name. The
-  format is published as a JSON Schema for other tools.
+  format is published as a JSON Schema for other tools. `--tree`
+  (or `?include=tree`) writes a session and its sub-agent sessions as one
+  bundle, which import restores as a tree.
 - `unread`: Mark as unread flags a session to revisit and survives a reload,
   including for the session being viewed. Its dot appears once the turn is
   idle; approval and error indicators can take precedence. A row showing the
