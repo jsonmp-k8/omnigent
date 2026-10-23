@@ -73,7 +73,8 @@ and steers messages while the agent is busy.
   cancelled, reported on the row with Sign in available again. A host-native
   server, including one pinned by an organization's managed Claude config,
   shows connected or sign-in required when the host's sign-in manager
-  reports it (via `~/.omnigent/mcp-auth-status.json` on the host); its **Sign
+  reports it (via `~/.omnigent/mcp-auth-status.json`, see
+  `docs/MCP_AUTH_STATUS.md`); its **Sign
   in** opens the reported URL in a new tab and the panel re-reads the host
   inventory every few seconds until the row is connected. Custom agent servers
   carry no account state.
@@ -159,7 +160,8 @@ and steers messages while the agent is busy.
 - Select `/mcp` to replace the suggestions with the MCP servers enabled for the
   session. A registry service that needs sign-in shows **Sign in**; click it
   and finish the popup, or follow **Sign in from Settings** for a token or
-  workspace service. An empty list points to Settings; the command is absent
+  workspace service. A host server that needs sign-in shows **Sign in** too,
+  opening the page its host reported in a new tab. An empty list points to Settings; the command is absent
   on the new-session composer.
 - For Codex plugin skills, type `$<skill-name>` in Chat and select the
   namespaced suggestion. The vendor terminal owns its own completion menu.

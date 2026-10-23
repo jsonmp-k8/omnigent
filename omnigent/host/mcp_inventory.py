@@ -3,10 +3,8 @@
 Only names and non-secret metadata leave the inventory response: ``env``, headers, stdio
 ``command``/``args`` and full URLs routinely carry tokens, so they are dropped.
 
-Optional per-server account state comes from ``mcp-auth-status.json``; see
-:func:`read_auth_status_overlay`. Any process running as this user can write it, so
-it is trusted as much as the harness configs beside it: it can mark a known server as
-needing sign-in and name an http(s) page for it, nothing more.
+Per-server account state comes from ``mcp-auth-status.json`` (see
+``docs/MCP_AUTH_STATUS.md``); it can only mark known servers and name an http(s) page.
 """
 
 from __future__ import annotations
@@ -42,9 +40,6 @@ MCP_AUTH_STATUS_RELPATH = Path(".omnigent") / "mcp-auth-status.json"
 #: Absolute path to use instead, for a deployment whose ``$HOME`` is read-only or
 #: sandboxed and whose sign-in manager must write somewhere else.
 MCP_AUTH_STATUS_ENV = "OMNIGENT_MCP_AUTH_STATUS_FILE"
-#: Claude Code's enterprise MCP config, read instead of the ambient chain when set
-#: (tests only; the real chain is derived from the managed-settings locations).
-_MANAGED_MCP_PATHS: tuple[Path, ...] | None = None
 #: The report is a short list; a larger file is treated as unreadable rather than parsed
 #: on every poll.
 MCP_AUTH_STATUS_MAX_BYTES = 64 * 1024
@@ -74,9 +69,8 @@ def _summary(
 ) -> McpServerSummary | None:
     """Reduce one server entry to its name, transport, and at most a URL host.
 
-    ``scope`` stays ``"user"`` for every server: an older server pins it to that one
-    value and rejects the whole inventory otherwise. Enterprise config is reported
-    through the additive ``managed`` field, which an older server simply drops.
+    ``scope`` stays ``user`` for older servers; enterprise config is flagged via
+    ``managed``.
     """
     if not isinstance(name, str) or not name or name == OMNIGENT_RELAY_SERVER:
         return None
@@ -122,12 +116,18 @@ def _read_config(path: Path, harness: str) -> Mapping[str, object] | None:
 
 
 def _managed_mcp_paths() -> tuple[Path, ...]:
-    """Claude Code's enterprise MCP config, which sits beside its managed settings."""
-    if _MANAGED_MCP_PATHS is not None:
-        return _MANAGED_MCP_PATHS
+    """Claude Code's enterprise MCP config, which sits beside its managed settings.
+
+    Only locations that are absolute on this platform: the chain names every OS, and
+    a Windows path read on POSIX would resolve against the working directory.
+    """
     from omnigent.onboarding.ambient import CLAUDE_CODE_MANAGED_SETTINGS_PATHS
 
-    return tuple(path.with_name("managed-mcp.json") for path in CLAUDE_CODE_MANAGED_SETTINGS_PATHS)
+    return tuple(
+        path.with_name("managed-mcp.json")
+        for path in CLAUDE_CODE_MANAGED_SETTINGS_PATHS
+        if path.is_absolute()
+    )
 
 
 def _managed_claude_servers() -> list[ConfiguredMcpServer]:
@@ -138,8 +138,7 @@ def _managed_claude_servers() -> list[ConfiguredMcpServer]:
     """
     out: list[ConfiguredMcpServer] = []
     seen: set[str] = set()
-    # Every platform's location is tried; only one exists on a given host, and the
-    # first match wins if a stranger setup somehow has two.
+    # First readable location wins.
     for path in _managed_mcp_paths():
         data = _read_config(path, "claude managed")
         for name, config in _servers_in(data).items():
@@ -280,7 +279,9 @@ def _read_auth_status(path: Path) -> Mapping[str, object] | None:
     except FileNotFoundError:
         _warned_auth_status = None
         return None
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
+        # RecursionError is a RuntimeError, not a ValueError: deeply nested JSON
+        # under the size cap would otherwise escape and fail the whole inventory.
         data = None
     if isinstance(data, Mapping):
         _warned_auth_status = None
@@ -311,6 +312,15 @@ def read_auth_status_overlay(home: Path) -> AuthStatusOverlay:
     return overlay
 
 
+def _auth_status_overlay() -> AuthStatusOverlay:
+    """The reported state, or none: the configured servers matter more than it does."""
+    try:
+        return read_auth_status_overlay(Path.home())
+    except Exception:
+        _logger.exception("Reading MCP auth status failed; reporting servers without it")
+        return {}
+
+
 def apply_auth_status(
     servers: list[McpServerSummary], overlay: AuthStatusOverlay
 ) -> list[McpServerSummary]:
@@ -338,4 +348,4 @@ class HostMcpInventory:
                 result = discover_mcp_servers()
                 self._cached = (time.monotonic() + MCP_INVENTORY_CACHE_TTL_SECONDS, result)
                 servers = [dict(server) for server in result]
-        return apply_auth_status(servers, read_auth_status_overlay(Path.home()))
+        return apply_auth_status(servers, _auth_status_overlay())

@@ -3779,7 +3779,7 @@ describe("Composer MCP status command", () => {
     expect(hostMcpQueryMock).toHaveBeenLastCalledWith("host_native", false, expect.any(Function));
   });
 
-  it("keeps a host server's account state when an agent server shadows its name", () => {
+  it("does not lend a host server's account state to an agent server of the same name", () => {
     composerSessionSnapshot.hostId = "host_native";
     setComposerState({ boundAgentId: "agent_native", sessionHarness: "claude-native" });
     hostMcpQueryMock.mockReturnValue({
@@ -3815,12 +3815,44 @@ describe("Composer MCP status command", () => {
 
     const row = screen.getByTestId("mcp-server-row-linear");
     expect(row).toHaveTextContent("Agent linear");
-    // The host is the only source of that state; shadowing must not drop it.
-    expect(row).toHaveTextContent("Sign-in required");
-    expect(within(row).getByRole("link", { name: "Sign in" })).toHaveAttribute(
-      "href",
-      "https://auth.example.com/start",
+    // Same name, possibly a different endpoint: a Sign in here could send the user
+    // to the wrong service, so the row reports nothing.
+    expect(row).not.toHaveTextContent("Sign-in required");
+    expect(within(row).queryByRole("link", { name: "Sign in" })).toBeNull();
+  });
+
+  it("ignores a host sign-in page that is not an http(s) URL", () => {
+    composerSessionSnapshot.hostId = "host_native";
+    setComposerState({ boundAgentId: "agent_native", sessionHarness: "claude-native" });
+    hostMcpQueryMock.mockReturnValue({
+      data: [
+        {
+          name: "linear",
+          harness: "claude",
+          transport: "http",
+          scope: "user",
+          auth_status: "sign_in_required",
+          // Rejected host-side and at the decoder; this is the last gate before href.
+          sign_in_url: "javascript:alert(1)",
+        },
+      ] as unknown as UseHarnessInventoryModule.HostMcpServer[],
+      isLoading: false,
+      isError: false,
+    });
+    render(
+      <MemoryRouter>
+        <Composer
+          {...composerProps({
+            agents: [{ id: "agent_native", name: "Native agent", mcp_servers: [] }],
+          })}
+        />
+      </MemoryRouter>,
     );
+    fireEvent.change(textarea(), { target: { value: "/mcp" } });
+
+    const row = screen.getByTestId("mcp-server-row-linear");
+    expect(row).toHaveTextContent("Sign-in required");
+    expect(within(row).queryByRole("link", { name: "Sign in" })).toBeNull();
   });
 
   it.each(["claude-native", "codex-native", "cursor-native"] as const)(

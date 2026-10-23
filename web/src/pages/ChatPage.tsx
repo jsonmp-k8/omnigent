@@ -346,6 +346,9 @@ export function isSubagentRoutingEligible(
 /** How often `/mcp` re-reads the host inventory while a server waits on a sign-in. */
 const HOST_MCP_SIGN_IN_POLL_MS = 5_000;
 
+/** Only an http(s) page is ever opened from a host's sign-in report. */
+const HOST_SIGN_IN_URL_RE = /^https?:\/\//i;
+
 // Leading whitespace + the command token, so the composer overlay can tint
 // just the `/command` or `$skill` and leave args in the default color.
 const SLASH_COMMAND_SPLIT_RE = /^(\s*)([/$][A-Za-z0-9][\w:-]*)(?=\s|$)/;
@@ -3326,20 +3329,21 @@ function ComposerImpl(
                   ? "sign-in-required"
                   : undefined,
             // No URL means the state is still worth showing, with nothing to click.
-            signIn: server.sign_in_url ? { kind: "url", url: server.sign_in_url } : undefined,
+            // The scheme is enforced host-side and again at the frame decoder; this
+            // is the last gate before it becomes an href.
+            signIn: HOST_SIGN_IN_URL_RE.test(server.sign_in_url ?? "")
+              ? { kind: "url", url: server.sign_in_url! }
+              : undefined,
           },
         ]),
     );
     const catalogLoaded = !registryCatalog.loading && !registryCatalog.error;
     for (const server of selectedAgent?.mcp_servers ?? []) {
-      // An agent server can share a host server's name. The host is the only
-      // source of that server's account state, so shadowing must not drop it.
-      const host = byName.get(server.name);
+      // A shared name is not a shared endpoint, so an agent server claims none of
+      // the host's account state: its Sign in could point at the wrong service.
       const row: McpServerRow = {
         name: server.name,
-        description: server.description ?? host?.description,
-        connection: host?.connection,
-        signIn: host?.signIn,
+        description: server.description ?? byName.get(server.name)?.description,
       };
       // Only a read from this open: a stale row would offer a needless popup.
       if (hasRegistryServers && server.transport === "registry" && catalogLoaded) {

@@ -29,7 +29,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setattr(mcp_inventory, "_warned_auth_status", None)
     # A real managed config or status-file override on the dev machine must not leak in.
-    monkeypatch.setattr(mcp_inventory, "_MANAGED_MCP_PATHS", ())
+    monkeypatch.setattr(mcp_inventory, "_managed_mcp_paths", tuple)
     monkeypatch.delenv(mcp_inventory.MCP_AUTH_STATUS_ENV, raising=False)
     return home
 
@@ -40,7 +40,7 @@ def _write_managed_mcp(
     """Point the managed chain at a writable copy of Claude Code's enterprise config."""
     path = tmp_path / "managed" / "managed-mcp.json"
     _write_json(path, {"mcpServers": servers})
-    monkeypatch.setattr(mcp_inventory, "_MANAGED_MCP_PATHS", (path,))
+    monkeypatch.setattr(mcp_inventory, "_managed_mcp_paths", lambda: (path,))
     return path
 
 
@@ -357,6 +357,12 @@ def test_malformed_or_missing_auth_status_file_changes_nothing(home: Path) -> No
     assert "auth_status" not in HostMcpInventory().discover()[0]
     _write_json(path, {"servers": {"slack": "connected"}})
     assert "auth_status" not in HostMcpInventory().discover()[0]
+    # Deeply nested JSON raises RecursionError, which is not a ValueError: letting it
+    # escape would lose every host server, not just the account state.
+    path.write_text("[" * 60_000)
+    servers = HostMcpInventory().discover()
+    assert [s["name"] for s in servers] == ["slack"]
+    assert "auth_status" not in servers[0]
 
 
 def test_auth_status_is_fresh_while_the_config_scan_is_cached(
@@ -442,7 +448,7 @@ def test_without_a_managed_config_nothing_changes(
     """The common install has no such file; discovery must not depend on it."""
     _write_json(home / ".claude.json", {"mcpServers": {"own": _stdio()}})
     monkeypatch.setattr(
-        mcp_inventory, "_MANAGED_MCP_PATHS", (tmp_path / "absent" / "managed-mcp.json",)
+        mcp_inventory, "_managed_mcp_paths", lambda: (tmp_path / "absent" / "managed-mcp.json",)
     )
     assert discover_mcp_servers() == [
         {"name": "own", "harness": "claude", "transport": "stdio", "scope": "user"}

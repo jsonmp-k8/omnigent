@@ -2924,8 +2924,7 @@ MCP_AUTH_STATUSES = ("connected", "sign_in_required")
 def mcp_account_fields(auth_status: object, sign_in_url: object) -> dict[str, str]:
     """Validate one server's reported account state, the only account data hosts send.
 
-    Shared by the host that reports the state and the server that decodes it, so the
-    rule that a client may be handed a URL to open lives in one place.
+    Shared by the reporting host and the decoding server, so the rule lives in one place.
 
     :param auth_status: Reported state; only :data:`MCP_AUTH_STATUSES` survive.
     :param sign_in_url: Reported sign-in page; kept only while sign-in is due and only
