@@ -14,6 +14,7 @@ from fastapi import (
 )
 from fastapi.responses import StreamingResponse
 
+from omnigent.entities import Conversation
 from omnigent.export import EntryNumbering, TranscriptHeader, header_from_conversation
 from omnigent.models.model_metadata import concrete_reported_model
 from omnigent.runtime.agent_cache import AgentCache
@@ -61,6 +62,8 @@ from omnigent.stores.permission_store import PermissionStore
 
 #: Items per page when streaming an export; one store round trip per page.
 _EXPORT_PAGE_SIZE = 500
+#: Sub-agent sessions read per parent when bundling a spawn tree.
+_EXPORT_TREE_PAGE_SIZE = 200
 #: ``zlib`` with a gzip wrapper, so the bytes are a ``.gz`` file rather than raw deflate.
 _GZIP_WBITS = 16 + zlib.MAX_WBITS
 
@@ -112,6 +115,7 @@ def register_items_routes(
         session_id: str,
         content: Literal["full", "none"] = Query(default="full"),
         compress: Literal["none", "gzip"] = Query(default="none"),
+        include: Literal["session", "tree"] = Query(default="session"),
     ) -> StreamingResponse:
         """
         Stream the session as a portable, versioned transcript.
@@ -131,6 +135,10 @@ def register_items_routes(
             call ids, timing and the ``sealed`` markers, with every
             content field dropped and ``redacted`` set in the header. Such a
             file is not importable.
+        :param include: ``"tree"`` appends this session's sub-agent sessions,
+            and theirs, each introduced by its own header line. The caller's
+            READ on this session covers them, as it does for
+            ``GET /v1/sessions/{id}/child_sessions``.
         :param compress: ``"gzip"`` returns the same transcript gzipped, as
             ``<session_id>.jsonl.gz``. Sent as ``application/gzip`` rather than
             a content encoding, so the download is the compressed file itself
@@ -150,31 +158,63 @@ def register_items_routes(
             if conv is None:
                 raise _session_not_found()
 
-        def _header() -> TranscriptHeader:
+        def _header(conversation: Conversation) -> TranscriptHeader:
             """Resolve the agent-derived header fields the way the snapshot does."""
-            agent = agent_store.get(conv.agent_id) if conv.agent_id else None
+            agent = agent_store.get(conversation.agent_id) if conversation.agent_id else None
             return header_from_conversation(
-                conv,
+                conversation,
                 agent_name=agent.name if agent is not None else None,
-                harness=_resolve_harness(conv, agent_store=agent_store, agent_cache=agent_cache),
+                harness=_resolve_harness(
+                    conversation, agent_store=agent_store, agent_cache=agent_cache
+                ),
                 # The harness's own report supersedes the spec-derived model.
-                llm_model=concrete_reported_model(conv.reported_model)
-                or _resolve_llm_model(conv, agent_store=agent_store, agent_cache=agent_cache),
+                llm_model=concrete_reported_model(conversation.reported_model)
+                or _resolve_llm_model(
+                    conversation, agent_store=agent_store, agent_cache=agent_cache
+                ),
             )
 
-        redact = content == "none"
-        header = await asyncio.to_thread(_header)
-        if redact:
-            header = header.model_copy(update={"redacted": True})
+        def _descendants(root_id: str) -> list[Conversation]:
+            """The sub-agent sessions under *root_id*, breadth first.
 
-        async def _lines() -> AsyncIterator[str]:
+            A sub-agent can spawn its own, so this walks rather than lists one
+            level. Ids already seen are skipped, so a cycle in stored data
+            cannot make the download run forever.
+            """
+            out: list[Conversation] = []
+            seen = {root_id}
+            queue = [root_id]
+            while queue:
+                parent_id = queue.pop(0)
+                children = conversation_store.list_conversations(
+                    limit=_EXPORT_TREE_PAGE_SIZE,
+                    kind="sub_agent",
+                    parent_conversation_id=parent_id,
+                    order="asc",
+                    sort_by="created_at",
+                ).data
+                for child in children:
+                    if child.id in seen:
+                        continue
+                    seen.add(child.id)
+                    out.append(child)
+                    queue.append(child.id)
+            return out
+
+        redact = content == "none"
+
+        async def _session_lines(conversation: Conversation) -> AsyncIterator[str]:
+            """Yield one session: its header, then its items a page at a time."""
+            header = await asyncio.to_thread(_header, conversation)
+            if redact:
+                header = header.model_copy(update={"redacted": True})
             yield header.to_line() + "\n"
             numbering = EntryNumbering()
             after: str | None = None
             while True:
                 page = await asyncio.to_thread(
                     conversation_store.list_items,
-                    session_id,
+                    conversation.id,
                     limit=_EXPORT_PAGE_SIZE,
                     after=after,
                     order="asc",
@@ -188,9 +228,20 @@ def register_items_routes(
                     # Cannot be followed; aborting the stream beats a file that
                     # silently ends early and reads as complete.
                     raise RuntimeError(
-                        f"session {session_id} item page reported more results without a cursor"
+                        f"session {conversation.id} item page reported more results "
+                        "without a cursor"
                     )
                 after = page.last_id
+
+        async def _lines() -> AsyncIterator[str]:
+            """Yield the session, and its spawn tree when asked for."""
+            async for line in _session_lines(conv):
+                yield line
+            if include != "tree":
+                return
+            for descendant in await asyncio.to_thread(_descendants, conv.id):
+                async for line in _session_lines(descendant):
+                    yield line
 
         if compress == "gzip":
             return StreamingResponse(

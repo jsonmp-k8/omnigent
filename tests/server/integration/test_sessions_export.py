@@ -17,8 +17,10 @@ import pytest
 from omnigent.export import (
     CONTENT_FIELDS,
     TRANSCRIPT_SCHEMA,
+    TranscriptSchemaError,
     item_from_entry,
     read_transcript,
+    read_transcripts,
 )
 from omnigent.server.routes.sessions.routes_items import _EXPORT_PAGE_SIZE
 from tests.server.helpers import create_test_agent
@@ -245,6 +247,93 @@ async def test_gzipped_export_can_still_drop_content(client: httpx.AsyncClient) 
     text = gzip.decompress(resp.content).decode()
     assert read_transcript(text.splitlines(keepends=True)).header.redacted is True
     assert "churn by region" not in text
+
+
+async def _seed_child(client: httpx.AsyncClient, parent_id: str, title: str) -> str:
+    """Create a sub-agent session under *parent_id*."""
+    agent = await create_test_agent(client, name=f"child-agent-{title.replace(' ', '-')}")
+    resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "title": title,
+            "host_type": "external",
+            "parent_session_id": parent_id,
+            "initial_items": [
+                {
+                    "type": "message",
+                    "data": {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": f"work for {title}"}],
+                    },
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+async def test_export_tree_bundles_the_sub_agent_sessions(client: httpx.AsyncClient) -> None:
+    """A multi-agent run is only self-contained when its sub-sessions travel with it."""
+    parent_id = await _seed_session(client)
+    child_id = await _seed_child(client, parent_id, "research")
+    grandchild_id = await _seed_child(client, child_id, "deep research")
+
+    resp = await client.get(f"/v1/sessions/{parent_id}/export", params={"include": "tree"})
+
+    assert resp.status_code == 200, resp.text
+    sessions = read_transcripts(resp.text.splitlines(keepends=True))
+
+    # Root first, then its descendants; a sub-agent's own sub-agents come too.
+    assert [t.header.session for t in sessions] == [parent_id, child_id, grandchild_id]
+    assert [t.header.parent_session for t in sessions] == [None, parent_id, child_id]
+    assert sessions[1].entries[0].text == "work for research"
+    # Each session is numbered from its own first turn.
+    assert all(t.entries[0].seq == 1 for t in sessions)
+
+
+async def test_export_defaults_to_this_session_alone(client: httpx.AsyncClient) -> None:
+    """The bundle is opt-in: the default download is one session, as before."""
+    parent_id = await _seed_session(client)
+    await _seed_child(client, parent_id, "research")
+
+    resp = await client.get(f"/v1/sessions/{parent_id}/export")
+
+    sessions = read_transcripts(resp.text.splitlines(keepends=True))
+    assert [t.header.session for t in sessions] == [parent_id]
+    # The single-session reader still accepts it.
+    assert read_transcript(resp.text.splitlines(keepends=True)).header.session == parent_id
+
+
+async def test_reading_a_bundle_as_one_session_says_what_it_is(
+    client: httpx.AsyncClient,
+) -> None:
+    """A caller that wanted one session gets told, not a silently truncated read."""
+    parent_id = await _seed_session(client)
+    await _seed_child(client, parent_id, "research")
+
+    resp = await client.get(f"/v1/sessions/{parent_id}/export", params={"include": "tree"})
+
+    with pytest.raises(TranscriptSchemaError, match="2 sessions"):
+        read_transcript(resp.text.splitlines(keepends=True))
+
+
+async def test_export_tree_can_be_redacted_and_gzipped(client: httpx.AsyncClient) -> None:
+    """The three options compose."""
+    parent_id = await _seed_session(client)
+    child_id = await _seed_child(client, parent_id, "research")
+
+    resp = await client.get(
+        f"/v1/sessions/{parent_id}/export",
+        params={"include": "tree", "content": "none", "compress": "gzip"},
+    )
+
+    text = gzip.decompress(resp.content).decode()
+    sessions = read_transcripts(text.splitlines(keepends=True))
+    assert [t.header.session for t in sessions] == [parent_id, child_id]
+    assert all(t.header.redacted for t in sessions)
+    assert "work for research" not in text
 
 
 async def test_export_unknown_session_is_404(client: httpx.AsyncClient) -> None:
