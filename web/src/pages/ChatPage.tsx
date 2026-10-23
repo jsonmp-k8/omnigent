@@ -3176,7 +3176,7 @@ function ComposerImpl(
   // required"; it is only read while the panel is showing a registry row.
   const registryCatalog = useMcpRegistryCatalog(mcpPanelRequested && hasRegistryServers);
   const registrySignIn = useRegistrySignIn(registryCatalog.refresh);
-  const { signIn: signInToRegistryService } = registrySignIn;
+  const { signIn: signInToRegistryService, clearError: clearRegistrySignInError } = registrySignIn;
   const onMcpSignIn = useCallback(
     (name: string) => {
       const service = registryCatalog.services.find((s) => s.id === name);
@@ -3257,6 +3257,9 @@ function ComposerImpl(
     clearText: () => setValue(""),
   });
   const showMcpServers = mcpPanelRequested && !slashCompletion.inline;
+  useEffect(() => {
+    if (!showMcpServers) clearRegistrySignInError();
+  }, [showMcpServers, clearRegistrySignInError]);
 
   // Auto-grow the textarea from 1 row up to 10 rows, then let it scroll.
   // Growth stays in the flex column so the transcript viewport ends where the

@@ -55,13 +55,14 @@ vi.mock("@/hooks/useWorkspaceChangedFiles", async (importOriginal) => {
   };
 });
 
-// ComposerStatusLine's PR link reads GitHub info via a TanStack query; stub it
-// (default: no PR) so bare Composer renders don't need a QueryClientProvider.
+// The /mcp panel's registry read and popup sign-in; the MCP cases script both.
 vi.mock("@/lib/mcpRegistry", () => ({
   registryRequest: vi.fn(),
   authorizeRegistryService: vi.fn(),
 }));
 
+// ComposerStatusLine's PR link reads GitHub info via a TanStack query; stub it
+// (default: no PR) so bare Composer renders don't need a QueryClientProvider.
 vi.mock("@/hooks/usePullRequests", () => ({
   usePullRequestInfo: () => ({ data: undefined }),
 }));
@@ -3115,7 +3116,46 @@ describe("Composer MCP status command", () => {
     expect(screen.getByRole("button", { name: "Sign in" })).not.toBeDisabled();
   });
 
-  it("does not read the registry when the server has it off or no row needs it", () => {
+  it("sends a token-based service to Settings instead of a popup", async () => {
+    vi.mocked(registryRequest).mockReset();
+    vi.mocked(registryRequest).mockResolvedValue({
+      data: [{ ...trackerService, id: "wiki", auth: "bearer" }],
+    });
+    renderWithRegistry([{ name: "wiki", transport: "registry" }]);
+    fireEvent.change(textarea(), { target: { value: "/mcp" } });
+    expect(await screen.findByRole("link", { name: "Sign in from Settings" })).toHaveAttribute(
+      "href",
+      "/settings/mcp",
+    );
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+  });
+
+  it("marks a registry server the loaded catalog no longer lists as unavailable", async () => {
+    vi.mocked(registryRequest).mockReset();
+    vi.mocked(registryRequest).mockResolvedValue({ data: [trackerService] });
+    renderWithRegistry([
+      { name: "tracker", transport: "registry" },
+      { name: "retired", transport: "registry" },
+    ]);
+    fireEvent.change(textarea(), { target: { value: "/mcp" } });
+    expect(await screen.findByTestId("mcp-server-row-retired")).toHaveTextContent(
+      "Not available to your account",
+    );
+    expect(screen.getByTestId("mcp-server-row-tracker")).toHaveTextContent("Sign-in required");
+  });
+
+  it("reports a catalog that could not be read without hiding the rows", async () => {
+    vi.mocked(registryRequest).mockReset();
+    vi.mocked(registryRequest).mockRejectedValue(new Error("registry down"));
+    renderWithRegistry([{ name: "tracker", transport: "registry" }]);
+    fireEvent.change(textarea(), { target: { value: "/mcp" } });
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Couldn’t check MCP service connections.",
+    );
+    expect(screen.getByTestId("mcp-server-row-tracker")).not.toHaveTextContent("Sign-in");
+  });
+
+  it("does not read the registry when the server has it off", () => {
     vi.mocked(registryRequest).mockReset();
     setComposerState({ boundAgentId: "agent_registry" });
     render(
@@ -3136,6 +3176,14 @@ describe("Composer MCP status command", () => {
     );
     fireEvent.change(textarea(), { target: { value: "/mcp" } });
     expect(screen.getByTestId("mcp-server-row-tracker")).not.toHaveTextContent("Sign-in");
+    expect(registryRequest).not.toHaveBeenCalled();
+  });
+
+  it("does not read the registry when no row is a registry service", () => {
+    vi.mocked(registryRequest).mockReset();
+    renderWithRegistry([{ name: "local-files", transport: "stdio" }]);
+    fireEvent.change(textarea(), { target: { value: "/mcp" } });
+    expect(screen.getByTestId("mcp-server-row-local-files")).toBeInTheDocument();
     expect(registryRequest).not.toHaveBeenCalled();
   });
 

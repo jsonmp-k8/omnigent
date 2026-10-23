@@ -228,36 +228,29 @@ describe("/mcp panel connection state", () => {
 
   it("runs the inline sign-in for the row and shows its progress and failure", () => {
     const onMcpSignIn = vi.fn();
-    const { rerender } = renderPanel({
-      mcpServers: [{ name: "tracker", connection: "sign-in-required" }],
-      onMcpSignIn,
-    });
+    const row = { name: "tracker", connection: "sign-in-required" as const };
+    const panel = (extra: Partial<Parameters<typeof SlashCommandMenu>[0]> = {}) => (
+      <MemoryRouter>
+        <SlashCommandMenu
+          {...menuProps}
+          showMcpServers
+          mcpServers={[row]}
+          onMcpSignIn={onMcpSignIn}
+          {...extra}
+        />
+      </MemoryRouter>
+    );
+    const { rerender } = render(panel());
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     expect(onMcpSignIn).toHaveBeenCalledWith("tracker");
 
-    rerender(
-      <MemoryRouter>
-        <SlashCommandMenu
-          {...menuProps}
-          showMcpServers
-          mcpServers={[{ name: "tracker", connection: "sign-in-required" }]}
-          onMcpSignIn={onMcpSignIn}
-          mcpAuthorizingName="tracker"
-        />
-      </MemoryRouter>,
-    );
+    rerender(panel({ mcpAuthorizingName: "tracker" }));
     expect(screen.getByRole("button", { name: "Signing in…" })).toBeDisabled();
 
     rerender(
-      <MemoryRouter>
-        <SlashCommandMenu
-          {...menuProps}
-          showMcpServers
-          mcpServers={[{ name: "tracker", connection: "sign-in-required" }]}
-          onMcpSignIn={onMcpSignIn}
-          mcpSignInError={{ name: "tracker", message: "Sign-in cancelled. Try again when ready." }}
-        />
-      </MemoryRouter>,
+      panel({
+        mcpSignInError: { name: "tracker", message: "Sign-in cancelled. Try again when ready." },
+      }),
     );
     expect(
       within(screen.getByTestId("mcp-server-row-tracker")).getByRole("alert"),

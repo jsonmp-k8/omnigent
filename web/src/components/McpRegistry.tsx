@@ -213,7 +213,7 @@ export function McpRegistryPicker({
 }) {
   const ownCatalog = useMcpRegistryCatalog(!catalog);
   const { services, error, loading, refresh } = catalog ?? ownCatalog;
-  const { signIn, authorizing, error: connectionError } = useRegistrySignIn(refresh);
+  const { signIn, authorizing, error: connectionError, clearError } = useRegistrySignIn(refresh);
   const [workspaceService, setWorkspaceService] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState("");
   useEffect(() => {
@@ -222,6 +222,7 @@ export function McpRegistryPicker({
   useEffect(() => () => onAuthorizingChange?.(false), [onAuthorizingChange]);
 
   async function enable(service: RegistryService, workspaceUrl?: string) {
+    clearError();
     if (service.connected) {
       onToggle(service.id, true);
       return;

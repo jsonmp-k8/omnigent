@@ -152,12 +152,7 @@ export function rankedSlashCommandNames(
     .sort((a, b) => rank(a) - rank(b));
 }
 
-/**
- * Connection state of one `/mcp` row. `connected` and `sign-in-required` come
- * from the MCP registry's per-account state; `unavailable` is a registry
- * service the account can no longer see. Host and custom servers report no
- * state yet and render without one.
- */
+/** Registry connection state for a `/mcp` row; host and custom rows have none. */
 export type McpServerConnection = "connected" | "sign-in-required" | "unavailable";
 
 /** One row of the `/mcp` inventory. */

@@ -29,6 +29,8 @@ export function useMcpRegistryCatalog(enabled = true) {
   }, []);
   useEffect(() => {
     if (!enabled) return;
+    // A catalog from an earlier open is not current: reload before trusting it.
+    setLoading(true);
     void refresh();
     const onFocus = () => void refresh();
     window.addEventListener("focus", onFocus);
@@ -73,11 +75,7 @@ export interface RegistrySignInError {
   message: string;
 }
 
-/**
- * Run the popup sign-in for a registry service, then re-read the catalog so the
- * caller sees the service flip to connected. One sign-in at a time: starting
- * another aborts the one in flight, and unmounting aborts it too.
- */
+/** Popup sign-in, then re-read the catalog; a new sign-in or unmount aborts the one in flight. */
 export function useRegistrySignIn(refresh: () => Promise<RegistryService[] | undefined>) {
   const [authorizing, setAuthorizing] = useState<string | null>(null);
   const [error, setError] = useState<RegistrySignInError | null>(null);
@@ -108,5 +106,6 @@ export function useRegistrySignIn(refresh: () => Promise<RegistryService[] | und
     },
     [refresh],
   );
-  return { signIn, authorizing, error };
+  const clearError = useCallback(() => setError(null), []);
+  return { signIn, authorizing, error, clearError };
 }
