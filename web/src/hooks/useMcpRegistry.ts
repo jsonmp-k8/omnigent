@@ -6,7 +6,10 @@ export function useMcpRegistryCatalog(enabled = true) {
   const [services, setServices] = useState<RegistryService[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const request = useRef(0);
   const refresh = useCallback(async () => {
+    // A focus refresh and a post-sign-in refresh can overlap; the newest read wins.
+    const id = ++request.current;
     try {
       const entries: RegistryService[] = [];
       let cursor: string | null = null;
@@ -17,14 +20,18 @@ export function useMcpRegistryCatalog(enabled = true) {
         entries.push(...result.data);
         cursor = result.next_cursor ?? null;
       } while (cursor);
-      setServices(entries);
-      setError(null);
+      if (id === request.current) {
+        setServices(entries);
+        setError(null);
+      }
       return entries;
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load MCP services");
+      if (id === request.current) {
+        setError(e instanceof Error ? e.message : "Could not load MCP services");
+      }
       return undefined;
     } finally {
-      setLoading(false);
+      if (id === request.current) setLoading(false);
     }
   }, []);
   useEffect(() => {
@@ -75,7 +82,7 @@ export interface RegistrySignInError {
   message: string;
 }
 
-/** Popup sign-in, then re-read the catalog; a new sign-in or unmount aborts the one in flight. */
+/** One abortable registry sign-in, confirmed by re-reading the catalog. */
 export function useRegistrySignIn(refresh: () => Promise<RegistryService[] | undefined>) {
   const [authorizing, setAuthorizing] = useState<string | null>(null);
   const [error, setError] = useState<RegistrySignInError | null>(null);
@@ -91,7 +98,11 @@ export function useRegistrySignIn(refresh: () => Promise<RegistryService[] | und
       try {
         await authorizeRegistryService(service, controller.signal, workspaceUrl);
         const updated = await refresh();
-        if (!updated?.find((s) => s.id === service.id)?.connected) {
+        // A failed re-read is not the same as a sign-in that did not take.
+        if (updated === undefined) {
+          throw new Error("Couldn’t confirm the connection. Please try again.");
+        }
+        if (!updated.find((s) => s.id === service.id)?.connected) {
           throw new Error("Account is not connected. Please try again.");
         }
         return !controller.signal.aborted;

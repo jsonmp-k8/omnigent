@@ -3423,17 +3423,35 @@ describe("Composer MCP status command", () => {
     expect(screen.getByRole("button", { name: "Sign in" })).not.toBeDisabled();
   });
 
-  it("sends a token-based service to Settings instead of a popup", async () => {
+  it.each(["bearer", "databricks"] as const)(
+    "sends a %s service to Settings instead of a popup",
+    async (auth) => {
+      vi.mocked(registryRequest).mockReset();
+      vi.mocked(registryRequest).mockResolvedValue({
+        data: [{ ...trackerService, id: "wiki", auth }],
+      });
+      renderWithRegistry([{ name: "wiki", transport: "registry" }]);
+      fireEvent.change(textarea(), { target: { value: "/mcp" } });
+      expect(await screen.findByRole("link", { name: "Sign in from Settings" })).toHaveAttribute(
+        "href",
+        "/settings/mcp",
+      );
+      expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+    },
+  );
+
+  it("shows no account state until a catalog read from this open has landed", () => {
     vi.mocked(registryRequest).mockReset();
-    vi.mocked(registryRequest).mockResolvedValue({
-      data: [{ ...trackerService, id: "wiki", auth: "bearer" }],
-    });
-    renderWithRegistry([{ name: "wiki", transport: "registry" }]);
+    // Still in flight: a state left from an earlier open would offer a popup
+    // the user may have already completed in Settings.
+    vi.mocked(registryRequest).mockReturnValue(new Promise(() => {}));
+    renderWithRegistry([{ name: "tracker", transport: "registry" }]);
     fireEvent.change(textarea(), { target: { value: "/mcp" } });
-    expect(await screen.findByRole("link", { name: "Sign in from Settings" })).toHaveAttribute(
-      "href",
-      "/settings/mcp",
-    );
+
+    const row = screen.getByTestId("mcp-server-row-tracker");
+    expect(row).not.toHaveTextContent("Sign-in required");
+    expect(row).not.toHaveTextContent("Connected");
+    expect(row).not.toHaveTextContent("Not available");
     expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
   });
 

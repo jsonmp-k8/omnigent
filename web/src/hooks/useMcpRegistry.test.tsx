@@ -84,6 +84,24 @@ describe("useRegistrySignIn", () => {
     expect(popup.signals[0]!.aborted).toBe(true);
   });
 
+  it("separates a catalog read that failed after the popup from a sign-in that did not take", async () => {
+    vi.mocked(authorizeRegistryService).mockResolvedValue(undefined);
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    const { result } = renderHook(() => useRegistrySignIn(refresh));
+
+    let outcome!: Promise<boolean>;
+    act(() => {
+      outcome = result.current.signIn(tracker);
+    });
+    await expect(outcome).resolves.toBe(false);
+    await waitFor(() =>
+      expect(result.current.error).toEqual({
+        id: "tracker",
+        message: "Couldn’t confirm the connection. Please try again.",
+      }),
+    );
+  });
+
   it("reports a service the popup finished for but the catalog still shows disconnected", async () => {
     vi.mocked(authorizeRegistryService).mockResolvedValue(undefined);
     const refresh = vi.fn().mockResolvedValue([tracker]);

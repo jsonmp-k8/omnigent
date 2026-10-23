@@ -258,6 +258,20 @@ describe("/mcp panel connection state", () => {
     expect(screen.getByRole("button", { name: "Sign in" })).not.toBeDisabled();
   });
 
+  it("disables every Sign in while one is running, labelling only the active row", () => {
+    renderPanel({
+      mcpServers: [
+        { name: "tracker", connection: "sign-in-required" },
+        { name: "wiki", connection: "sign-in-required" },
+      ],
+      onMcpSignIn: vi.fn(),
+      mcpAuthorizingName: "tracker",
+    });
+    // A second popup would silently abort the first, so no row invites one.
+    expect(screen.getByRole("button", { name: "Signing in…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeDisabled();
+  });
+
   it("sends a token- or workspace-based service to Settings instead of a popup", () => {
     renderPanel({
       mcpServers: [{ name: "wiki", connection: "sign-in-required", signInHref: "/settings/mcp" }],

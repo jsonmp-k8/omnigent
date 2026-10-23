@@ -280,9 +280,7 @@ export function McpRegistryPicker({
                         : authorizing === service.id
                           ? "Authorizing…"
                           : service.connected
-                            ? service.auth === "none"
-                              ? "Ready"
-                              : "Connected"
+                            ? "Connected"
                             : tokenNeeded
                               ? "Connect your account in settings"
                               : "Needs sign-in"}

@@ -237,11 +237,15 @@ function McpConnectionIcon({ connection }: { connection?: McpServerConnection })
 
 function McpSignInAction({
   server,
-  busy,
+  signingIn,
+  disabled,
   onSignIn,
 }: {
   server: McpServerRow;
-  busy: boolean;
+  /** This row's sign-in is the one running. */
+  signingIn: boolean;
+  /** Any row's sign-in is running: a second popup would silently cancel the first. */
+  disabled: boolean;
   onSignIn?: (name: string) => void;
 }) {
   if (server.signInHref)
@@ -259,12 +263,12 @@ function McpSignInAction({
     <button
       type="button"
       data-testid={`mcp-sign-in-${server.name}`}
-      disabled={busy}
+      disabled={disabled}
       className="flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-0.5 text-xs text-foreground hover:bg-muted disabled:opacity-60 dark:hover:bg-muted/50"
       onClick={() => onSignIn(server.name)}
     >
-      {busy && <LoaderCircleIcon aria-hidden="true" className="size-3 animate-spin" />}
-      {busy ? "Signing in…" : "Sign in"}
+      {signingIn && <LoaderCircleIcon aria-hidden="true" className="size-3 animate-spin" />}
+      {signingIn ? "Signing in…" : "Sign in"}
     </button>
   );
 }
@@ -324,7 +328,8 @@ function McpServerRows({
               {needsSignIn && (
                 <McpSignInAction
                   server={server}
-                  busy={authorizingName === server.name}
+                  signingIn={authorizingName === server.name}
+                  disabled={authorizingName != null}
                   onSignIn={onSignIn}
                 />
               )}

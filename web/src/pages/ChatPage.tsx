@@ -3245,8 +3245,7 @@ function ComposerImpl(
   const hasRegistryServers =
     registryEnabled &&
     (selectedAgent?.mcp_servers ?? []).some((server) => server.transport === "registry");
-  // The registry's per-account state tells a row "connected" from "sign-in
-  // required"; it is only read while the panel is showing a registry row.
+  // Load account state only while `/mcp` shows registry rows.
   const registryCatalog = useMcpRegistryCatalog(mcpPanelRequested && hasRegistryServers);
   const registrySignIn = useRegistrySignIn(registryCatalog.refresh);
   const { signIn: signInToRegistryService, clearError: clearRegistrySignInError } = registrySignIn;
@@ -3257,11 +3256,16 @@ function ComposerImpl(
     },
     [registryCatalog.services, signInToRegistryService],
   );
+  // Both can be true at once (an unreachable host and an unreadable catalog).
   const mcpServersStatus =
-    hostMcpStatus ??
-    (hasRegistryServers && registryCatalog.error
-      ? "Couldn’t check MCP service connections."
-      : undefined);
+    [
+      hostMcpStatus,
+      hasRegistryServers && registryCatalog.error
+        ? "Couldn’t check MCP service connections."
+        : undefined,
+    ]
+      .filter(Boolean)
+      .join(" ") || undefined;
   const mcpServers = useMemo(() => {
     const byName = new Map<string, McpServerRow>(
       (hostMcpQuery.data ?? [])
@@ -3283,7 +3287,9 @@ function ComposerImpl(
         name: server.name,
         description: server.description ?? undefined,
       };
-      if (hasRegistryServers && server.transport === "registry") {
+      // Only a catalog read that finished this open can be trusted: a stale
+      // "sign-in required" would offer a popup the user no longer needs.
+      if (hasRegistryServers && server.transport === "registry" && catalogLoaded) {
         const service = registryCatalog.services.find((s) => s.id === server.name);
         if (service) {
           row.description = service.description || row.description;
@@ -3291,7 +3297,7 @@ function ComposerImpl(
           // A token or workspace URL has to be typed, which the panel has no room for.
           if (!service.connected && (service.auth === "bearer" || service.auth === "databricks"))
             row.signInHref = "/settings/mcp";
-        } else if (catalogLoaded) {
+        } else {
           row.connection = "unavailable";
         }
       }
