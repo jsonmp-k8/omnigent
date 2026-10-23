@@ -7,7 +7,11 @@ item, each carrying the stored payload in ``raw`` so an import is lossless.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
+import re
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -113,6 +117,42 @@ class TranscriptHeader(BaseModel):
         return json.dumps(payload)
 
 
+class ArtifactRef(BaseModel):
+    """A file an entry referenced, named well enough to recognize elsewhere.
+
+    A transcript records a conversation, not the files around it. An attachment
+    travels inside ``raw`` as a data URI, which a redacted export drops and a
+    reader may not want to decode; a file named in the text never travelled at
+    all. Either way this says what was involved.
+
+    :param kind: ``"attachment"`` for a file carried in the message,
+        ``"path"`` for one the session only named.
+    :param name: File name as the session knew it, e.g. ``"diagram.png"``.
+    :param path: The path the session named, for ``"path"`` references.
+    :param media_type: The attachment's media type, e.g. ``"image/png"``.
+    :param bytes: Size of the attachment in bytes.
+    :param sha256: Hex digest of the attachment's bytes, so the same file is
+        recognizable wherever else it turns up.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    kind: Literal["attachment", "path"]
+    name: str | None = None
+    path: str | None = None
+    media_type: str | None = None
+    bytes: int | None = None
+    sha256: str | None = None
+
+    def redacted(self) -> ArtifactRef:
+        """Return this reference without the parts that are themselves content.
+
+        A file name or path can say as much as the message that carried it, so
+        a redacted export keeps only what identifies the bytes.
+        """
+        return self.model_copy(update={"name": None, "path": None})
+
+
 class TranscriptEntry(BaseModel):
     """One line of a transcript after the header.
 
@@ -160,6 +200,7 @@ class TranscriptEntry(BaseModel):
     :param meta: Durable context injected as a message rather than typed
         by a person (``is_meta``).
     :param interrupted: The assistant message was cut off by a stop.
+    :param artifacts: Files the entry referenced (see :class:`ArtifactRef`).
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -192,6 +233,7 @@ class TranscriptEntry(BaseModel):
     note_type: str | None = None
     meta: bool = False
     interrupted: bool = False
+    artifacts: list[ArtifactRef] | None = None
 
     @model_validator(mode="after")
     def _fields_match_kind(self) -> TranscriptEntry:
@@ -214,7 +256,14 @@ class TranscriptEntry(BaseModel):
 
         :returns: A copy carrying no content.
         """
-        return self.model_copy(update=dict.fromkeys(CONTENT_FIELDS))
+        redacted = self.model_copy(update=dict.fromkeys(CONTENT_FIELDS))
+        if self.artifacts:
+            # The references stay: which files were involved is structure. Their
+            # names are not, so those go.
+            redacted = redacted.model_copy(
+                update={"artifacts": [ref.redacted() for ref in self.artifacts]}
+            )
+        return redacted
 
     def to_line(self) -> str:
         """Serialize as one JSON line (unset optionals and false flags omitted)."""
@@ -239,7 +288,7 @@ _COMMON_FIELDS: frozenset[str] = frozenset(
 
 #: Fields that belong to each kind; anything else on that kind is a malformed line.
 _KIND_FIELDS: dict[str, frozenset[str]] = {
-    "message": frozenset({"text", "content", "agent", "meta", "interrupted"}),
+    "message": frozenset({"text", "content", "agent", "meta", "interrupted", "artifacts"}),
     "reasoning": frozenset({"text", "content", "agent", "sealed", "sealed_reason"}),
     "tool_call": frozenset(
         {"tool", "tool_input", "tool_input_raw", "call_id", "namespace", "agent"}
@@ -410,6 +459,7 @@ def entry_from_item(item: Mapping[str, Any], *, turn: int, seq: int) -> Transcri
             agent=payload.get("model"),
             meta=bool(payload.get("is_meta")),
             interrupted=bool(payload.get("interrupted")),
+            artifacts=_artifacts(payload.get("content")) or None,
         )
     if item_type == "function_call":
         tool_input, raw = _parse_tool_input(payload.get("arguments"))
@@ -662,6 +712,70 @@ def read_transcript(lines: Iterable[str]) -> Transcript:
             "read it with read_transcripts"
         )
     return sessions[0]
+
+
+#: ``[Attached: <path>]`` / ``[Attached file: <path>]``, the line the native
+#: executors write where a file was handed to the agent by path.
+_ATTACHED_PATH_RE = re.compile(r"\[Attached(?: file)?:\s*([^\]]+)\]")
+
+
+def _attachment_ref(block: Mapping[str, Any]) -> ArtifactRef | None:
+    """Describe one attachment block: its name, type, size and digest."""
+    data_uri = block.get("image_url") or block.get("file_data")
+    name = block.get("filename")
+    if not isinstance(data_uri, str) or not data_uri.startswith("data:"):
+        # An unresolved ``file_id`` is still worth naming; its bytes are elsewhere.
+        file_id = block.get("file_id")
+        if isinstance(file_id, str) and file_id:
+            return ArtifactRef(kind="attachment", name=name if isinstance(name, str) else file_id)
+        return None
+    header, _, payload = data_uri.partition(",")
+    media_type = header[len("data:") :].split(";")[0] or None
+    try:
+        raw_bytes = base64.b64decode(payload, validate=True)
+    except (ValueError, binascii.Error):
+        return ArtifactRef(
+            kind="attachment", name=name if isinstance(name, str) else None, media_type=media_type
+        )
+    return ArtifactRef(
+        kind="attachment",
+        name=name if isinstance(name, str) else None,
+        media_type=media_type,
+        bytes=len(raw_bytes),
+        sha256=hashlib.sha256(raw_bytes).hexdigest(),
+    )
+
+
+def _artifacts(content: Any) -> list[ArtifactRef]:
+    """Collect the files a message referenced, carried or named.
+
+    Attachments travel as data URIs inside the blocks, so they can be measured
+    and hashed here. A file the session only named in text cannot be: the bytes
+    are on whatever machine ran the session, so the path is the reference.
+
+    :param content: The message's content blocks.
+    :returns: One reference per file, in the order they appear.
+    """
+    if not isinstance(content, list):
+        return []
+    refs: list[ArtifactRef] = []
+    seen_paths: set[str] = set()
+    for block in content:
+        if not isinstance(block, Mapping):
+            continue
+        if block.get("type") in ("input_image", "input_file"):
+            ref = _attachment_ref(block)
+            if ref is not None:
+                refs.append(ref)
+            continue
+        text = block.get("text")
+        if isinstance(text, str):
+            for match in _ATTACHED_PATH_RE.finditer(text):
+                path = match.group(1).strip()
+                if path and path not in seen_paths:
+                    seen_paths.add(path)
+                    refs.append(ArtifactRef(kind="path", path=path, name=path.rsplit("/", 1)[-1]))
+    return refs
 
 
 def _message_blocks(entry: TranscriptEntry) -> list[dict[str, Any]]:

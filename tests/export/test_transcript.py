@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from typing import Any
 
@@ -673,3 +675,104 @@ def test_an_ordinary_export_says_nothing_about_redaction() -> None:
     assert "redacted" not in header
     assert entry["text"] == "hello"
     assert read_transcript(iter_transcript_lines(session, items)).header.redacted is False
+
+
+def _attachment_message(**extra: object) -> dict[str, object]:
+    """A user message carrying an image and naming a file by path."""
+    payload = base64.b64encode(b"\x89PNG not really").decode()
+    return {
+        "id": "msg_1",
+        "type": "message",
+        "role": "user",
+        "created_at": 1_700_000_000,
+        "content": [
+            {
+                "type": "input_image",
+                "image_url": f"data:image/png;base64,{payload}",
+                "filename": "diagram.png",
+            },
+            {"type": "input_text", "text": "compare with [Attached: /tmp/q3-report.pdf]"},
+        ],
+        **extra,
+    }
+
+
+def test_an_attachment_is_recorded_by_name_type_size_and_digest() -> None:
+    """The bytes are in ``raw``; the reference is what survives a reader that
+    ignores ``raw``, and identifies the same file wherever else it appears."""
+    entry = EntryNumbering().entry(_attachment_message())
+
+    assert entry.artifacts is not None
+    image = entry.artifacts[0]
+    assert (image.kind, image.name, image.media_type) == ("attachment", "diagram.png", "image/png")
+    assert image.bytes == len(b"\x89PNG not really")
+    assert image.sha256 == hashlib.sha256(b"\x89PNG not really").hexdigest()
+
+
+def test_a_file_named_in_the_text_is_recorded_as_a_path() -> None:
+    """Its bytes never travelled, so the path is the only honest reference."""
+    entry = EntryNumbering().entry(_attachment_message())
+
+    assert entry.artifacts is not None
+    named = entry.artifacts[1]
+    assert (named.kind, named.path, named.name) == ("path", "/tmp/q3-report.pdf", "q3-report.pdf")
+    assert named.sha256 is None
+
+
+def test_a_message_without_files_records_no_artifacts() -> None:
+    """The field is absent rather than empty, so ordinary lines do not grow."""
+    entry = EntryNumbering().entry(
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "user",
+            "created_at": 1_700_000_000,
+            "content": [{"type": "input_text", "text": "no files here"}],
+        }
+    )
+
+    assert entry.artifacts is None
+    assert "artifacts" not in json.loads(entry.to_line())
+
+
+def test_redaction_keeps_which_files_were_involved_but_not_their_names() -> None:
+    """A file name can say as much as the message that carried it."""
+    entry = EntryNumbering().entry(_attachment_message()).redacted()
+
+    assert entry.artifacts is not None
+    image, named = entry.artifacts
+    assert image.sha256 is not None and image.bytes is not None
+    assert image.name is None and image.path is None
+    assert named.kind == "path" and named.path is None
+    assert "q3-report" not in entry.to_line()
+    assert "diagram" not in entry.to_line()
+
+
+def test_an_unreadable_attachment_is_still_named() -> None:
+    """A block whose payload will not decode is reported rather than dropped."""
+    entry = EntryNumbering().entry(
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "user",
+            "created_at": 1_700_000_000,
+            "content": [
+                {
+                    "type": "input_file",
+                    "file_data": "data:application/pdf;base64,!!not base64!!",
+                    "filename": "broken.pdf",
+                },
+                {"type": "input_file", "file_id": "file_abc123"},
+            ],
+        }
+    )
+
+    assert entry.artifacts is not None
+    broken, unresolved = entry.artifacts
+    assert (broken.name, broken.media_type, broken.sha256) == (
+        "broken.pdf",
+        "application/pdf",
+        None,
+    )
+    # An unresolved id still says a file was involved.
+    assert unresolved.name == "file_abc123"

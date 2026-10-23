@@ -119,6 +119,29 @@ import` refuses it rather than building an empty session that looks like the
 original. Redaction is all or nothing today: there is no hook to rewrite
 content rather than drop it.
 
+### Files a session referenced
+
+A transcript records a conversation, not the files around it. A message that
+carried an attachment, or named one by path, also carries an `artifacts` list
+saying what was involved:
+
+```json
+{"turn": 2, "seq": 3, "role": "user", "kind": "message", "text": "compare these",
+ "artifacts": [{"kind": "attachment", "name": "diagram.png", "media_type": "image/png",
+                "bytes": 20480, "sha256": "9f2c..."},
+               {"kind": "path", "name": "q3.pdf", "path": "/home/me/q3.pdf"}]}
+```
+
+An attachment's bytes travel inside `raw` as a data URI, so its size and digest
+are recorded here and a reader that ignores `raw` still knows which file it
+was. A file the session only named by path never travelled at all; the path is
+the reference, and the digest is absent because the bytes were on whatever
+machine ran the session.
+
+A redacted export keeps these references and drops their names and paths: that
+a file of a given digest was involved is structure, what it was called is not.
+Bundling the bytes themselves is not implemented.
+
 ### Multi-agent runs
 
 A session that spawned sub-agents is not self-contained on its own. `--tree`,
@@ -172,6 +195,8 @@ replaced item id) and carries the summary it continued from.
   matches the item count you expect before trusting it as complete.
 - A redacted file is not a lesser export of the same session; it is a
   different artifact. Nothing recovers the content from it.
+- `artifacts` names files, it does not carry them. A `path` reference says what
+  the session called a file on the machine that ran it, which may be gone.
 - `omnigent session import` can rebuild only item types the importing server
   knows. A `note` for a type this version does not know is kept in the file
   but refused on import.

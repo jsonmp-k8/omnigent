@@ -1,5 +1,83 @@
 {
   "$defs": {
+    "ArtifactRef": {
+      "description": "A file an entry referenced, named well enough to recognize elsewhere.\n\nA transcript records a conversation, not the files around it. An attachment\ntravels inside ``raw`` as a data URI, which a redacted export drops and a\nreader may not want to decode; a file named in the text never travelled at\nall. Either way this says what was involved.\n\n:param kind: ``\"attachment\"`` for a file carried in the message,\n    ``\"path\"`` for one the session only named.\n:param name: File name as the session knew it, e.g. ``\"diagram.png\"``.\n:param path: The path the session named, for ``\"path\"`` references.\n:param media_type: The attachment's media type, e.g. ``\"image/png\"``.\n:param bytes: Size of the attachment in bytes.\n:param sha256: Hex digest of the attachment's bytes, so the same file is\n    recognizable wherever else it turns up.",
+      "properties": {
+        "bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bytes"
+        },
+        "kind": {
+          "enum": [
+            "attachment",
+            "path"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "media_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Media Type"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    },
     "entry": {
       "oneOf": [
         {
@@ -278,6 +356,21 @@
               ],
               "default": null,
               "title": "Agent"
+            },
+            "artifacts": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/$defs/ArtifactRef"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifacts"
             },
             "content": {
               "anyOf": [
