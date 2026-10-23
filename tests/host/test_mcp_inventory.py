@@ -442,6 +442,29 @@ def test_managed_config_servers_are_discovered_and_outrank_user_config(
     assert _SECRET not in json.dumps(servers)
 
 
+def test_only_the_first_readable_managed_config_counts(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude Code reads the managed chain first-readable-wins, so a lower-precedence
+    file is ignored even when the winning one pins no servers."""
+    missing = tmp_path / "missing" / "managed-mcp.json"
+    unreadable = tmp_path / "unreadable" / "managed-mcp.json"
+    unreadable.parent.mkdir(parents=True)
+    unreadable.write_text("not json")
+    winner = tmp_path / "winner" / "managed-mcp.json"
+    _write_json(winner, {"mcpServers": {"linear": _stdio()}})
+    lower = tmp_path / "lower" / "managed-mcp.json"
+    _write_json(lower, {"mcpServers": {"github": _stdio()}})
+    paths = (missing, unreadable, winner, lower)
+    monkeypatch.setattr(mcp_inventory, "_managed_mcp_paths", lambda: paths)
+
+    assert [server["name"] for server in discover_mcp_servers()] == ["linear"]
+
+    # A winning file with no servers still shadows the lower-precedence one.
+    _write_json(winner, {"permissions": {}})
+    assert discover_mcp_servers() == []
+
+
 def test_without_a_managed_config_nothing_changes(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

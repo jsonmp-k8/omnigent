@@ -32,8 +32,9 @@ directory.
 | `sign_in_url` | no | Page that completes the sign-in. Only read with `sign_in_required`. |
 
 The panel renders `sign_in_required` as an amber row with a **Sign in** link that opens
-`sign_in_url` in a new tab, and polls this file (through the host inventory) every few
-seconds while the panel is open, so flipping an entry to `connected` updates the row.
+`sign_in_url` in a new tab. While the panel is open and a host server for the session's
+harness is reported as `sign_in_required`, it polls this file (through the host inventory) every few seconds, so flipping the entry
+to `connected` updates the row.
 
 ## Rules the reader enforces
 
@@ -56,7 +57,8 @@ the next good read.
 
 Entries are matched on `(harness, name)` only. Two servers sharing a name under one
 harness, such as a user server and a plugin server, cannot be told apart and both take
-the first matching entry's state.
+that entry's state. If the file lists the same `(harness, name)` more than once, the
+last valid entry wins.
 
 Anything that can write this file is trusted as far as the harness configs beside it:
 it can mark a known server as needing sign-in and name an http(s) page for it. It

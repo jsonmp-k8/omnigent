@@ -137,15 +137,18 @@ def _managed_claude_servers() -> list[ConfiguredMcpServer]:
     need an interactive sign-in, so the inventory has to know about them.
     """
     out: list[ConfiguredMcpServer] = []
-    seen: set[str] = set()
-    # First readable location wins.
+    # The first readable, object-shaped file decides, as Claude Code (and
+    # ``claude_managed_gateway``) read this chain: a lower-precedence file is
+    # ignored even when the winning one pins no servers.
     for path in _managed_mcp_paths():
         data = _read_config(path, "claude managed")
+        if data is None:
+            continue
         for name, config in _servers_in(data).items():
             summary = _summary(name, config, "claude", managed=True)
-            if isinstance(config, Mapping) and summary is not None and summary["name"] not in seen:
-                seen.add(summary["name"])
+            if isinstance(config, Mapping) and summary is not None:
                 out.append(ConfiguredMcpServer(summary, config))
+        break
     return out
 
 
