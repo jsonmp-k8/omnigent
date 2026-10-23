@@ -97,6 +97,8 @@ from .executor import (
     ExecutorConfig,
     ExecutorError,
     ExecutorEvent,
+    InterruptOutcome,
+    InterruptReport,
     Message,
     ReasoningChunk,
     TextChunk,
@@ -4263,8 +4265,10 @@ class _CodexAppServerSession:
             return started
         return None
 
-    async def interrupt_turn(self) -> bool:
-        turn_id = self.live_turn_id()
+    async def interrupt_turn(self, turn_id: str | None = None) -> bool:
+        """Ask the app server to interrupt *turn_id* (default: the live turn)."""
+        if turn_id is None:
+            turn_id = self.live_turn_id()
         if self.thread_id is None or turn_id is None:
             return False
         await self._request(
@@ -4923,33 +4927,60 @@ class CodexExecutor(Executor):
     async def interrupt_session(self, session_key: str) -> bool:
         """Stop the in-flight turn, confirm it stopped, then drop the session.
 
+        Boolean form of :meth:`interrupt_session_report` that also waits for the reap.
+
+        :param session_key: The Omnigent session id to interrupt.
+        :returns: ``False`` when the stop could not be confirmed or the close
+            failed; ``True`` otherwise, including when nothing was running.
+        """
+        report = await self.interrupt_session_report(session_key)
+        closed = True
+        if report.teardown is not None:
+            try:
+                await report.teardown
+            except Exception as exc:  # noqa: BLE001 — close failures surface via False return
+                logger.warning(
+                    "Codex session close after interrupt failed for session %s: %s",
+                    session_key,
+                    exc,
+                )
+                closed = False
+        return closed and report.outcome is not InterruptOutcome.UNCONFIRMED
+
+    async def interrupt_session_report(self, session_key: str) -> InterruptReport:
+        """Interrupt the open turn, confirm it stopped, and hand back the reap.
+
         ``turn/interrupt`` returning proves only that the app server received
         the ask, so the turn is then watched until it is observed stopping
-        (:meth:`_CodexAppServerSession.await_turn_stopped`). The session is
-        always dropped afterwards so the next turn replays full history; a
+        (:meth:`_CodexAppServerSession.await_turn_stopped`). The outcome is
+        reported before the session is closed: the close can take seconds and
+        must not hide an unconfirmed stop behind a caller's budget.
+
+        The session is always dropped so the next turn replays full history; a
         resumed thread would skip the runner's "[System: interrupted]" marker
         (see claude_sdk_executor.interrupt_session and Codex's
         ``resume_after_pause`` capability).
 
         :param session_key: The Omnigent session id to interrupt.
-        :returns: ``True`` when the turn was confirmed stopped and the session
-            closed; ``False`` when the stop could not be confirmed or the close
-            failed.
+        :returns: The outcome, with the session close as ``teardown`` whenever
+            there was a session to drop.
         """
         state = self._session_states.get(session_key)
         if state is None or state.app_session is None:
-            return False
+            return InterruptReport(InterruptOutcome.NOTHING_TO_STOP)
         app_session = state.app_session
         # Use the reader's open turn; ``run_turn`` may already have cleared
         # ``active_turn_id`` while Codex is still generating.
         turn_id = app_session.live_turn_id()
-        # A turn the reader already saw end needs no interrupt; with no open
-        # turn the request is a harmless no-op the app session short-circuits.
-        confirmed = turn_id is not None and app_session.turn_stopped(turn_id)
-        if not confirmed:
+        if turn_id is None:
+            outcome = InterruptOutcome.NOTHING_TO_STOP
+        elif app_session.turn_stopped(turn_id):
+            # The reader already saw the turn end; no interrupt is needed.
+            outcome = InterruptOutcome.STOPPED
+        else:
             try:
                 await asyncio.wait_for(
-                    app_session.interrupt_turn(),
+                    app_session.interrupt_turn(turn_id),
                     timeout=_INTERRUPT_REQUEST_SECONDS,
                 )
             except Exception as exc:  # noqa: BLE001 — the close below is the floor
@@ -4959,9 +4990,9 @@ class CodexExecutor(Executor):
                     exc,
                 )
                 # The turn may have ended on its own while the request failed.
-                confirmed = turn_id is None or app_session.turn_stopped(turn_id)
+                confirmed = app_session.turn_stopped(turn_id)
             else:
-                confirmed = turn_id is None or await app_session.await_turn_stopped(
+                confirmed = await app_session.await_turn_stopped(
                     turn_id, timeout=_INTERRUPT_CONFIRM_SECONDS
                 )
             if not confirmed:
@@ -4972,16 +5003,8 @@ class CodexExecutor(Executor):
                     _INTERRUPT_CONFIRM_SECONDS,
                     session_key,
                 )
-        try:
-            await self.close_session(session_key)
-        except Exception as exc:  # noqa: BLE001 — close failures surface via False return
-            logger.warning(
-                "Codex session close after interrupt failed for session %s: %s",
-                session_key,
-                exc,
-            )
-            return False
-        return confirmed
+            outcome = InterruptOutcome.STOPPED if confirmed else InterruptOutcome.UNCONFIRMED
+        return InterruptReport(outcome, teardown=self.close_session(session_key))
 
     async def enqueue_session_message(
         self, session_key: str, content: CodexEnqueuedContent

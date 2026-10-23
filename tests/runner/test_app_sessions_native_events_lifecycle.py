@@ -5699,17 +5699,8 @@ async def test_interrupt_reaches_a_native_agent_that_outlived_the_runner_turn(
     pane_status: str,
     should_forward: bool,
 ) -> None:
-    """Pause must not be dropped just because the runner owns no turn object.
-
-    antigravity-native has no ``NativeInterruptRunner`` handler, so its
-    interrupt falls through to the in-process turn cancel. A native agent keeps
-    generating in its own process after the runner's turn ends, and the early
-    return on "not in ``_active_turns``" made Pause a silent 204 that never
-    reached the vendor. The session's own reported status is the authority: when
-    it is still in flight the interrupt is forwarded to the harness, whose
-    ``interrupt_session`` reaches agy's cancel; when it is idle there is
-    genuinely nothing to stop and nothing is sent.
-    """
+    """Pause with no runner turn still reaches a native agent whose session status says
+    it is busy; an idle session is left alone."""
     conv_id = f"conv_{uuid.uuid4().hex}"
 
     spec = AgentSpec(

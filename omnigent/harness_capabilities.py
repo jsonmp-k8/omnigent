@@ -131,10 +131,8 @@ class InstructionDelivery(str, Enum):
     UNKNOWN = "unknown"
 
 
-#: What ``resume_after_pause`` means when a harness does not declare it: a
-#: resident vendor (native TUI/server, ACP subprocess) keeps its conversation
-#: across an interrupt; an SDK or CLI harness drops its session and rebuilds the
-#: thread from the Omnigent transcript. Harnesses that differ declare the axis.
+#: ``resume_after_pause`` when undeclared: resident vendors keep their thread
+#: across an interrupt; SDK and CLI harnesses rebuild it from the transcript.
 RESUME_AFTER_PAUSE_BY_MODE: dict[IntegrationMode, PauseResume] = {
     IntegrationMode.NATIVE_TUI: PauseResume.SAME_THREAD,
     IntegrationMode.NATIVE_SERVER: PauseResume.SAME_THREAD,
@@ -169,9 +167,6 @@ class HarnessCapabilities:
         from the Omnigent transcript. Defaults by integration mode
         (:data:`RESUME_AFTER_PAUSE_BY_MODE`); normalized to ``unsupported``
         with *pause*.
-    :param cancel: Always ``True``, whatever is declared: Omnigent's own turn
-        teardown records the cancellation and its cause even when the vendor
-        ignores the interrupt.
     :param streaming: Whether the harness forwards token-level deltas (vs a
         single complete blob). Declared claim; verified by the bench's
         streaming probe.
@@ -210,7 +205,6 @@ class HarnessCapabilities:
     pause: PauseSemantics = PauseSemantics.ENDS_RUN
     # ``None`` means "as the integration mode implies"; resolved in ``__post_init__``.
     resume_after_pause: PauseResume | None = None
-    cancel: bool = True
     steering: bool | None = None
     live_queue: bool | None = None
     images: bool | None = None
@@ -229,8 +223,6 @@ class HarnessCapabilities:
         if not self.interrupt:
             object.__setattr__(self, "pause", PauseSemantics.UNSUPPORTED)
             object.__setattr__(self, "resume_after_pause", PauseResume.UNSUPPORTED)
-        # Cancel is a framework floor: the turn teardown records it whatever the vendor does.
-        object.__setattr__(self, "cancel", True)
 
     @property
     def resume_after_pause_value(self) -> PauseResume:
@@ -239,7 +231,12 @@ class HarnessCapabilities:
         return self.resume_after_pause
 
     def as_dict(self) -> dict[str, str | bool | None]:
-        """Return a JSON-serializable view for the ``/v1/harnesses`` catalog."""
+        """Return a JSON-serializable view for the ``/v1/harnesses`` catalog.
+
+        ``cancel`` is published as a constant ``True``: Omnigent's own turn
+        teardown records a cancellation and its cause whatever the vendor does,
+        so it is framework behaviour, not a per-harness claim.
+        """
         return {
             "integration_mode": self.integration_mode.value,
             "elicitation": self.elicitation.value,
@@ -252,7 +249,7 @@ class HarnessCapabilities:
             "streaming": self.streaming,
             "pause": self.pause.value,
             "resume_after_pause": self.resume_after_pause_value.value,
-            "cancel": self.cancel,
+            "cancel": True,
             "steering": self.steering,
             "live_queue": self.live_queue,
             "images": self.images,

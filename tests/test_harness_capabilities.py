@@ -162,14 +162,11 @@ def test_no_harness_claims_pause_suspends_a_turn() -> None:
     assert not claiming, f"harnesses claiming Pause suspends a turn: {claiming}"
 
 
-def test_cancel_is_supported_everywhere() -> None:
-    """Cancel is a framework floor, not a per-vendor feature.
-
-    Omnigent's own turn teardown records the cancellation and its cause even
-    when the vendor ignores the interrupt, so no harness may publish otherwise.
-    """
+def test_cancel_is_published_as_a_constant() -> None:
+    """Cancel is framework behaviour, so every row publishes ``true`` and no
+    declaration can say otherwise."""
     for harness, capability in harness_capabilities().items():
-        assert capability.cancel is True, harness
+        assert capability.as_dict()["cancel"] is True, harness
 
 
 def test_native_harnesses_resume_the_same_vendor_thread_after_a_pause() -> None:
@@ -208,25 +205,6 @@ def test_resume_after_pause_defaults_follow_the_integration_mode() -> None:
         is not RESUME_AFTER_PAUSE_BY_MODE[capability.integration_mode]
     )
     assert differing == ["hermes", "kimi", "open-responses", "openai-agents"]
-
-
-def test_cancel_cannot_be_declared_away() -> None:
-    """Cancel is a framework floor, so a record declaring otherwise is normalized."""
-    capability = HarnessCapabilities(
-        IntegrationMode.SDK_IN_PROCESS,
-        Elicitation.NONE,
-        Resume.COLD_ONLY,
-        EffortFamily.NONE,
-        ModelFamily.MULTI,
-        AuthModel.OWN_AUTH,
-        subagents=False,
-        interrupt=True,
-        streaming=True,
-        cancel=False,
-    )
-
-    assert capability.cancel is True
-    assert capability.as_dict()["cancel"] is True
 
 
 def test_pause_docs_matrix_matches_the_declarations() -> None:
@@ -298,11 +276,10 @@ def test_optional_bench_capabilities_default_to_unknown() -> None:
     assert capability.shell_tool_name is None
     assert capability.shell_tool_prompt is None
     assert capability.instruction_delivery is InstructionDelivery.UNKNOWN
-    # Pause axes default to the conservative claim: an interrupt ends the run
-    # and the vendor thread does not survive it.
+    # Pause axes default to the conservative claim for an SDK harness: an
+    # interrupt ends the run and the vendor thread does not survive it.
     assert capability.pause is PauseSemantics.ENDS_RUN
     assert capability.resume_after_pause is PauseResume.NEW_TURN
-    assert capability.cancel is True
     assert capability.as_dict() == {
         "integration_mode": "sdk-in-process",
         "elicitation": "none",

@@ -46,6 +46,7 @@ from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.executor import (
     ExecutorConfig,
     ExecutorError,
+    InterruptOutcome,
     ReasoningChunk,
     TextChunk,
     ToolCallComplete,
@@ -80,6 +81,7 @@ class _FakeAppSession:
     active_turn_id: str | None = None
     confirms_stop: bool = True
     already_stopped: bool = False
+    interrupted_turn_id: str | None = None
     awaited_stop_for: str | None = None
     calls: list[dict] = None  # type: ignore[assignment]
 
@@ -101,8 +103,9 @@ class _FakeAppSession:
         del turn_id
         return self.already_stopped
 
-    async def interrupt_turn(self):
+    async def interrupt_turn(self, turn_id=None):
         self.interrupted = True
+        self.interrupted_turn_id = turn_id
         return True
 
     async def await_turn_stopped(self, turn_id, *, timeout):
@@ -1441,10 +1444,13 @@ class TestCodexExecutor(unittest.TestCase):
                 )
             ]
 
+            fake_session.active_turn_id = "turn-1"
+
             interrupted = await executor.interrupt_session("s1")
             self.assertTrue(interrupted)
-            # Interrupt is attempted first to halt the in-flight turn.
+            # Interrupt is attempted first, against the turn that was captured.
             self.assertTrue(fake_session.interrupted)
+            self.assertEqual(fake_session.interrupted_turn_id, "turn-1")
             # Then the session is closed and removed so the next turn starts a
             # fresh thread and replays full history (marker included).
             self.assertTrue(fake_session.closed)
@@ -1480,6 +1486,68 @@ class TestCodexExecutor(unittest.TestCase):
             self.assertTrue(await executor.interrupt_session("s1"))
             self.assertEqual(fake_session.awaited_stop_for, "turn-1")
             self.assertTrue(fake_session.closed)
+
+        _run(_t())
+
+    def test_interrupt_report_answers_before_the_session_is_closed(self):
+        """The outcome is known before the close starts, and the close is handed back
+        rather than awaited, so a slow reap cannot hide an unconfirmed stop."""
+
+        async def _t():
+            fake_session = _FakeAppSession([[TurnComplete(response="done")]], confirms_stop=False)
+            executor = CodexExecutor(
+                codex_path="/bin/echo",
+                app_session_factory=lambda **kwargs: fake_session,
+            )
+
+            _ = [
+                e
+                async for e in executor.run_turn(
+                    [{"role": "user", "content": "hi", "session_id": "s1"}],
+                    [],
+                    "",
+                )
+            ]
+            fake_session.active_turn_id = "turn-1"
+
+            report = await executor.interrupt_session_report("s1")
+            self.assertIs(report.outcome, InterruptOutcome.UNCONFIRMED)
+            self.assertFalse(fake_session.closed)
+            self.assertIsNotNone(report.teardown)
+            await report.teardown
+            self.assertTrue(fake_session.closed)
+            self.assertEqual(executor._session_states, {})
+
+        _run(_t())
+
+    def test_interrupt_report_with_no_live_turn_is_nothing_to_stop(self):
+        """With no open turn nothing is interrupted, but the session is still dropped."""
+
+        async def _t():
+            fake_session = _FakeAppSession([[TurnComplete(response="done")]])
+            executor = CodexExecutor(
+                codex_path="/bin/echo",
+                app_session_factory=lambda **kwargs: fake_session,
+            )
+
+            _ = [
+                e
+                async for e in executor.run_turn(
+                    [{"role": "user", "content": "hi", "session_id": "s1"}],
+                    [],
+                    "",
+                )
+            ]
+
+            report = await executor.interrupt_session_report("s1")
+            self.assertIs(report.outcome, InterruptOutcome.NOTHING_TO_STOP)
+            self.assertFalse(fake_session.interrupted)
+            await report.teardown
+            self.assertTrue(fake_session.closed)
+            self.assertIs(
+                (await executor.interrupt_session_report("s1")).outcome,
+                InterruptOutcome.NOTHING_TO_STOP,
+            )
 
         _run(_t())
 
@@ -1549,7 +1617,8 @@ class TestCodexExecutor(unittest.TestCase):
         async def _t():
             fake_session = _FakeAppSession([[TurnComplete(response="done")]])
 
-            async def _boom():
+            async def _boom(turn_id=None):
+                del turn_id
                 fake_session.already_stopped = True
                 raise RuntimeError("transport closed")
 

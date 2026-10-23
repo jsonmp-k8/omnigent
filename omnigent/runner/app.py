@@ -1147,7 +1147,8 @@ class _InterruptOutcome(Enum):
 class _ForwardResult(Enum):
     """How the harness answered a forwarded interrupt."""
 
-    DELIVERED = "delivered"  # 2xx, or the turn it targeted is already gone
+    DELIVERED = "delivered"  # 2xx
+    SUPERSEDED = "superseded"  # a newer turn bound meanwhile; nothing was sent
     NO_TURN = "no_turn"  # 404: the harness has nothing to interrupt
     REJECTED = "rejected"  # the harness refused (409 or another error), or was unreachable
 
@@ -4052,17 +4053,17 @@ def create_runner_app(
 
         :param conv_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
         :param turn_epoch: Turn generation captured before resolving its harness.
-        :returns: ``DELIVERED`` on a 2xx, or when a newer turn bound meanwhile
-            (the turn this interrupt targeted is already gone); ``NO_TURN`` when
-            the harness answered 404; ``REJECTED`` on any other answer, a
-            failed POST, or no live harness.
+        :returns: ``DELIVERED`` on a 2xx; ``SUPERSEDED`` when a newer turn bound
+            meanwhile, so nothing was sent; ``NO_TURN`` when the harness answered
+            404; ``REJECTED`` on any other answer, a failed POST, or no live
+            harness.
         """
         if process_manager is None:
             return _ForwardResult.REJECTED
         try:
             harness_client = await process_manager.get_client(conv_id, "any")
             if _turn_bind_epoch.get(conv_id, 0) != turn_epoch:
-                return _ForwardResult.DELIVERED
+                return _ForwardResult.SUPERSEDED
             response = await harness_client.post(
                 f"/v1/sessions/{conv_id}/events",
                 json={"type": "interrupt"},
@@ -4166,7 +4167,9 @@ def create_runner_app(
         forwarded = await _forward_harness_interrupt(
             conv_id, turn_epoch=_turn_bind_epoch.get(conv_id, 0)
         )
-        if forwarded is _ForwardResult.NO_TURN:
+        if forwarded in (_ForwardResult.NO_TURN, _ForwardResult.SUPERSEDED):
+            # Nothing of this session's was interrupted: the harness has no turn,
+            # or a newer turn took the harness before the forward went out.
             return _InterruptOutcome.IDLE
         if forwarded is _ForwardResult.REJECTED:
             _logger.warning(
@@ -4206,9 +4209,8 @@ def create_runner_app(
         ``forward_to_busy_vendor=False`` so it no-ops with no turn in flight, and
         ``_interrupted_sessions`` is the existing idempotency token, so a
         duplicate signal for the same wedged turn collapses to one recovery.
-        Recovery deliberately does not reach past the runner's own turn: a stale
-        signal must not cancel a native agent the user drove directly in its TUI
-        after the runner turn ended. Only an explicit Pause/interrupt does that.
+        Recovery never cancels a native agent the user drove directly; only an
+        explicit Pause does.
 
         Generation-ownership gate: a desync signal names the turn that produced
         it (its ``owner_response_id``). A delayed or duplicate signal from an

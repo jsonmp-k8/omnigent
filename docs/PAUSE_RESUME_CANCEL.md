@@ -70,21 +70,26 @@ interrupt at all.
 
 What the caller sees:
 
-- The harness answers the runner's interrupt with 204 when a runner turn was
-  cancelled or the inner agent confirmed its stop, 409 when there was no
-  runner turn and the inner agent could not confirm one, and 404 when it has
-  nothing at all to interrupt. The runner treats a 404 as "nothing running"
-  and a 409 as a refusal, which it answers the server with as its own 409.
+- The harness answers the runner's interrupt with 204 when a harness turn was
+  cancelled or the inner agent confirmed its stop, 404 when neither a harness
+  turn nor a running inner agent exists, and 409 when there was no harness
+  turn and the inner agent was told to stop but not seen stopping. The runner
+  treats a 404 as "nothing running" and a 409 as a refusal, which it answers
+  the server with as its own 409.
 - The server surfaces that 409 on both Pause and Stop as a conflict ("the
   agent did not accept the interrupt and may still be running; try again")
   and does not emit `session.interrupted`. A runner that is unreachable or
   fails outright is handled as before: the session is reported interrupted and
   the fence is lifted so the turn's remaining output is not dropped.
-- When a runner turn was cancelled but the inner agent did not confirm, the
-  runner turn is torn down regardless and the unconfirmed stop is only logged.
-- A stop that takes longer than the interrupt budget keeps running in the
-  background; the response does not wait for the process reap, and the next
-  turn waits for every such teardown to finish first.
+- When a harness turn was cancelled but the inner agent did not confirm, the
+  harness turn is torn down regardless, the answer is still 204 and the
+  unconfirmed stop is only logged.
+- The inner agent reports its outcome before it reaps the session, so the
+  response does not wait for the process reap. The reap keeps running in the
+  background, a second Pause in that window waits for it instead of
+  interrupting again, and the next turn waits (bounded) for it to finish.
+- `session.interrupted` is published once the runner has accepted the
+  interrupt, so it follows the forward rather than preceding it.
 - Harnesses older than this contract answer 404 when they have no turn; the
   runner reads that as idle, so mixed versions do not turn Pause or Stop into
   an error.
@@ -96,8 +101,11 @@ harness so it reaches the vendor's own cancel. Two consequences of forwarding
 late:
 
 - On the SDK harnesses that drop their session on interrupt, a Pause that
-  arrives just after a turn finished still drops the warm session, so the next
-  turn starts cold.
+  lands while the runner's end-of-turn marker is still being flushed reaches
+  the harness and drops the warm session, so the next turn starts cold.
+- The forward targets whatever the harness is running at that moment; in the
+  narrow window where the user has already started a new turn in a native
+  agent's own UI, that is the turn that gets cancelled.
 - On `antigravity-native`, agy's cancel is a no-op for a step that is waiting
   on a user interaction (ask-question / command-permission). Such a Pause is
   accepted but the step stays blocked until the question is answered or denied

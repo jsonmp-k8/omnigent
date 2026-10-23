@@ -26,7 +26,7 @@ from typing import Any
 import httpx
 import pytest
 
-from omnigent.inner.executor import Executor
+from omnigent.inner.executor import Executor, InterruptOutcome, InterruptReport
 from omnigent.runtime.harnesses import _HARNESS_MODULES
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager
 
@@ -2379,12 +2379,17 @@ async def test_watch_injections_no_marker_without_injection_id() -> None:
     assert ctx.emitted == []
 
 
-class _InterruptTrackingExecutor:
+class _InterruptTrackingExecutor(Executor):
     """Inner executor stub that records ``interrupt_session`` calls."""
 
     def __init__(self) -> None:
         """Hold the list of session keys whose session was dropped."""
         self.interrupted: list[str] = []
+
+    async def run_turn(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        """Never driven by these tests."""
+        raise NotImplementedError
+        yield
 
     async def interrupt_session(self, session_key: str) -> bool:
         """Record the drop and report success.
@@ -3009,45 +3014,54 @@ def test_interrupt_budgets_nest_from_codex_to_the_runner_post() -> None:
 
 
 class _InterruptRecordingExecutor(Executor):
-    """Minimal executor that records ``interrupt_session`` and can stall in it."""
+    """Minimal executor that records interrupts and reports a configured outcome."""
 
-    def __init__(self, *, stopped: bool = True, delay: float = 0.0, raises: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        outcome: InterruptOutcome = InterruptOutcome.STOPPED,
+        delay: float = 0.0,
+        raises: bool = False,
+        teardown_delay: float = 0.0,
+    ) -> None:
         """
-        Record interrupt calls, optionally stalling to model a slow teardown.
+        Record interrupt calls, optionally stalling to model slow work.
 
-        :param stopped: What ``interrupt_session`` reports back.
-        :param delay: Seconds to stall inside ``interrupt_session``.
+        :param outcome: What the report says.
+        :param delay: Seconds the report itself takes.
         :param raises: Fail the interrupt instead of reporting an outcome.
+        :param teardown_delay: Seconds the handed-back reap takes (``0`` for none).
         """
         self.interrupted: list[str] = []
-        self._stopped = stopped
+        self.torn_down = 0
+        self._outcome = outcome
         self._delay = delay
         self._raises = raises
+        self._teardown_delay = teardown_delay
 
     async def run_turn(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
         """Never driven by these tests."""
         raise NotImplementedError
         yield
 
-    async def interrupt_session(self, session_key: str) -> bool:
+    async def interrupt_session_report(self, session_key: str) -> InterruptReport:
         """Record the interrupt and report the configured outcome."""
         self.interrupted.append(session_key)
         if self._delay:
             await asyncio.sleep(self._delay)
         if self._raises:
             raise RuntimeError("inner session gone")
-        return self._stopped
+        teardown = self._teardown() if self._teardown_delay else None
+        return InterruptReport(self._outcome, teardown=teardown)
+
+    async def _teardown(self) -> None:
+        await asyncio.sleep(self._teardown_delay)
+        self.torn_down += 1
 
 
 async def test_interrupt_without_a_runner_turn_still_stops_the_inner_session() -> None:
-    """Pause must reach the vendor when the agent outlived the harness turn.
-
-    The base handler 404s with nothing in ``_in_flight``, which is exactly the
-    state a native agent is in when it keeps generating after ``run_turn``
-    unwound. Letting that 404 escape skipped ``interrupt_session`` entirely, so
-    Pause was a silent no-op that the runner still answered 204 — the vendor
-    never heard about it.
-    """
+    """Pause with no harness turn still reaches the inner session, which is the state
+    a native agent is in when it keeps generating after ``run_turn`` unwound."""
     from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
 
     executor = _InterruptRecordingExecutor()
@@ -3065,16 +3079,34 @@ async def test_interrupt_without_a_runner_turn_still_stops_the_inner_session() -
     )
 
 
+async def test_interrupt_without_a_turn_and_nothing_running_is_a_404() -> None:
+    """An idle executor is "nothing to stop", the pre-existing 404, not a refusal."""
+    from omnigent.errors import ErrorCode, OmnigentError
+    from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+
+    executor = _InterruptRecordingExecutor(outcome=InterruptOutcome.NOTHING_TO_STOP)
+    adapter = ExecutorAdapter(lambda: executor, session_key="conv_idle")
+    adapter._executor = executor
+
+    with pytest.raises(OmnigentError) as excinfo:
+        await adapter._handle_interrupt_event()
+
+    assert excinfo.value.code is ErrorCode.NOT_FOUND, excinfo.value.code
+    assert executor.interrupted == ["conv_idle"]
+
+
 @pytest.mark.parametrize("failure", ["unconfirmed", "raises"])
 async def test_interrupt_without_a_turn_that_the_inner_session_cannot_confirm_409s(
     failure: str,
 ) -> None:
-    """A Pause that reached neither a runner turn nor a stopping agent is not a 204,
+    """A Pause that reached a running agent which was not seen stopping is a 409,
     whether the inner session said so or failed outright."""
     from omnigent.errors import ErrorCode, OmnigentError
     from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
 
-    executor = _InterruptRecordingExecutor(stopped=False, raises=failure == "raises")
+    executor = _InterruptRecordingExecutor(
+        outcome=InterruptOutcome.UNCONFIRMED, raises=failure == "raises"
+    )
     adapter = ExecutorAdapter(lambda: executor, session_key="conv_unconfirmed")
     adapter._executor = executor
 
@@ -3085,31 +3117,60 @@ async def test_interrupt_without_a_turn_that_the_inner_session_cannot_confirm_40
     assert executor.interrupted == ["conv_unconfirmed"]
 
 
-async def test_slow_inner_interrupt_is_awaited_before_the_executor_serves_again(
+async def test_unconfirmed_stop_is_reported_even_when_the_reap_is_slow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every teardown still running past the response slice must finish before the
-    next turn, including one left behind by an earlier overlapping Pause."""
+    """The outcome arrives before the reap, so a slow close cannot turn an
+    unconfirmed stop into a 204."""
+    from omnigent.errors import ErrorCode, OmnigentError
     from omnigent.runtime.harnesses import _executor_adapter
     from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
 
     monkeypatch.setattr(_executor_adapter, "_INTERRUPT_EVENT_SLICE_S", 0.05)
-    executor = _InterruptRecordingExecutor(delay=0.3)
+    executor = _InterruptRecordingExecutor(
+        outcome=InterruptOutcome.UNCONFIRMED, teardown_delay=0.3
+    )
+    adapter = ExecutorAdapter(lambda: executor, session_key="conv_slow_reap")
+    adapter._executor = executor
+
+    with pytest.raises(OmnigentError) as excinfo:
+        await adapter._handle_interrupt_event()
+
+    assert excinfo.value.code is ErrorCode.CONFLICT
+    pending = list(adapter._pending_inner_interrupts)
+    assert len(pending) == 1 and not pending[0].done(), "the reap keeps running, tracked"
+    await adapter._await_pending_inner_interrupt()
+    assert executor.torn_down == 1
+
+
+async def test_slow_inner_interrupt_is_awaited_before_the_executor_serves_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reap still running past the response slice is finished before the next turn,
+    and a second Pause in that window waits for it instead of interrupting again."""
+    from omnigent.runtime.harnesses import _executor_adapter
+    from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+
+    monkeypatch.setattr(_executor_adapter, "_INTERRUPT_EVENT_SLICE_S", 0.05)
+    executor = _InterruptRecordingExecutor(teardown_delay=0.3)
     adapter = ExecutorAdapter(lambda: executor, session_key="conv_pending")
     adapter._executor = executor
 
-    # Two Pauses in a row: a slow first teardown must not be forgotten when the
-    # second one also runs over.
-    await adapter._handle_interrupt_event()
-    await adapter._handle_interrupt_event()
+    first = await adapter._handle_interrupt_event()
+    assert first.status_code == 204
     pending = list(adapter._pending_inner_interrupts)
-    assert len(pending) == 2 and not any(task.done() for task in pending)
+    assert len(pending) == 1 and not pending[0].done()
+
+    # The overlapping Pause reuses the running reap rather than stacking another interrupt.
+    second = await adapter._handle_interrupt_event()
+    assert second.status_code == 204
+    assert executor.interrupted == ["conv_pending"]
 
     await adapter._await_pending_inner_interrupt()
 
-    assert all(task.done() for task in pending)
+    assert pending[0].done()
     assert not adapter._pending_inner_interrupts
-    assert executor.interrupted == ["conv_pending", "conv_pending"]
+    assert executor.torn_down == 1
 
 
 async def test_interrupt_with_neither_turn_nor_executor_still_404s() -> None:
@@ -3132,11 +3193,8 @@ async def test_interrupt_response_outlasts_no_slow_inner_teardown(
 ) -> None:
     """A slow reap must not hold the Pause response past the runner's POST budget.
 
-    The runner bounds its interrupt POST at 3.0s. ``interrupt_session`` confirms
-    the stop and then reaps the inner process, which can take seconds; blocking
-    on all of it turned every slow teardown into a POST timeout and a spurious
-    "Interrupt forward to harness failed". The teardown is finished in the
-    background instead of being cancelled mid-terminate.
+    The runner bounds its interrupt POST at 4.0s; the reap behind a confirmed stop can
+    take seconds and must finish in the background rather than hold the response.
     """
     from omnigent.runtime.harnesses import _executor_adapter
     from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
