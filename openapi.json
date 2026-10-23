@@ -3925,8 +3925,11 @@
             "title": "Plugin"
           },
           "scope": {
-            "const": "user",
-            "description": "Config scope; always `user` today.",
+            "description": "Where the server is configured: `user` for this user's own config, `managed` for one an organization pins for every user.",
+            "enum": [
+              "user",
+              "managed"
+            ],
             "title": "Scope",
             "type": "string"
           },

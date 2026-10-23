@@ -27,7 +27,20 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setattr(mcp_inventory, "_warned_auth_status", None)
+    # A real managed config or status-file override on the dev machine must not leak in.
+    monkeypatch.setattr(mcp_inventory, "_MANAGED_MCP_PATHS", ())
+    monkeypatch.delenv(mcp_inventory.MCP_AUTH_STATUS_ENV, raising=False)
     return home
+
+
+def _write_managed_mcp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, servers: dict[str, object]
+) -> Path:
+    """Point the managed chain at a writable copy of Claude Code's enterprise config."""
+    path = tmp_path / "managed" / "managed-mcp.json"
+    _write_json(path, {"mcpServers": servers})
+    monkeypatch.setattr(mcp_inventory, "_MANAGED_MCP_PATHS", (path,))
+    return path
 
 
 def _write_json(path: Path, data: object) -> None:
@@ -363,3 +376,112 @@ def test_auth_status_is_fresh_while_the_config_scan_is_cached(
     # And the cached scan itself is not mutated by the overlay.
     _write_auth_status(home, [])
     assert "auth_status" not in inventory.discover()[0]
+
+
+def test_managed_config_servers_are_discovered_and_outrank_user_config(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An organization's pinned servers are often the ones needing sign-in, so the
+    inventory has to see them; they also win their name against the user's own config."""
+    _write_managed_mcp(
+        tmp_path,
+        monkeypatch,
+        {
+            "linear": {"type": "http", "url": f"https://mcp.linear.app/mcp?token={_SECRET}"},
+            "github": _stdio(),
+            "off": _stdio(enabled=False),
+            # Omnigent's own relay is not user config wherever it appears.
+            "omnigent": _stdio(),
+        },
+    )
+    _write_json(
+        home / ".claude.json",
+        {
+            "mcpServers": {
+                "github": {"type": "http", "url": "https://user.example.com/mcp"},
+                "own": _stdio(),
+            }
+        },
+    )
+
+    servers = discover_mcp_servers()
+
+    assert servers == [
+        {
+            "name": "linear",
+            "harness": "claude",
+            "transport": "http",
+            "scope": "managed",
+            "url_host": "mcp.linear.app",
+        },
+        {"name": "github", "harness": "claude", "transport": "stdio", "scope": "managed"},
+        {"name": "own", "harness": "claude", "transport": "stdio", "scope": "user"},
+    ]
+    assert _SECRET not in json.dumps(servers)
+
+
+def test_without_a_managed_config_nothing_changes(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The common install has no such file; discovery must not depend on it."""
+    _write_json(home / ".claude.json", {"mcpServers": {"own": _stdio()}})
+    monkeypatch.setattr(
+        mcp_inventory, "_MANAGED_MCP_PATHS", (tmp_path / "absent" / "managed-mcp.json",)
+    )
+    assert discover_mcp_servers() == [
+        {"name": "own", "harness": "claude", "transport": "stdio", "scope": "user"}
+    ]
+
+
+def test_a_managed_server_reaches_the_panel_with_its_account_state(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end for the case the feature exists for: a server the user cannot edit,
+    reported as needing sign-in, arriving at the panel with its state and URL."""
+    from omnigent.host.frames import (
+        HostMcpServersResultFrame,
+        decode_host_frame,
+        encode_host_frame,
+    )
+    from omnigent.server.routes.mcp_servers import McpServerSummary
+
+    _write_managed_mcp(tmp_path, monkeypatch, {"linear": {"url": "https://mcp.linear.app/mcp"}})
+    _write_auth_status(
+        home,
+        [
+            {
+                "harness": "claude",
+                "name": "linear",
+                "status": "sign_in_required",
+                "sign_in_url": "https://auth.example.com/start",
+            }
+        ],
+    )
+
+    discovered = HostMcpInventory().discover()
+    answered = decode_host_frame(
+        encode_host_frame(HostMcpServersResultFrame("r", "ok", mcp_servers=discovered))
+    )
+    assert isinstance(answered, HostMcpServersResultFrame)
+    published = McpServerSummary.model_validate(answered.mcp_servers[0]).model_dump()
+
+    assert published["name"] == "linear"
+    assert published["scope"] == "managed"
+    assert published["auth_status"] == "sign_in_required"
+    assert published["sign_in_url"] == "https://auth.example.com/start"
+
+
+def test_the_status_file_can_live_outside_a_read_only_home(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where ``$HOME`` is read-only, producer and reader agree through the env var."""
+    _write_json(home / ".cursor" / "mcp.json", {"mcpServers": {"slack": _stdio()}})
+    elsewhere = tmp_path / "run" / "mcp-auth-status.json"
+    _write_json(
+        elsewhere, {"servers": [{"harness": "cursor", "name": "slack", "status": "connected"}]}
+    )
+    # The default location is deliberately left empty.
+    assert HostMcpInventory().discover()[0].get("auth_status") is None
+
+    monkeypatch.setenv(mcp_inventory.MCP_AUTH_STATUS_ENV, str(elsewhere))
+    assert HostMcpInventory().discover()[0]["auth_status"] == "connected"

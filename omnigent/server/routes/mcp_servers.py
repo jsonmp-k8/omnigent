@@ -30,7 +30,8 @@ class McpServerSummary(BaseModel):
     :param name: Server name as configured, e.g. ``"github"``.
     :param harness: Harness family that loads it: ``claude``, ``codex``, or ``cursor``.
     :param transport: ``stdio`` for a local process, ``http`` for a remote server.
-    :param scope: Config scope; always ``user`` today.
+    :param scope: Where the server is configured: ``user`` for this user's own
+        config, ``managed`` for one an organization pins for every user.
     :param plugin: Plugin that bundles the server, e.g. ``"figma"``.
     :param url_host: Hostname of a remote server, e.g. ``"mcp.linear.app"``.
     :param auth_status: Account state reported by the host's sign-in manager:
@@ -43,7 +44,7 @@ class McpServerSummary(BaseModel):
     name: str
     harness: str
     transport: Literal["stdio", "http"]
-    scope: Literal["user"]
+    scope: Literal["user", "managed"]
     plugin: str | None = None
     source_id: str | None = None
     url_host: str | None = None

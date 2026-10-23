@@ -71,7 +71,8 @@ and steers messages while the agent is busy.
   from Settings** link for a service that needs a typed token or workspace URL;
   unavailable, for a service the account no longer sees; signing in; failed or
   cancelled, reported on the row with Sign in available again. A host-native
-  server shows connected or sign-in required when the host's sign-in manager
+  server, including one pinned by an organization's managed Claude config,
+  shows connected or sign-in required when the host's sign-in manager
   reports it (via `~/.omnigent/mcp-auth-status.json` on the host); its **Sign
   in** opens the reported URL in a new tab and the panel re-reads the host
   inventory every few seconds until the row is connected. Custom agent servers

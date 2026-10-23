@@ -91,7 +91,7 @@ export interface HostMcpServer {
   name: string;
   harness: string;
   transport: "stdio" | "http";
-  scope: "user";
+  scope: "user" | "managed";
   plugin?: string | null;
   source_id?: string | null;
   url_host?: string | null;

@@ -3,7 +3,8 @@
 Only names and non-secret metadata leave the inventory response: ``env``, headers, stdio
 ``command``/``args`` and full URLs routinely carry tokens, so they are dropped.
 
-Optional per-server account state is read from ``~/.omnigent/mcp-auth-status.json``,
+Optional per-server account state is read from ``~/.omnigent/mcp-auth-status.json``
+(or :data:`MCP_AUTH_STATUS_ENV`, for a deployment whose ``$HOME`` is read-only),
 validated, matched to discovered servers, and re-read on every request. Any process
 running as this user can write that file, so it is trusted exactly as much as the
 harness configs beside it: it can mark a known server as needing sign-in and name an
@@ -39,6 +40,12 @@ MCP_INVENTORY_CACHE_TTL_SECONDS = 60.0
 OMNIGENT_RELAY_SERVER = "omnigent"
 #: Where a host-side sign-in manager reports per-server account state (under ``$HOME``).
 MCP_AUTH_STATUS_RELPATH = Path(".omnigent") / "mcp-auth-status.json"
+#: Absolute path to use instead, for a deployment whose ``$HOME`` is read-only or
+#: sandboxed and whose sign-in manager must write somewhere else.
+MCP_AUTH_STATUS_ENV = "OMNIGENT_MCP_AUTH_STATUS_FILE"
+#: Claude Code's enterprise MCP config, read instead of the ambient chain when set
+#: (tests only; the real chain is derived from the managed-settings locations).
+_MANAGED_MCP_PATHS: tuple[Path, ...] | None = None
 #: The report is a short list; a larger file is treated as unreadable rather than parsed
 #: on every poll.
 MCP_AUTH_STATUS_MAX_BYTES = 64 * 1024
@@ -60,7 +67,11 @@ class ConfiguredMcpServer:
 
 
 def _summary(
-    name: object, config: object, harness: str, plugin: str | None = None
+    name: object,
+    config: object,
+    harness: str,
+    plugin: str | None = None,
+    scope: str = "user",
 ) -> McpServerSummary | None:
     """Reduce one server entry to its name, transport, and at most a URL host."""
     if not isinstance(name, str) or not name or name == OMNIGENT_RELAY_SERVER:
@@ -77,7 +88,7 @@ def _summary(
         transport = "http"
     else:
         return None
-    summary = {"name": name, "harness": harness, "transport": transport, "scope": "user"}
+    summary = {"name": name, "harness": harness, "transport": transport, "scope": scope}
     if plugin is not None:
         summary["plugin"] = plugin
     if transport == "http" and isinstance(url, str):
@@ -104,16 +115,48 @@ def _read_config(path: Path, harness: str) -> Mapping[str, object] | None:
     return data
 
 
+def _managed_mcp_paths() -> tuple[Path, ...]:
+    """Claude Code's enterprise MCP config, which sits beside its managed settings."""
+    if _MANAGED_MCP_PATHS is not None:
+        return _MANAGED_MCP_PATHS
+    from omnigent.onboarding.ambient import CLAUDE_CODE_MANAGED_SETTINGS_PATHS
+
+    return tuple(path.with_name("managed-mcp.json") for path in CLAUDE_CODE_MANAGED_SETTINGS_PATHS)
+
+
+def _managed_claude_servers() -> list[ConfiguredMcpServer]:
+    """Servers an organization pins for every user on this host.
+
+    Absent on an ordinary install, so nothing changes there. Where it exists these
+    servers are the ones the user cannot edit, and are often the ones that need an
+    interactive sign-in, so the inventory has to know about them.
+    """
+    out: list[ConfiguredMcpServer] = []
+    seen: set[str] = set()
+    for path in _managed_mcp_paths():
+        data = _read_config(path, "claude managed")
+        for name, config in _servers_in(data).items():
+            summary = _summary(name, config, "claude", scope="managed")
+            if isinstance(config, Mapping) and summary is not None and summary["name"] not in seen:
+                seen.add(summary["name"])
+                out.append(ConfiguredMcpServer(summary, config))
+    return out
+
+
 def _claude_servers(home: Path, env: Mapping[str, str]) -> list[ConfiguredMcpServer]:
-    """User-scope ``mcpServers`` plus servers bundled by enabled Claude plugins."""
+    """Managed, user-scope, and enabled-plugin ``mcpServers`` for Claude Code."""
+    out = _managed_claude_servers()
+    # Enterprise policy outranks user config, so a managed server keeps its name.
+    managed = {server.summary["name"] for server in out}
     configured = env.get("CLAUDE_CONFIG_DIR")
     config_dir = Path(configured).expanduser() if configured else None
     data = _read_config((config_dir or home) / ".claude.json", "claude")
-    out = [
+    out += [
         ConfiguredMcpServer(summary, config)
         for name, config in _servers_in(data).items()
         if isinstance(config, Mapping)
         and (summary := _summary(name, config, "claude")) is not None
+        and summary["name"] not in managed
     ]
     ctx = SkillSourceContext(
         roots=(),
@@ -135,6 +178,7 @@ def _claude_servers(home: Path, env: Mapping[str, str]) -> list[ConfiguredMcpSer
                     isinstance(config, Mapping)
                     and summary is not None
                     and summary["name"] not in seen
+                    and summary["name"] not in managed
                 ):
                     seen.add(summary["name"])
                     summary["source_id"] = _plugin_asset_id(key, "mcp", summary["name"])
@@ -200,6 +244,12 @@ def discover_mcp_servers() -> list[McpServerSummary]:
     return [server.summary for server in configured_mcp_servers()]
 
 
+def auth_status_path(home: Path) -> Path:
+    """Where the sign-in manager's report is read from, honouring the env override."""
+    override = os.environ.get(MCP_AUTH_STATUS_ENV)
+    return Path(override).expanduser() if override else home / MCP_AUTH_STATUS_RELPATH
+
+
 def _read_auth_status(path: Path) -> Mapping[str, object] | None:
     """Read the status report, logging once per file change when it cannot be used."""
     global _warned_auth_status
@@ -228,7 +278,7 @@ def _read_auth_status(path: Path) -> Mapping[str, object] | None:
 
 def read_auth_status_overlay(home: Path) -> AuthStatusOverlay:
     """Read the sign-in manager's report; entries that fail validation are dropped."""
-    data = _read_auth_status(home / MCP_AUTH_STATUS_RELPATH)
+    data = _read_auth_status(auth_status_path(home))
     entries = data.get("servers") if data is not None else None
     if not isinstance(entries, list):
         return {}
