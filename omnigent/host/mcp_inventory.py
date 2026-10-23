@@ -2,6 +2,26 @@
 
 Only names and non-secret metadata leave the inventory response: ``env``, headers, stdio
 ``command``/``args`` and full URLs routinely carry tokens, so they are dropped.
+
+Account state is not something the config files know. Whatever manages a server's
+sign-in on the host (an MCP proxy, a credential daemon) reports it through
+``~/.omnigent/mcp-auth-status.json``::
+
+    {
+        "servers": [
+            {
+                "harness": "claude",
+                "name": "linear",
+                "status": "sign_in_required",
+                "sign_in_url": "https://...",
+            }
+        ]
+    }
+
+``status`` is ``connected`` or ``sign_in_required``; ``sign_in_url`` is an http(s) URL
+the user opens to finish signing in and is only reported with ``sign_in_required``.
+Entries naming a server the inventory did not find are ignored. The file is re-read on
+every inventory request, so a change shows without waiting for the config rescan.
 """
 
 from __future__ import annotations
@@ -29,8 +49,13 @@ _logger = logging.getLogger(__name__)
 MCP_INVENTORY_CACHE_TTL_SECONDS = 60.0
 # Omnigent injects its own relay under this name; it is not user config.
 OMNIGENT_RELAY_SERVER = "omnigent"
+#: Where a host-side sign-in manager reports per-server account state (under ``$HOME``).
+MCP_AUTH_STATUS_RELPATH = Path(".omnigent") / "mcp-auth-status.json"
+_AUTH_STATUSES = frozenset({"connected", "sign_in_required"})
 
 McpServerSummary = dict[str, str]
+#: ``(harness, name)`` → the ``auth_status`` / ``sign_in_url`` keys to add to its summary.
+AuthStatusOverlay = dict[tuple[str, str], dict[str, str]]
 
 
 @dataclass
@@ -183,6 +208,54 @@ def discover_mcp_servers() -> list[McpServerSummary]:
     return [server.summary for server in configured_mcp_servers()]
 
 
+def _sign_in_url(value: object) -> str | None:
+    """Accept only an absolute http(s) URL; anything else cannot be opened safely."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return None
+    return value if parts.scheme in ("http", "https") and parts.netloc else None
+
+
+def read_auth_status_overlay(home: Path) -> AuthStatusOverlay:
+    """Read the sign-in manager's report; entries that fail validation are dropped."""
+    path = home / MCP_AUTH_STATUS_RELPATH
+    data = _read_json(path)
+    if data is None:
+        if path.exists():
+            _logger.warning("Skipping unreadable MCP auth status at %s", path)
+        return {}
+    entries = data.get("servers")
+    if not isinstance(entries, list):
+        return {}
+    overlay: AuthStatusOverlay = {}
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        harness, name, status = entry.get("harness"), entry.get("name"), entry.get("status")
+        if not (isinstance(harness, str) and isinstance(name, str) and status in _AUTH_STATUSES):
+            continue
+        fields = {"auth_status": str(status)}
+        url = _sign_in_url(entry.get("sign_in_url")) if status == "sign_in_required" else None
+        if url is not None:
+            fields["sign_in_url"] = url
+        overlay[(harness, name)] = fields
+    return overlay
+
+
+def apply_auth_status(
+    servers: list[McpServerSummary], overlay: AuthStatusOverlay
+) -> list[McpServerSummary]:
+    """Stamp each discovered server with its reported account state, if any."""
+    for server in servers:
+        fields = overlay.get((server["harness"], server["name"]))
+        if fields is not None:
+            server.update(fields)
+    return servers
+
+
 class HostMcpInventory:
     """Cache the inventory briefly and serialize scans off the event loop."""
 
@@ -191,10 +264,12 @@ class HostMcpInventory:
         self._cached: tuple[float, list[McpServerSummary]] | None = None
 
     def discover(self) -> list[McpServerSummary]:
-        """Return the cached inventory, rescanning after the TTL."""
+        """Return the cached inventory, rescanning after the TTL; account state is always fresh."""
         with self._lock:
             if self._cached is not None and self._cached[0] > time.monotonic():
-                return [dict(server) for server in self._cached[1]]
-            result = discover_mcp_servers()
-            self._cached = (time.monotonic() + MCP_INVENTORY_CACHE_TTL_SECONDS, result)
-            return [dict(server) for server in result]
+                servers = [dict(server) for server in self._cached[1]]
+            else:
+                result = discover_mcp_servers()
+                self._cached = (time.monotonic() + MCP_INVENTORY_CACHE_TTL_SECONDS, result)
+                servers = [dict(server) for server in result]
+        return apply_auth_status(servers, read_auth_status_overlay(Path.home()))

@@ -345,6 +345,9 @@ export function isSubagentRoutingEligible(
 
 // Leading whitespace + the command token, so the composer overlay can tint
 // just the `/command` or `$skill` and leave args in the default color.
+/** How often `/mcp` re-reads the host inventory while a server waits on a sign-in. */
+const HOST_MCP_SIGN_IN_POLL_MS = 5_000;
+
 const SLASH_COMMAND_SPLIT_RE = /^(\s*)([/$][A-Za-z0-9][\w:-]*)(?=\s|$)/;
 
 /**
@@ -2509,10 +2512,21 @@ function ComposerImpl(
   );
   const hostMcpRoutingId =
     sessionRoutingHostId(composerSession?.hostId, composerSession?.labels) ?? inheritedHostId;
+  // While a host server waits on a sign-in the user may be completing in another
+  // tab, poll so the row flips to connected without a reload.
+  const [hostSignInPending, setHostSignInPending] = useState(false);
   const hostMcpQuery = useHostMcpServers(
     hostMcpRoutingId,
     mcpPanelRequested && hostMcpHarness !== null,
+    { refetchInterval: mcpPanelRequested && hostSignInPending ? HOST_MCP_SIGN_IN_POLL_MS : false },
   );
+  useEffect(() => {
+    setHostSignInPending(
+      (hostMcpQuery.data ?? []).some(
+        (server) => server.harness === hostMcpHarness && server.auth_status === "sign_in_required",
+      ),
+    );
+  }, [hostMcpHarness, hostMcpQuery.data]);
   const hostMcpStatus =
     hostMcpHarness === null
       ? undefined
@@ -3305,6 +3319,13 @@ function ComposerImpl(
               [server.plugin && `${server.plugin} plugin`, server.url_host]
                 .filter(Boolean)
                 .join(" · ") || undefined,
+            connection:
+              server.auth_status === "connected"
+                ? "connected"
+                : server.auth_status === "sign_in_required"
+                  ? "sign-in-required"
+                  : undefined,
+            signInUrl: server.sign_in_url ?? undefined,
           },
         ]),
     );

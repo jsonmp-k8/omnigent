@@ -70,8 +70,12 @@ and steers messages while the agent is busy.
   that runs the popup sign-in and flips the row to connected, or a **Sign in
   from Settings** link for a service that needs a typed token or workspace URL;
   unavailable, for a service the account no longer sees; signing in; failed or
-  cancelled, reported on the row with Sign in available again. Host and custom
-  servers carry no account state.
+  cancelled, reported on the row with Sign in available again. A host-native
+  server shows connected or sign-in required when the host's sign-in manager
+  reports it (via `~/.omnigent/mcp-auth-status.json` on the host); its **Sign
+  in** opens the reported URL in a new tab and the panel re-reads the host
+  inventory every few seconds until the row is connected. Custom agent servers
+  carry no account state.
 - `codex-plugin-skills`: typing `$` lists enabled Codex plugin skills in both
   composers, including cached plugins whose marketplace inventory is unavailable.
   Selecting a row inserts its namespaced identifier.
@@ -411,7 +415,14 @@ Other connection providers alone do not enable the managed MCP picker.
   registry read when the server has it off or no row needs it);
   `web/src/hooks/useMcpRegistry.test.tsx` covers the sign-in hook's abort and
   confirmation paths, and a reopened panel shows no state from the previous
-  open. Manually, with the registry on, attach an OAuth service
+  open. Host account state: `tests/host/test_mcp_inventory.py`
+  covers the status file (stamping, validation, http-only URLs, freshness
+  against the cached scan), `tests/server/routes/test_mcp_servers.py` the
+  guarded pass-through, and `ChatPage.composer.test.tsx` the row state, the
+  new-tab Sign in and the polling. Manually, on a host whose sign-in manager
+  writes the status file, expect a host row to read **Sign-in required** with
+  a Sign in that opens the reported URL, and to flip to **Connected** within a
+  few seconds of the file changing. With the registry on, attach an OAuth service
   that is not connected, select `/mcp`, expect **Sign-in required** and
   **Sign in**, complete the popup and expect **Connected**; cancel it instead
   and expect the message on the row with Sign in still offered.

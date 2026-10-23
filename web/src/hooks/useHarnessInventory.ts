@@ -95,6 +95,10 @@ export interface HostMcpServer {
   plugin?: string | null;
   source_id?: string | null;
   url_host?: string | null;
+  /** Account state from the host's sign-in manager; absent when nothing reports one. */
+  auth_status?: "connected" | "sign_in_required" | null;
+  /** Where to finish signing in; only present with `sign_in_required`. */
+  sign_in_url?: string | null;
 }
 
 async function fetchMcpServers(hostId: string, signal: AbortSignal): Promise<HostMcpServer[]> {
@@ -198,12 +202,17 @@ export function buildInventoryContext(
 }
 
 /** Read the user-level MCP servers a connected host exposes to its native harnesses. */
-export function useHostMcpServers(hostId: string | null, enabled = true) {
+export function useHostMcpServers(
+  hostId: string | null,
+  enabled = true,
+  options: { refetchInterval?: number | false } = {},
+) {
   return useQuery({
     queryKey: ["host-mcp-servers", hostId],
     queryFn:
       enabled && hostId !== null ? ({ signal }) => fetchMcpServers(hostId, signal) : skipToken,
     staleTime: 30_000,
+    refetchInterval: options.refetchInterval ?? false,
   });
 }
 

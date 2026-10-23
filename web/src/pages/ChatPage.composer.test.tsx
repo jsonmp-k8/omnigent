@@ -3644,7 +3644,7 @@ describe("Composer MCP status command", () => {
     expect(panel).toHaveTextContent("host-only");
     expect(panel).toHaveTextContent("agent-only");
     expect(panel).not.toHaveTextContent("github");
-    expect(hostMcpQueryMock).toHaveBeenCalledWith("host_native", true);
+    expect(hostMcpQueryMock).toHaveBeenCalledWith("host_native", true, { refetchInterval: false });
     await user.click(textarea());
     await user.pointer({ target: panel, keys: "[MouseLeft>]" });
     expect(textarea()).toHaveFocus();
@@ -3703,6 +3703,77 @@ describe("Composer MCP status command", () => {
     },
   );
 
+  it("shows a host server's reported account state and polls while sign-in is due", () => {
+    composerSessionSnapshot.hostId = "host_native";
+    setComposerState({ boundAgentId: "agent_native", sessionHarness: "claude-native" });
+    const hostRows = [
+      {
+        name: "github",
+        harness: "claude",
+        transport: "stdio",
+        scope: "user",
+        auth_status: "connected",
+      },
+      {
+        name: "linear",
+        harness: "claude",
+        transport: "http",
+        scope: "user",
+        url_host: "mcp.linear.app",
+        auth_status: "sign_in_required",
+        sign_in_url: "https://auth.example.com/start?state=abc",
+      },
+      { name: "local-files", harness: "claude", transport: "stdio", scope: "user" },
+    ] satisfies UseHarnessInventoryModule.HostMcpServer[];
+    hostMcpQueryMock.mockReturnValue({ data: hostRows, isLoading: false, isError: false });
+    const { rerender } = render(
+      <MemoryRouter>
+        <Composer
+          {...composerProps({
+            agents: [{ id: "agent_native", name: "Native agent", mcp_servers: [] }],
+          })}
+        />
+      </MemoryRouter>,
+    );
+    fireEvent.change(textarea(), { target: { value: "/mcp" } });
+
+    expect(screen.getByTestId("mcp-server-row-github")).toHaveTextContent("Connected");
+    const linear = screen.getByTestId("mcp-server-row-linear");
+    expect(linear).toHaveTextContent("Sign-in required");
+    // The host's own sign-in page opens in a new tab; nothing runs in the composer.
+    const signIn = within(linear).getByRole("link", { name: "Sign in" });
+    expect(signIn).toHaveAttribute("href", "https://auth.example.com/start?state=abc");
+    expect(signIn).toHaveAttribute("target", "_blank");
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+    expect(screen.getByTestId("mcp-server-row-local-files")).not.toHaveTextContent("Sign-in");
+    expect(hostMcpQueryMock).toHaveBeenLastCalledWith("host_native", true, {
+      refetchInterval: 5000,
+    });
+
+    // Once the host reports the account connected, the row follows and polling stops.
+    hostMcpQueryMock.mockReturnValue({
+      data: hostRows.map((row) =>
+        row.name === "linear" ? { ...row, auth_status: "connected", sign_in_url: null } : row,
+      ),
+      isLoading: false,
+      isError: false,
+    });
+    rerender(
+      <MemoryRouter>
+        <Composer
+          {...composerProps({
+            agents: [{ id: "agent_native", name: "Native agent", mcp_servers: [] }],
+          })}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("mcp-server-row-linear")).toHaveTextContent("Connected");
+    expect(screen.queryByRole("link", { name: "Sign in" })).toBeNull();
+    expect(hostMcpQueryMock).toHaveBeenLastCalledWith("host_native", true, {
+      refetchInterval: false,
+    });
+  });
+
   it.each(["claude-native", "codex-native", "cursor-native"] as const)(
     "keeps host status unknown until a routing host is available for %s",
     (harness) => {
@@ -3728,7 +3799,7 @@ describe("Composer MCP status command", () => {
       expect(panel).toHaveTextContent("known-agent-server");
       expect(panel).toHaveTextContent("Host MCP servers unavailable");
       expect(panel).not.toHaveTextContent("No MCP servers enabled");
-      expect(hostMcpQueryMock).toHaveBeenLastCalledWith(null, true);
+      expect(hostMcpQueryMock).toHaveBeenLastCalledWith(null, true, { refetchInterval: false });
       rerender(
         <MemoryRouter>
           <Composer {...composerProps({ agents: [] })} />
@@ -3740,7 +3811,9 @@ describe("Composer MCP status command", () => {
 
       hostMcpQueryMock.mockReturnValue({ data: undefined, isLoading: true, isError: false });
       act(() => setSessionHost("conv_mcp", "late-host"));
-      expect(hostMcpQueryMock).toHaveBeenLastCalledWith("late-host", true);
+      expect(hostMcpQueryMock).toHaveBeenLastCalledWith("late-host", true, {
+        refetchInterval: false,
+      });
       expect(panel).toHaveTextContent("Loading MCP servers…");
       expect(panel).not.toHaveTextContent("Host MCP servers unavailable");
       act(() => setSessionHost("conv_mcp", null));

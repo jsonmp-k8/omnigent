@@ -272,6 +272,24 @@ describe("/mcp panel connection state", () => {
     expect(screen.getByRole("button", { name: "Sign in" })).toBeDisabled();
   });
 
+  it("opens a host-managed sign-in page in a new tab", () => {
+    renderPanel({
+      mcpServers: [
+        {
+          name: "linear",
+          connection: "sign-in-required",
+          signInUrl: "https://auth.example.com/start",
+        },
+      ],
+      onMcpSignIn: vi.fn(),
+    });
+    const link = screen.getByRole("link", { name: "Sign in" });
+    expect(link).toHaveAttribute("href", "https://auth.example.com/start");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+  });
+
   it("sends a token- or workspace-based service to Settings instead of a popup", () => {
     renderPanel({
       mcpServers: [{ name: "wiki", connection: "sign-in-required", signInHref: "/settings/mcp" }],

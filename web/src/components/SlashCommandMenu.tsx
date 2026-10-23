@@ -163,6 +163,8 @@ export interface McpServerRow {
   connection?: McpServerConnection;
   /** Where to sign in when it cannot happen in place (token or workspace entry). */
   signInHref?: string;
+  /** External page that completes the sign-in, opened in a new tab (host-managed servers). */
+  signInUrl?: string;
 }
 
 /** A sign-in that failed for one `/mcp` row. */
@@ -249,6 +251,18 @@ function McpSignInAction({
   disabled: boolean;
   onSignIn?: (name: string) => void;
 }) {
+  if (server.signInUrl)
+    return (
+      <a
+        href={server.signInUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        data-testid={`mcp-sign-in-url-${server.name}`}
+        className="flex shrink-0 items-center rounded-md border border-border px-2 py-0.5 text-xs text-foreground hover:bg-muted dark:hover:bg-muted/50"
+      >
+        Sign in
+      </a>
+    );
   if (server.signInHref)
     return (
       <Link

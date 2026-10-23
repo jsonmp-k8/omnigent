@@ -1126,7 +1126,8 @@ class HostMcpServersFrame:
 
 @dataclass
 class HostMcpServersResultFrame:
-    """Host → server: MCP server names and metadata, never env, args, or URLs."""
+    """Host → server: MCP server names, metadata and reported account state; never env,
+    args, or server URLs (a ``sign_in_url`` is the only URL, and only when sign-in is due)."""
 
     request_id: str
     status: str

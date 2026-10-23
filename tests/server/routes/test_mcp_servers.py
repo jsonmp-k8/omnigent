@@ -93,9 +93,59 @@ async def test_owner_gets_host_inventory(
     assert response.status_code == status
     if status == 200:
         assert response.json() == {
-            "mcp_servers": [{**_GITHUB, "plugin": None, "url_host": None, "source_id": None}]
+            "mcp_servers": [
+                {
+                    **_GITHUB,
+                    "plugin": None,
+                    "url_host": None,
+                    "source_id": None,
+                    "auth_status": None,
+                    "sign_in_url": None,
+                }
+            ]
         }
     assert not conn.pending_mcp_servers
+
+
+@pytest.mark.parametrize(
+    "reported,expected",
+    [
+        (
+            {"auth_status": "sign_in_required", "sign_in_url": "https://auth.example.com/go"},
+            {"auth_status": "sign_in_required", "sign_in_url": "https://auth.example.com/go"},
+        ),
+        ({"auth_status": "connected"}, {"auth_status": "connected", "sign_in_url": None}),
+        # A URL is only passed on while sign-in is due, and only when a browser can open it.
+        (
+            {"auth_status": "connected", "sign_in_url": "https://auth.example.com/go"},
+            {"auth_status": "connected", "sign_in_url": None},
+        ),
+        (
+            {"auth_status": "sign_in_required", "sign_in_url": "javascript:alert(1)"},
+            {"auth_status": "sign_in_required", "sign_in_url": None},
+        ),
+    ],
+)
+async def test_account_state_passes_through_with_a_guarded_sign_in_url(
+    mcp_app, reported: dict[str, str], expected: dict[str, str | None]
+) -> None:
+    app, registry, _ = mcp_app
+    conn = _register(registry, CAP_MCP_INVENTORY)
+    async with _client(app) as client:
+        task = asyncio.create_task(
+            client.get(f"/v1/hosts/{_HOST_ID}/mcp-servers", headers={"x-test-user": "owner"})
+        )
+        frame = decode_host_frame((await asyncio.wait_for(conn.outbound_queue.get(), 2)).data)
+        assert isinstance(frame, HostMcpServersFrame)
+        conn.pending_mcp_servers[frame.request_id].set_result(
+            HostMcpServersResultFrame(
+                frame.request_id, "ok", mcp_servers=[{**_GITHUB, **reported}]
+            )
+        )
+        response = await task
+    assert response.status_code == 200
+    server = response.json()["mcp_servers"][0]
+    assert {key: server[key] for key in expected} == expected
 
 
 @pytest.mark.parametrize("user,status", [("stranger", 403), (None, 401)])
