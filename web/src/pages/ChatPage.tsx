@@ -202,6 +202,7 @@ import { useFileDropTarget } from "@/hooks/useFileDropTarget";
 import { useComposerAttachments } from "@/hooks/useComposerAttachments";
 import { useSlashCompletion } from "@/hooks/useSlashCompletion";
 import { isBrandHarness, useHostMcpServers } from "@/hooks/useHarnessInventory";
+import { useMcpRegistryCatalog, useRegistrySignIn } from "@/hooks/useMcpRegistry";
 import {
   getSessionHost,
   sessionRoutingHostId,
@@ -209,6 +210,7 @@ import {
 } from "@/lib/sessionHost";
 import { HostBadge } from "@/components/HostBadge";
 import {
+  type McpServerRow,
   BUILTIN_SLASH_COMMANDS,
   isSlashCommandText,
   matchSlashCommandInvocation,
@@ -2491,7 +2493,7 @@ function ComposerImpl(
     hostMcpRoutingId,
     mcpPanelRequested && hostMcpHarness !== null,
   );
-  const mcpServersStatus =
+  const hostMcpStatus =
     hostMcpHarness === null
       ? undefined
       : hostMcpRoutingId === null
@@ -3164,8 +3166,30 @@ function ComposerImpl(
   );
   const skillLabels = useMemo(() => skillDisplayNames(skills, skillPrefix), [skills, skillPrefix]);
   const selectedAgent = agents?.find((agent) => agent.id === boundAgentId);
+  const composerServerInfo = useServerInfo();
+  const registryEnabled =
+    composerServerInfo !== "loading" && !!composerServerInfo.enabled_connections?.includes("mcp");
+  const hasRegistryServers =
+    registryEnabled &&
+    (selectedAgent?.mcp_servers ?? []).some((server) => server.transport === "registry");
+  // The registry's per-account state tells a row "connected" from "sign-in
+  // required"; it is only read while the panel is showing a registry row.
+  const registryCatalog = useMcpRegistryCatalog(mcpPanelRequested && hasRegistryServers);
+  const registrySignIn = useRegistrySignIn(registryCatalog.refresh);
+  const onMcpSignIn = useCallback(
+    (name: string) => {
+      const service = registryCatalog.services.find((s) => s.id === name);
+      if (service) void registrySignIn.signIn(service);
+    },
+    [registryCatalog.services, registrySignIn],
+  );
+  const mcpServersStatus =
+    hostMcpStatus ??
+    (hasRegistryServers && registryCatalog.error
+      ? "Couldn’t check MCP service connections."
+      : undefined);
   const mcpServers = useMemo(() => {
-    const byName = new Map(
+    const byName = new Map<string, McpServerRow>(
       (hostMcpQuery.data ?? [])
         .filter((server) => server.harness === hostMcpHarness)
         .map((server) => [
@@ -3179,11 +3203,36 @@ function ComposerImpl(
           },
         ]),
     );
+    const catalogLoaded = !registryCatalog.loading && !registryCatalog.error;
     for (const server of selectedAgent?.mcp_servers ?? []) {
-      byName.set(server.name, { name: server.name, description: server.description ?? undefined });
+      const row: McpServerRow = {
+        name: server.name,
+        description: server.description ?? undefined,
+      };
+      if (hasRegistryServers && server.transport === "registry") {
+        const service = registryCatalog.services.find((s) => s.id === server.name);
+        if (service) {
+          row.description = service.description || row.description;
+          row.connection = service.connected ? "connected" : "sign-in-required";
+          // A token or workspace URL has to be typed, which the panel has no room for.
+          if (!service.connected && (service.auth === "bearer" || service.auth === "databricks"))
+            row.signInHref = "/settings/mcp";
+        } else if (catalogLoaded) {
+          row.connection = "unavailable";
+        }
+      }
+      byName.set(server.name, row);
     }
     return [...byName.values()];
-  }, [hostMcpHarness, hostMcpQuery.data, selectedAgent?.mcp_servers]);
+  }, [
+    hasRegistryServers,
+    hostMcpHarness,
+    hostMcpQuery.data,
+    registryCatalog.error,
+    registryCatalog.loading,
+    registryCatalog.services,
+    selectedAgent?.mcp_servers,
+  ]);
 
   const slashCompletionCommands = mcpPanelRequested
     ? { "/mcp": BUILTIN_SLASH_COMMANDS["/mcp"]! }
@@ -3804,6 +3853,13 @@ function ComposerImpl(
                   mcpServers={mcpServers}
                   mcpServersStatus={mcpServersStatus}
                   mcpSettingsHref={mcpSettingsHref}
+                  onMcpSignIn={onMcpSignIn}
+                  mcpAuthorizingName={registrySignIn.authorizing}
+                  mcpSignInError={
+                    registrySignIn.error
+                      ? { name: registrySignIn.error.id, message: registrySignIn.error.message }
+                      : null
+                  }
                 />
               )}
               {/* "@"-file-mention browser — native coding-agent sessions only.

@@ -33,6 +33,7 @@ import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
 import * as host from "@/lib/host";
 import * as identity from "@/lib/identity";
+import { authorizeRegistryService, registryRequest } from "@/lib/mcpRegistry";
 import {
   getSessionModelLabelCacheKey,
   readSessionModelLabelCache,
@@ -56,6 +57,11 @@ vi.mock("@/hooks/useWorkspaceChangedFiles", async (importOriginal) => {
 
 // ComposerStatusLine's PR link reads GitHub info via a TanStack query; stub it
 // (default: no PR) so bare Composer renders don't need a QueryClientProvider.
+vi.mock("@/lib/mcpRegistry", () => ({
+  registryRequest: vi.fn(),
+  authorizeRegistryService: vi.fn(),
+}));
+
 vi.mock("@/hooks/usePullRequests", () => ({
   usePullRequestInfo: () => ({ data: undefined }),
 }));
@@ -3025,6 +3031,112 @@ describe("Composer MCP status command", () => {
     fireEvent.keyDown(textarea(), { key: "Enter" });
     expect(textarea()).toHaveValue("/mcp");
     expect(onSendSlashCommand).not.toHaveBeenCalled();
+  });
+
+  const trackerService = {
+    id: "tracker",
+    title: "Tracker",
+    description: "Work tracker tools",
+    auth: "oauth" as const,
+    connected: false,
+    tools: ["search"],
+    connect_provider: "mcp-tracker",
+  };
+
+  function renderWithRegistry(agentServers: { name: string; transport: string }[]) {
+    setComposerState({ boundAgentId: "agent_registry" });
+    return render(
+      <CapabilitiesProvider info={{ ...FALLBACK_SERVER_INFO, enabled_connections: ["mcp"] }}>
+        <MemoryRouter>
+          <Composer
+            {...composerProps({
+              agents: [{ id: "agent_registry", name: "Registry agent", mcp_servers: agentServers }],
+              selectedAgentId: "agent_registry",
+            })}
+          />
+        </MemoryRouter>
+      </CapabilitiesProvider>,
+    );
+  }
+
+  it("marks a registry service that needs sign-in and signs it in from the panel", async () => {
+    vi.mocked(registryRequest).mockReset();
+    vi.mocked(authorizeRegistryService).mockReset();
+    vi.mocked(registryRequest).mockResolvedValue({ data: [trackerService] });
+    let finishSignIn!: () => void;
+    vi.mocked(authorizeRegistryService).mockReturnValue(
+      new Promise<void>((resolve) => {
+        finishSignIn = resolve;
+      }),
+    );
+    renderWithRegistry([
+      { name: "tracker", transport: "registry" },
+      { name: "local-files", transport: "stdio" },
+    ]);
+
+    fireEvent.change(textarea(), { target: { value: "/mcp" } });
+    const tracker = await screen.findByTestId("mcp-server-row-tracker");
+    expect(tracker).toHaveTextContent("Work tracker tools");
+    expect(tracker).toHaveTextContent("Sign-in required");
+    // A custom server has no account state and no action.
+    expect(screen.getByTestId("mcp-server-row-local-files")).not.toHaveTextContent("Sign-in");
+    expect(screen.getAllByRole("button", { name: "Sign in" })).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(authorizeRegistryService).toHaveBeenCalledWith(
+      trackerService,
+      expect.any(AbortSignal),
+      undefined,
+    );
+    expect(await screen.findByRole("button", { name: "Signing in…" })).toBeDisabled();
+
+    vi.mocked(registryRequest).mockResolvedValue({
+      data: [{ ...trackerService, connected: true }],
+    });
+    await act(async () => finishSignIn());
+    await waitFor(() =>
+      expect(screen.getByTestId("mcp-server-row-tracker")).toHaveTextContent("Connected"),
+    );
+    expect(screen.queryByRole("button", { name: /Sign/ })).toBeNull();
+  });
+
+  it("reports a cancelled sign-in on the row and lets the user retry", async () => {
+    vi.mocked(registryRequest).mockReset();
+    vi.mocked(authorizeRegistryService).mockReset();
+    vi.mocked(registryRequest).mockResolvedValue({ data: [trackerService] });
+    vi.mocked(authorizeRegistryService).mockRejectedValue(
+      new Error("Sign-in cancelled. Try again when ready."),
+    );
+    renderWithRegistry([{ name: "tracker", transport: "registry" }]);
+
+    fireEvent.change(textarea(), { target: { value: "/mcp" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Sign-in cancelled");
+    expect(screen.getByRole("button", { name: "Sign in" })).not.toBeDisabled();
+  });
+
+  it("does not read the registry when the server has it off or no row needs it", () => {
+    vi.mocked(registryRequest).mockReset();
+    setComposerState({ boundAgentId: "agent_registry" });
+    render(
+      <MemoryRouter>
+        <Composer
+          {...composerProps({
+            agents: [
+              {
+                id: "agent_registry",
+                name: "Registry agent",
+                mcp_servers: [{ name: "tracker", transport: "registry" }],
+              },
+            ],
+            selectedAgentId: "agent_registry",
+          })}
+        />
+      </MemoryRouter>,
+    );
+    fireEvent.change(textarea(), { target: { value: "/mcp" } });
+    expect(screen.getByTestId("mcp-server-row-tracker")).not.toHaveTextContent("Sign-in");
+    expect(registryRequest).not.toHaveBeenCalled();
   });
 
   it("shows an empty state and stays absent before the session starts", () => {

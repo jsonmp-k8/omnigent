@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { registryRequest, type RegistryService } from "@/lib/mcpRegistry";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { authorizeRegistryService, registryRequest, type RegistryService } from "@/lib/mcpRegistry";
 import { readLastMcpServices, writeLastMcpServices } from "@/lib/mcpPreferences";
 
 export function useMcpRegistryCatalog(enabled = true) {
@@ -65,4 +65,48 @@ export function useMcpRegistrySelection(draft: string[] | undefined, enabled: bo
       ? selected.filter((id) => catalog.services.some((service) => service.id === id))
       : [],
   };
+}
+
+/** Sign-in failure for one service, kept apart from the catalog's own load error. */
+export interface RegistrySignInError {
+  id: string;
+  message: string;
+}
+
+/**
+ * Run the popup sign-in for a registry service, then re-read the catalog so the
+ * caller sees the service flip to connected. One sign-in at a time: starting
+ * another aborts the one in flight, and unmounting aborts it too.
+ */
+export function useRegistrySignIn(refresh: () => Promise<RegistryService[] | undefined>) {
+  const [authorizing, setAuthorizing] = useState<string | null>(null);
+  const [error, setError] = useState<RegistrySignInError | null>(null);
+  const authorization = useRef<AbortController | null>(null);
+  useEffect(() => () => authorization.current?.abort(), []);
+  const signIn = useCallback(
+    async (service: RegistryService, workspaceUrl?: string): Promise<boolean> => {
+      authorization.current?.abort();
+      const controller = new AbortController();
+      authorization.current = controller;
+      setAuthorizing(service.id);
+      setError(null);
+      try {
+        await authorizeRegistryService(service, controller.signal, workspaceUrl);
+        const updated = await refresh();
+        if (!updated?.find((s) => s.id === service.id)?.connected) {
+          throw new Error("Account is not connected. Please try again.");
+        }
+        return !controller.signal.aborted;
+      } catch (e) {
+        if (!controller.signal.aborted) {
+          setError({ id: service.id, message: e instanceof Error ? e.message : "Sign-in failed" });
+        }
+        return false;
+      } finally {
+        if (!controller.signal.aborted) setAuthorizing(null);
+      }
+    },
+    [refresh],
+  );
+  return { signIn, authorizing, error };
 }
