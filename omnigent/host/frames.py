@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from os import PathLike
 from typing import Any, NoReturn
+from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
@@ -1126,8 +1127,7 @@ class HostMcpServersFrame:
 
 @dataclass
 class HostMcpServersResultFrame:
-    """Host → server: MCP server names, metadata and reported account state; never env,
-    args, or server URLs (a ``sign_in_url`` is the only URL, and only when sign-in is due)."""
+    """Host → server: MCP server metadata and account state; no env, args, or server URLs."""
 
     request_id: str
     status: str
@@ -2916,6 +2916,33 @@ def _decode_skills_result(msg: _JsonObject) -> HostSkillsResultFrame:
 
 _MCP_SERVER_FIELDS = ("name", "harness", "transport", "scope")
 _MCP_SERVER_OPTIONAL_FIELDS = ("plugin", "url_host", "source_id")
+#: Account states a host may report. Anything else is dropped rather than rejected, so a
+#: newer host reporting a state this build does not know degrades to "no state reported".
+MCP_AUTH_STATUSES = ("connected", "sign_in_required")
+
+
+def mcp_account_fields(auth_status: object, sign_in_url: object) -> dict[str, str]:
+    """Validate one server's reported account state, the only account data hosts send.
+
+    Shared by the host that reports the state and the server that decodes it, so the
+    rule that a client may be handed a URL to open lives in one place.
+
+    :param auth_status: Reported state; only :data:`MCP_AUTH_STATUSES` survive.
+    :param sign_in_url: Reported sign-in page; kept only while sign-in is due and only
+        when it is an absolute ``http(s)`` URL a browser can open.
+    :returns: The fields to publish, empty when nothing valid was reported.
+    """
+    if auth_status not in MCP_AUTH_STATUSES:
+        return {}
+    fields = {"auth_status": str(auth_status)}
+    if auth_status == "sign_in_required" and isinstance(sign_in_url, str):
+        try:
+            parts = urlsplit(sign_in_url)
+        except ValueError:
+            return fields
+        if parts.scheme in ("http", "https") and parts.netloc:
+            fields["sign_in_url"] = sign_in_url
+    return fields
 
 
 def _decode_mcp_servers_result(msg: _JsonObject) -> HostMcpServersResultFrame:
@@ -2932,6 +2959,7 @@ def _decode_mcp_servers_result(msg: _JsonObject) -> HostMcpServersResultFrame:
             value = _optional_nullable_str(server, key)
             if value is not None:
                 summary[key] = value
+        summary.update(mcp_account_fields(server.get("auth_status"), server.get("sign_in_url")))
         servers.append(summary)
     return HostMcpServersResultFrame(
         request_id=_required_str(msg, "request_id"),

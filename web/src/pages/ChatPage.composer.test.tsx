@@ -3341,6 +3341,14 @@ describe("Composer MCP status command", () => {
     expect(onSendSlashCommand).not.toHaveBeenCalled();
   });
 
+  /** What the composer told the inventory hook to do about re-reading, given its data. */
+  function hostPollInterval(servers: UseHarnessInventoryModule.HostMcpServer[]): number | false {
+    const calls = hostMcpQueryMock.mock.calls as unknown as unknown[][];
+    const decide = calls.at(-1)?.[2];
+    if (typeof decide !== "function") throw new Error("no refetch decision passed");
+    return (decide as (s: UseHarnessInventoryModule.HostMcpServer[]) => number | false)(servers);
+  }
+
   const trackerService = {
     id: "tracker",
     title: "Tracker",
@@ -3644,7 +3652,7 @@ describe("Composer MCP status command", () => {
     expect(panel).toHaveTextContent("host-only");
     expect(panel).toHaveTextContent("agent-only");
     expect(panel).not.toHaveTextContent("github");
-    expect(hostMcpQueryMock).toHaveBeenCalledWith("host_native", true, { refetchInterval: false });
+    expect(hostMcpQueryMock).toHaveBeenCalledWith("host_native", true, expect.any(Function));
     await user.click(textarea());
     await user.pointer({ target: panel, keys: "[MouseLeft>]" });
     expect(textarea()).toHaveFocus();
@@ -3746,18 +3754,13 @@ describe("Composer MCP status command", () => {
     expect(signIn).toHaveAttribute("target", "_blank");
     expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
     expect(screen.getByTestId("mcp-server-row-local-files")).not.toHaveTextContent("Sign-in");
-    expect(hostMcpQueryMock).toHaveBeenLastCalledWith("host_native", true, {
-      refetchInterval: 5000,
-    });
+    expect(hostPollInterval(hostRows)).toBe(5000);
 
     // Once the host reports the account connected, the row follows and polling stops.
-    hostMcpQueryMock.mockReturnValue({
-      data: hostRows.map((row) =>
-        row.name === "linear" ? { ...row, auth_status: "connected", sign_in_url: null } : row,
-      ),
-      isLoading: false,
-      isError: false,
-    });
+    const connected = hostRows.map((row) =>
+      row.name === "linear" ? { ...row, auth_status: "connected", sign_in_url: null } : row,
+    ) satisfies UseHarnessInventoryModule.HostMcpServer[];
+    hostMcpQueryMock.mockReturnValue({ data: connected, isLoading: false, isError: false });
     rerender(
       <MemoryRouter>
         <Composer
@@ -3769,9 +3772,11 @@ describe("Composer MCP status command", () => {
     );
     expect(screen.getByTestId("mcp-server-row-linear")).toHaveTextContent("Connected");
     expect(screen.queryByRole("link", { name: "Sign in" })).toBeNull();
-    expect(hostMcpQueryMock).toHaveBeenLastCalledWith("host_native", true, {
-      refetchInterval: false,
-    });
+    expect(hostPollInterval(connected)).toBe(false);
+
+    // Closing the panel disables the read, so a pending sign-in stops polling too.
+    fireEvent.change(textarea(), { target: { value: "" } });
+    expect(hostMcpQueryMock).toHaveBeenLastCalledWith("host_native", false, expect.any(Function));
   });
 
   it.each(["claude-native", "codex-native", "cursor-native"] as const)(
@@ -3799,7 +3804,7 @@ describe("Composer MCP status command", () => {
       expect(panel).toHaveTextContent("known-agent-server");
       expect(panel).toHaveTextContent("Host MCP servers unavailable");
       expect(panel).not.toHaveTextContent("No MCP servers enabled");
-      expect(hostMcpQueryMock).toHaveBeenLastCalledWith(null, true, { refetchInterval: false });
+      expect(hostMcpQueryMock).toHaveBeenLastCalledWith(null, true, expect.any(Function));
       rerender(
         <MemoryRouter>
           <Composer {...composerProps({ agents: [] })} />
@@ -3811,9 +3816,7 @@ describe("Composer MCP status command", () => {
 
       hostMcpQueryMock.mockReturnValue({ data: undefined, isLoading: true, isError: false });
       act(() => setSessionHost("conv_mcp", "late-host"));
-      expect(hostMcpQueryMock).toHaveBeenLastCalledWith("late-host", true, {
-        refetchInterval: false,
-      });
+      expect(hostMcpQueryMock).toHaveBeenLastCalledWith("late-host", true, expect.any(Function));
       expect(panel).toHaveTextContent("Loading MCP servers…");
       expect(panel).not.toHaveTextContent("Host MCP servers unavailable");
       act(() => setSessionHost("conv_mcp", null));

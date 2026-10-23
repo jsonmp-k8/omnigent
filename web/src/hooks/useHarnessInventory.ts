@@ -205,14 +205,15 @@ export function buildInventoryContext(
 export function useHostMcpServers(
   hostId: string | null,
   enabled = true,
-  options: { refetchInterval?: number | false } = {},
+  /** Re-read while this says so, judged from the servers last read (default: never). */
+  refetchInterval: (servers: HostMcpServer[] | undefined) => number | false = () => false,
 ) {
   return useQuery({
     queryKey: ["host-mcp-servers", hostId],
     queryFn:
       enabled && hostId !== null ? ({ signal }) => fetchMcpServers(hostId, signal) : skipToken,
     staleTime: 30_000,
-    refetchInterval: options.refetchInterval ?? false,
+    refetchInterval: (query) => refetchInterval(query.state.data),
   });
 }
 

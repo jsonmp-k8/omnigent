@@ -26,6 +26,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr(mcp_inventory, "_warned_auth_status", None)
     return home
 
 
@@ -248,31 +249,81 @@ def test_auth_status_entries_that_do_not_validate_are_dropped(home: Path, entry:
 
 
 @pytest.mark.parametrize(
-    "url", ["javascript:alert(1)", "file:///etc/passwd", "auth.example.com", "", 5]
+    "status,url,expected",
+    [
+        (
+            "sign_in_required",
+            "https://auth.example.com/go",
+            {"sign_in_url": "https://auth.example.com/go"},
+        ),
+        (
+            "sign_in_required",
+            "http://auth.example.com/go",
+            {"sign_in_url": "http://auth.example.com/go"},
+        ),
+        # Only a page a browser can open is passed on.
+        ("sign_in_required", "javascript:alert(1)", {}),
+        ("sign_in_required", "file:///etc/passwd", {}),
+        ("sign_in_required", "auth.example.com", {}),
+        ("sign_in_required", "//auth.example.com/go", {}),
+        ("sign_in_required", "http://[::1", {}),  # urlsplit raises on this
+        ("sign_in_required", "", {}),
+        ("sign_in_required", 5, {}),
+        # A connected account has nothing to sign in to.
+        ("connected", "https://auth.example.com/go", {}),
+    ],
 )
-def test_sign_in_url_must_be_an_http_url(home: Path, url: object) -> None:
+def test_only_an_openable_url_is_reported_and_only_while_sign_in_is_due(
+    home: Path, status: str, url: object, expected: dict[str, str]
+) -> None:
     _write_auth_status(
-        home,
-        [{"harness": "cursor", "name": "slack", "status": "sign_in_required", "sign_in_url": url}],
+        home, [{"harness": "cursor", "name": "slack", "status": status, "sign_in_url": url}]
     )
     assert read_auth_status_overlay(home) == {
-        ("cursor", "slack"): {"auth_status": "sign_in_required"}
+        ("cursor", "slack"): {"auth_status": status, **expected}
     }
 
 
-def test_sign_in_url_is_only_reported_while_sign_in_is_due(home: Path) -> None:
-    _write_auth_status(
-        home,
-        [
+def test_an_oversized_status_file_is_ignored(home: Path) -> None:
+    """The report is a short list; a huge file is not parsed on every poll."""
+    path = home / ".omnigent" / "mcp-auth-status.json"
+    path.parent.mkdir(parents=True)
+    padding = "x" * mcp_inventory.MCP_AUTH_STATUS_MAX_BYTES
+    path.write_text(
+        json.dumps(
             {
-                "harness": "cursor",
-                "name": "slack",
-                "status": "connected",
-                "sign_in_url": "https://x.y/",
+                "pad": padding,
+                "servers": [{"harness": "cursor", "name": "slack", "status": "connected"}],
             }
-        ],
+        )
     )
-    assert read_auth_status_overlay(home) == {("cursor", "slack"): {"auth_status": "connected"}}
+    assert path.stat().st_size > mcp_inventory.MCP_AUTH_STATUS_MAX_BYTES
+    assert read_auth_status_overlay(home) == {}
+
+
+def test_an_unusable_status_file_is_logged_once_per_change(
+    home: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The panel polls this file every few seconds; one bad write is one warning."""
+    path = home / ".omnigent" / "mcp-auth-status.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json")
+    with caplog.at_level("WARNING", logger="omnigent.host.mcp_inventory"):
+        for _ in range(3):
+            assert read_auth_status_overlay(home) == {}
+        assert len(caplog.records) == 1
+
+        # A later bad write is a new problem and is reported again.
+        path.write_text("{still not json either}")
+        assert read_auth_status_overlay(home) == {}
+        assert len(caplog.records) == 2
+
+        # Once it parses, the next bad write is reported rather than suppressed.
+        _write_auth_status(home, [])
+        assert read_auth_status_overlay(home) == {}
+        path.write_text("{broken again")
+        assert read_auth_status_overlay(home) == {}
+        assert len(caplog.records) == 3
 
 
 def test_malformed_or_missing_auth_status_file_changes_nothing(home: Path) -> None:

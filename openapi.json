@@ -3939,7 +3939,7 @@
                 "type": "null"
               }
             ],
-            "description": "Where the user finishes signing in; only with `sign_in_required` and only an http(s) URL.",
+            "description": "Where the user finishes signing in. Only set with `sign_in_required`, and only to an http(s) URL; both are enforced where the host frame is decoded (`omnigent.host.frames.mcp_account_fields`).",
             "title": "Sign In Url"
           },
           "source_id": {

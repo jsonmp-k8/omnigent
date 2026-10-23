@@ -17,6 +17,7 @@ from omnigent.host.frames import (
     HostMcpServersFrame,
     HostMcpServersResultFrame,
     decode_host_frame,
+    encode_host_frame,
 )
 from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.server.routes.mcp_servers import (
@@ -107,45 +108,34 @@ async def test_owner_gets_host_inventory(
     assert not conn.pending_mcp_servers
 
 
-@pytest.mark.parametrize(
-    "reported,expected",
-    [
-        (
-            {"auth_status": "sign_in_required", "sign_in_url": "https://auth.example.com/go"},
-            {"auth_status": "sign_in_required", "sign_in_url": "https://auth.example.com/go"},
-        ),
-        ({"auth_status": "connected"}, {"auth_status": "connected", "sign_in_url": None}),
-        # A URL is only passed on while sign-in is due, and only when a browser can open it.
-        (
-            {"auth_status": "connected", "sign_in_url": "https://auth.example.com/go"},
-            {"auth_status": "connected", "sign_in_url": None},
-        ),
-        (
-            {"auth_status": "sign_in_required", "sign_in_url": "javascript:alert(1)"},
-            {"auth_status": "sign_in_required", "sign_in_url": None},
-        ),
-    ],
-)
-async def test_account_state_passes_through_with_a_guarded_sign_in_url(
-    mcp_app, reported: dict[str, str], expected: dict[str, str | None]
-) -> None:
+async def test_account_state_reaches_the_caller_through_the_tunnel(mcp_app) -> None:
+    """The route publishes what the host reported, decoded the way the tunnel decodes it."""
     app, registry, _ = mcp_app
     conn = _register(registry, CAP_MCP_INVENTORY)
+    reported = {
+        **_GITHUB,
+        "auth_status": "sign_in_required",
+        "sign_in_url": "https://auth.example.com/start",
+    }
     async with _client(app) as client:
         task = asyncio.create_task(
             client.get(f"/v1/hosts/{_HOST_ID}/mcp-servers", headers={"x-test-user": "owner"})
         )
         frame = decode_host_frame((await asyncio.wait_for(conn.outbound_queue.get(), 2)).data)
         assert isinstance(frame, HostMcpServersFrame)
-        conn.pending_mcp_servers[frame.request_id].set_result(
-            HostMcpServersResultFrame(
-                frame.request_id, "ok", mcp_servers=[{**_GITHUB, **reported}]
+        # Round-trip the host's answer so the decoder's allow-list is in the path.
+        answered = decode_host_frame(
+            encode_host_frame(
+                HostMcpServersResultFrame(frame.request_id, "ok", mcp_servers=[reported])
             )
         )
+        assert isinstance(answered, HostMcpServersResultFrame)
+        conn.pending_mcp_servers[frame.request_id].set_result(answered)
         response = await task
     assert response.status_code == 200
     server = response.json()["mcp_servers"][0]
-    assert {key: server[key] for key in expected} == expected
+    assert server["auth_status"] == "sign_in_required"
+    assert server["sign_in_url"] == "https://auth.example.com/start"
 
 
 @pytest.mark.parametrize("user,status", [("stranger", 403), (None, 401)])

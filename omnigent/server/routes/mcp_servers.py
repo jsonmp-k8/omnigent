@@ -5,10 +5,9 @@ from __future__ import annotations
 import asyncio
 import secrets
 from typing import Literal
-from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel
 
 from omnigent.host.frames import (
     CAP_MCP_INVENTORY,
@@ -36,8 +35,9 @@ class McpServerSummary(BaseModel):
     :param url_host: Hostname of a remote server, e.g. ``"mcp.linear.app"``.
     :param auth_status: Account state reported by the host's sign-in manager:
         ``connected`` or ``sign_in_required``; ``None`` when nothing reports one.
-    :param sign_in_url: Where the user finishes signing in; only with
-        ``sign_in_required`` and only an http(s) URL.
+    :param sign_in_url: Where the user finishes signing in. Only set with
+        ``sign_in_required``, and only to an http(s) URL; both are enforced where
+        the host frame is decoded (``omnigent.host.frames.mcp_account_fields``).
     """
 
     name: str
@@ -49,17 +49,6 @@ class McpServerSummary(BaseModel):
     url_host: str | None = None
     auth_status: Literal["connected", "sign_in_required"] | None = None
     sign_in_url: str | None = None
-
-    @model_validator(mode="after")
-    def _sign_in_url_only_when_due(self) -> McpServerSummary:
-        """Never hand the browser a URL to open unless sign-in is due and it is http(s)."""
-        url = self.sign_in_url
-        if url is not None:
-            parts = urlsplit(url)
-            opens = parts.scheme in ("http", "https") and bool(parts.netloc)
-            if self.auth_status != "sign_in_required" or not opens:
-                self.sign_in_url = None
-        return self
 
 
 class McpServersResponse(BaseModel):

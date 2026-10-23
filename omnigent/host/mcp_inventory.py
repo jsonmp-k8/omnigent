@@ -3,29 +3,16 @@
 Only names and non-secret metadata leave the inventory response: ``env``, headers, stdio
 ``command``/``args`` and full URLs routinely carry tokens, so they are dropped.
 
-Account state is not something the config files know. Whatever manages a server's
-sign-in on the host (an MCP proxy, a credential daemon) reports it through
-``~/.omnigent/mcp-auth-status.json``::
-
-    {
-        "servers": [
-            {
-                "harness": "claude",
-                "name": "linear",
-                "status": "sign_in_required",
-                "sign_in_url": "https://...",
-            }
-        ]
-    }
-
-``status`` is ``connected`` or ``sign_in_required``; ``sign_in_url`` is an http(s) URL
-the user opens to finish signing in and is only reported with ``sign_in_required``.
-Entries naming a server the inventory did not find are ignored. The file is re-read on
-every inventory request, so a change shows without waiting for the config rescan.
+Optional per-server account state is read from ``~/.omnigent/mcp-auth-status.json``,
+validated, matched to discovered servers, and re-read on every request. Any process
+running as this user can write that file, so it is trusted exactly as much as the
+harness configs beside it: it can mark a known server as needing sign-in and name an
+http(s) page for it, nothing more.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -36,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from omnigent.host.frames import mcp_account_fields
 from omnigent.spec.skill_sources import (
     SkillSourceContext,
     _enabled_plugin_keys,
@@ -51,7 +39,11 @@ MCP_INVENTORY_CACHE_TTL_SECONDS = 60.0
 OMNIGENT_RELAY_SERVER = "omnigent"
 #: Where a host-side sign-in manager reports per-server account state (under ``$HOME``).
 MCP_AUTH_STATUS_RELPATH = Path(".omnigent") / "mcp-auth-status.json"
-_AUTH_STATUSES = frozenset({"connected", "sign_in_required"})
+#: The report is a short list; a larger file is treated as unreadable rather than parsed
+#: on every poll.
+MCP_AUTH_STATUS_MAX_BYTES = 64 * 1024
+#: Signature of the file state already warned about, so a poll loop logs once per change.
+_warned_auth_status: tuple[int, int] | None = None
 
 McpServerSummary = dict[str, str]
 #: ``(harness, name)`` → the ``auth_status`` / ``sign_in_url`` keys to add to its summary.
@@ -208,40 +200,48 @@ def discover_mcp_servers() -> list[McpServerSummary]:
     return [server.summary for server in configured_mcp_servers()]
 
 
-def _sign_in_url(value: object) -> str | None:
-    """Accept only an absolute http(s) URL; anything else cannot be opened safely."""
-    if not isinstance(value, str):
-        return None
+def _read_auth_status(path: Path) -> Mapping[str, object] | None:
+    """Read the status report, logging once per file change when it cannot be used."""
+    global _warned_auth_status
     try:
-        parts = urlsplit(value)
-    except ValueError:
+        stat = path.stat()
+    except FileNotFoundError:
+        _warned_auth_status = None
         return None
-    return value if parts.scheme in ("http", "https") and parts.netloc else None
+    except OSError:
+        stat = None
+    data: object = None
+    if stat is not None and stat.st_size <= MCP_AUTH_STATUS_MAX_BYTES:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+    if isinstance(data, Mapping):
+        _warned_auth_status = None
+        return data
+    signature = (stat.st_mtime_ns, stat.st_size) if stat is not None else (0, 0)
+    if _warned_auth_status != signature:
+        _warned_auth_status = signature
+        _logger.warning("Skipping unusable MCP auth status at %s", path)
+    return None
 
 
 def read_auth_status_overlay(home: Path) -> AuthStatusOverlay:
     """Read the sign-in manager's report; entries that fail validation are dropped."""
-    path = home / MCP_AUTH_STATUS_RELPATH
-    data = _read_json(path)
-    if data is None:
-        if path.exists():
-            _logger.warning("Skipping unreadable MCP auth status at %s", path)
-        return {}
-    entries = data.get("servers")
+    data = _read_auth_status(home / MCP_AUTH_STATUS_RELPATH)
+    entries = data.get("servers") if data is not None else None
     if not isinstance(entries, list):
         return {}
     overlay: AuthStatusOverlay = {}
     for entry in entries:
         if not isinstance(entry, Mapping):
             continue
-        harness, name, status = entry.get("harness"), entry.get("name"), entry.get("status")
-        if not (isinstance(harness, str) and isinstance(name, str) and status in _AUTH_STATUSES):
+        harness, name = entry.get("harness"), entry.get("name")
+        if not (isinstance(harness, str) and isinstance(name, str)):
             continue
-        fields = {"auth_status": str(status)}
-        url = _sign_in_url(entry.get("sign_in_url")) if status == "sign_in_required" else None
-        if url is not None:
-            fields["sign_in_url"] = url
-        overlay[(harness, name)] = fields
+        fields = mcp_account_fields(entry.get("status"), entry.get("sign_in_url"))
+        if fields:
+            overlay[(harness, name)] = fields
     return overlay
 
 

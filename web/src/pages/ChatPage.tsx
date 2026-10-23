@@ -201,7 +201,7 @@ import { useMarkConversationSeen } from "@/hooks/useUnseenConversations";
 import { useFileDropTarget } from "@/hooks/useFileDropTarget";
 import { useComposerAttachments } from "@/hooks/useComposerAttachments";
 import { useSlashCompletion } from "@/hooks/useSlashCompletion";
-import { isBrandHarness, useHostMcpServers } from "@/hooks/useHarnessInventory";
+import { isBrandHarness, useHostMcpServers, type HostMcpServer } from "@/hooks/useHarnessInventory";
 import { useMcpRegistryCatalog, useRegistrySignIn } from "@/hooks/useMcpRegistry";
 import {
   getSessionHost,
@@ -343,11 +343,11 @@ export function isSubagentRoutingEligible(
   return smartRoutingEnabled(serverInfo) && isSubagentRoutingSession(session);
 }
 
-// Leading whitespace + the command token, so the composer overlay can tint
-// just the `/command` or `$skill` and leave args in the default color.
 /** How often `/mcp` re-reads the host inventory while a server waits on a sign-in. */
 const HOST_MCP_SIGN_IN_POLL_MS = 5_000;
 
+// Leading whitespace + the command token, so the composer overlay can tint
+// just the `/command` or `$skill` and leave args in the default color.
 const SLASH_COMMAND_SPLIT_RE = /^(\s*)([/$][A-Za-z0-9][\w:-]*)(?=\s|$)/;
 
 /**
@@ -2512,21 +2512,21 @@ function ComposerImpl(
   );
   const hostMcpRoutingId =
     sessionRoutingHostId(composerSession?.hostId, composerSession?.labels) ?? inheritedHostId;
-  // While a host server waits on a sign-in the user may be completing in another
-  // tab, poll so the row flips to connected without a reload.
-  const [hostSignInPending, setHostSignInPending] = useState(false);
+  // Poll while a host server awaits sign-in: the user completes it elsewhere.
   const hostMcpQuery = useHostMcpServers(
     hostMcpRoutingId,
     mcpPanelRequested && hostMcpHarness !== null,
-    { refetchInterval: mcpPanelRequested && hostSignInPending ? HOST_MCP_SIGN_IN_POLL_MS : false },
+    useCallback(
+      (servers: HostMcpServer[] | undefined) =>
+        servers?.some(
+          (server) =>
+            server.harness === hostMcpHarness && server.auth_status === "sign_in_required",
+        )
+          ? HOST_MCP_SIGN_IN_POLL_MS
+          : false,
+      [hostMcpHarness],
+    ),
   );
-  useEffect(() => {
-    setHostSignInPending(
-      (hostMcpQuery.data ?? []).some(
-        (server) => server.harness === hostMcpHarness && server.auth_status === "sign_in_required",
-      ),
-    );
-  }, [hostMcpHarness, hostMcpQuery.data]);
   const hostMcpStatus =
     hostMcpHarness === null
       ? undefined
@@ -3325,7 +3325,9 @@ function ComposerImpl(
                 : server.auth_status === "sign_in_required"
                   ? "sign-in-required"
                   : undefined,
-            signInUrl: server.sign_in_url ?? undefined,
+            // Only the host can say where its sign-in happens; without a URL the
+            // row reports the state and offers nothing to click.
+            signIn: server.sign_in_url ? { kind: "url", url: server.sign_in_url } : undefined,
           },
         ]),
     );
@@ -3342,9 +3344,13 @@ function ComposerImpl(
         if (service) {
           row.description = service.description || row.description;
           row.connection = service.connected ? "connected" : "sign-in-required";
-          // A token or workspace URL has to be typed, which the panel has no room for.
-          if (!service.connected && (service.auth === "bearer" || service.auth === "databricks"))
-            row.signInHref = "/settings/mcp";
+          if (!service.connected) {
+            // A token or workspace URL has to be typed, which the panel has no room for.
+            row.signIn =
+              service.auth === "bearer" || service.auth === "databricks"
+                ? { kind: "settings", href: "/settings/mcp" }
+                : { kind: "inline" };
+          }
         } else {
           row.connection = "unavailable";
         }
