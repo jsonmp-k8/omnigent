@@ -164,6 +164,24 @@ replaced item id) and carries the summary it continued from.
   import knows, since it validates every item before sending it. A `note` for
   a type that version does not know is kept in the file but refused on import.
 
+## The schema
+
+`schemas/omnigent.transcript.v1.schema.json` is the format as a JSON Schema
+(2020-12), published so other tools can produce and consume transcripts without
+reading this page. It describes one line: validate the first against the header
+branch and every later line against the entry branch.
+
+It is generated from the models, including the per-kind field rules that
+otherwise live in a validator, so a `tool_output` on a `message` fails schema
+validation exactly as it fails the reader:
+
+```sh
+python scripts/dump_transcript_schema.py   # after changing the models
+```
+
+A test regenerates it and compares, so the published file cannot drift from the
+code, and another validates a real export against it.
+
 ## Reading it back
 
 `omnigent session import -i FILE` recreates the session on the target server as
