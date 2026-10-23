@@ -6,6 +6,13 @@ export function useMcpRegistryCatalog(enabled = true) {
   const [services, setServices] = useState<RegistryService[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Re-enabling means a new open: mark the catalog stale during this render, before
+  // anything can read the previous open's services as current.
+  const [reading, setReading] = useState(enabled);
+  if (enabled !== reading) {
+    setReading(enabled);
+    if (enabled) setLoading(true);
+  }
   const request = useRef(0);
   const refresh = useCallback(async () => {
     // A focus refresh and a post-sign-in refresh can overlap; the newest read wins.
@@ -36,8 +43,6 @@ export function useMcpRegistryCatalog(enabled = true) {
   }, []);
   useEffect(() => {
     if (!enabled) return;
-    // A catalog from an earlier open is not current: reload before trusting it.
-    setLoading(true);
     void refresh();
     const onFocus = () => void refresh();
     window.addEventListener("focus", onFocus);

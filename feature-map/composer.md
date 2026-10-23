@@ -410,7 +410,8 @@ Other connection providers alone do not enable the managed MCP picker.
   token service, an unavailable service, a catalog read failure, and no
   registry read when the server has it off or no row needs it);
   `web/src/hooks/useMcpRegistry.test.tsx` covers the sign-in hook's abort and
-  confirmation paths. Manually, with the registry on, attach an OAuth service
+  confirmation paths, and a reopened panel shows no state from the previous
+  open. Manually, with the registry on, attach an OAuth service
   that is not connected, select `/mcp`, expect **Sign-in required** and
   **Sign in**, complete the popup and expect **Connected**; cancel it instead
   and expect the message on the row with Sign in still offered.

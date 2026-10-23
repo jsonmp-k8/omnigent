@@ -3336,8 +3336,10 @@ function ComposerImpl(
     clearText: () => setValue(""),
   });
   const showMcpServers = mcpPanelRequested && !slashCompletion.inline;
+  // Clear on both edges: a popup that rejects after the panel closes would
+  // otherwise greet the next open with a stale message.
   useEffect(() => {
-    if (!showMcpServers) clearRegistrySignInError();
+    clearRegistrySignInError();
   }, [showMcpServers, clearRegistrySignInError]);
 
   // Auto-grow the textarea from 1 row up to 10 rows, then let it scroll.

@@ -3440,6 +3440,47 @@ describe("Composer MCP status command", () => {
     },
   );
 
+  it("does not reuse the previous open's catalog when /mcp is reopened", async () => {
+    vi.mocked(registryRequest).mockReset();
+    vi.mocked(registryRequest).mockResolvedValue({ data: [trackerService] });
+    renderWithRegistry([{ name: "tracker", transport: "registry" }]);
+    fireEvent.change(textarea(), { target: { value: "/mcp" } });
+    expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
+
+    fireEvent.change(textarea(), { target: { value: "" } });
+    fireEvent.change(textarea(), { target: { value: "/mcp" } });
+
+    // The account may have been connected from Settings since the last open, so
+    // nothing from it is shown, not even for the frame before the new read lands.
+    expect(screen.getByTestId("mcp-server-row-tracker")).not.toHaveTextContent("Sign-in required");
+    expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+    expect(await screen.findByRole("button", { name: "Sign in" })).toBeInTheDocument();
+  });
+
+  it("does not greet the next open with a sign-in that failed after the panel closed", async () => {
+    vi.mocked(registryRequest).mockReset();
+    vi.mocked(authorizeRegistryService).mockReset();
+    vi.mocked(registryRequest).mockResolvedValue({ data: [trackerService] });
+    let rejectPopup!: (error: Error) => void;
+    vi.mocked(authorizeRegistryService).mockReturnValue(
+      new Promise<void>((_resolve, reject) => {
+        rejectPopup = reject;
+      }),
+    );
+    renderWithRegistry([{ name: "tracker", transport: "registry" }]);
+    fireEvent.change(textarea(), { target: { value: "/mcp" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
+
+    fireEvent.change(textarea(), { target: { value: "" } });
+    await act(async () => {
+      rejectPopup(new Error("Sign-in cancelled. Try again when ready."));
+    });
+    fireEvent.change(textarea(), { target: { value: "/mcp" } });
+
+    await screen.findByTestId("mcp-server-row-tracker");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("shows no account state until a catalog read from this open has landed", () => {
     vi.mocked(registryRequest).mockReset();
     // Still in flight: a state left from an earlier open would offer a popup
