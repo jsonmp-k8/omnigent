@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import zlib
 from collections.abc import AsyncIterator
 from typing import Literal
 
@@ -60,6 +61,18 @@ from omnigent.stores.permission_store import PermissionStore
 
 #: Items per page when streaming an export; one store round trip per page.
 _EXPORT_PAGE_SIZE = 500
+#: ``zlib`` with a gzip wrapper, so the bytes are a ``.gz`` file rather than raw deflate.
+_GZIP_WBITS = 16 + zlib.MAX_WBITS
+
+
+async def _gzipped(lines: AsyncIterator[str]) -> AsyncIterator[bytes]:
+    """Compress a line stream as it is produced, so a long session never buffers."""
+    compressor = zlib.compressobj(wbits=_GZIP_WBITS)
+    async for line in lines:
+        chunk = compressor.compress(line.encode("utf-8"))
+        if chunk:
+            yield chunk
+    yield compressor.flush()
 
 
 class _NdjsonResponse(StreamingResponse):
@@ -98,6 +111,7 @@ def register_items_routes(
         request: Request,
         session_id: str,
         content: Literal["full", "none"] = Query(default="full"),
+        compress: Literal["none", "gzip"] = Query(default="none"),
     ) -> StreamingResponse:
         """
         Stream the session as a portable, versioned transcript.
@@ -118,6 +132,10 @@ def register_items_routes(
             call ids, timing and the ``sealed`` markers, with every
             content field dropped and ``redacted`` set in the header. Such a
             file is not importable.
+        :param compress: ``"gzip"`` returns the same transcript gzipped, as
+            ``<session_id>.jsonl.gz``. Sent as ``application/gzip`` rather than
+            a content encoding, so the download is the compressed file itself
+            rather than something the browser silently expands.
         :returns: An ``application/x-ndjson`` download named
             ``<session_id>.jsonl``.
         :raises OmnigentError: 404 when no such session exists or the caller
@@ -189,6 +207,12 @@ def register_items_routes(
                     )
                 after = page.last_id
 
+        if compress == "gzip":
+            return StreamingResponse(
+                _gzipped(_lines()),
+                media_type="application/gzip",
+                headers={"Content-Disposition": _attachment_disposition(f"{conv.id}.jsonl.gz")},
+            )
         return _NdjsonResponse(
             _lines(),
             headers={"Content-Disposition": _attachment_disposition(f"{conv.id}.jsonl")},

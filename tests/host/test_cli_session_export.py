@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ import httpx
 import respx
 from click.testing import CliRunner
 
-from omnigent.cli import cli
+from omnigent.cli import _read_session_export, cli
 from omnigent.export import CONTENT_FIELDS
 from omnigent.util.server_url import ServerUrl
 
@@ -169,6 +170,57 @@ def test_session_export_redact_writes_shape_without_content(tmp_path: Path) -> N
     assert [(e["turn"], e["seq"]) for e in entries] == [(1, 1), (1, 2)]
     assert all(not CONTENT_FIELDS & e.keys() for e in entries)
     assert "hi there" not in text
+
+
+@respx.mock
+def test_session_export_gzip_writes_an_archive_import_can_read(tmp_path: Path) -> None:
+    """``--gzip`` is a smaller file, not a different one."""
+    respx.get(f"{_BASE}/v1/sessions/conv_abc123").mock(
+        return_value=httpx.Response(200, json=_SESSION_META)
+    )
+    respx.get(f"{_BASE}/v1/sessions/conv_abc123/items").mock(
+        return_value=httpx.Response(200, json=_ITEMS_PAGE)
+    )
+
+    out_file = tmp_path / "out.jsonl.gz"
+    runner = CliRunner()
+    with _patch_server():
+        result = runner.invoke(
+            cli,
+            ["session", "export", "--id", "conv_abc123", "--output", str(out_file), "--gzip"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert out_file.read_bytes()[:2] == b"\x1f\x8b"
+    lines = [
+        json.loads(line)
+        for line in gzip.decompress(out_file.read_bytes()).decode().splitlines()
+        if line
+    ]
+    assert lines[0]["session"] == "conv_abc123"
+    assert [e["kind"] for e in lines[1:]] == ["message", "message"]
+
+    # The importer reads it without being told it is compressed.
+    meta, restored = _read_session_export(out_file)
+    assert meta["id"] == "conv_abc123"
+    assert len(restored) == 2
+
+
+@respx.mock
+def test_session_export_gzip_default_filename(tmp_path: Path) -> None:
+    """The default name says what the file is."""
+    respx.get(f"{_BASE}/v1/sessions/conv_abc123").mock(
+        return_value=httpx.Response(200, json=_SESSION_META)
+    )
+    respx.get(f"{_BASE}/v1/sessions/conv_abc123/items").mock(
+        return_value=httpx.Response(200, json=_ITEMS_PAGE)
+    )
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path), _patch_server():
+        result = runner.invoke(cli, ["session", "export", "--id", "conv_abc123", "--gzip"])
+        assert result.exit_code == 0, result.output
+        assert Path("conv_abc123.jsonl.gz").exists()
 
 
 @respx.mock

@@ -56,6 +56,8 @@ the header menu), and each place is a separate entry point.
   `omnigent session import` (`docs/session-export.md`). A redacted export
   (`--redact`, or `?content=none`) writes the session's shape with every
   content field dropped and `redacted` in the header; import refuses it.
+  `--gzip` (or `?compress=gzip`) writes the same transcript compressed, which
+  import reads back by inspecting the file's bytes rather than its name.
 - `unread`: Mark as unread flags a session to revisit and survives a reload,
   including for the session being viewed. Its dot appears once the turn is
   idle; approval and error indicators can take precedence. A row showing the

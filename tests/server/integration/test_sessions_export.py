@@ -7,6 +7,7 @@ the same persisted rows the CLI and web export read.
 
 from __future__ import annotations
 
+import gzip
 import json
 from typing import Any
 
@@ -249,6 +250,43 @@ async def test_export_rejects_an_unknown_content_mode(client: httpx.AsyncClient)
     resp = await client.get(f"/v1/sessions/{session_id}/export", params={"content": "redacted"})
 
     assert resp.status_code == 422, resp.text
+
+
+async def test_export_can_be_gzipped(client: httpx.AsyncClient) -> None:
+    """Large sessions are mostly text; the compressed download is the same file."""
+    session_id = await _seed_session(client)
+
+    plain = await client.get(f"/v1/sessions/{session_id}/export")
+    resp = await client.get(f"/v1/sessions/{session_id}/export", params={"compress": "gzip"})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("application/gzip")
+    assert f'filename="{session_id}.jsonl.gz"' in resp.headers["content-disposition"]
+    # Sent as a file rather than a transfer encoding, so what lands on disk is the
+    # archive and not something a browser quietly expanded.
+    assert "content-encoding" not in resp.headers
+    assert resp.content[:2] == b"\x1f\x8b"
+
+    # Same transcript; only the header's own export timestamp differs between calls.
+    unzipped = read_transcript(gzip.decompress(resp.content).decode().splitlines(keepends=True))
+    direct = read_transcript(plain.text.splitlines(keepends=True))
+    assert unzipped.entries == direct.entries
+    assert unzipped.header.model_dump(exclude={"exported"}) == direct.header.model_dump(
+        exclude={"exported"}
+    )
+
+
+async def test_gzipped_export_can_still_drop_content(client: httpx.AsyncClient) -> None:
+    """The two options are independent."""
+    session_id = await _seed_session(client)
+
+    resp = await client.get(
+        f"/v1/sessions/{session_id}/export", params={"compress": "gzip", "content": "none"}
+    )
+
+    text = gzip.decompress(resp.content).decode()
+    assert read_transcript(text.splitlines(keepends=True)).header.redacted is True
+    assert "churn by region" not in text
 
 
 async def test_export_unknown_session_is_404(client: httpx.AsyncClient) -> None:

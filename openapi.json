@@ -15751,6 +15751,21 @@
               "title": "Content",
               "type": "string"
             }
+          },
+          {
+            "description": "`\"gzip\"` returns the same transcript gzipped, as `<session_id>.jsonl.gz`. Sent as `application/gzip` rather than a content encoding, so the download is the compressed file itself rather than something the browser silently expands.",
+            "in": "query",
+            "name": "compress",
+            "required": false,
+            "schema": {
+              "default": "none",
+              "enum": [
+                "none",
+                "gzip"
+              ],
+              "title": "Compress",
+              "type": "string"
+            }
           }
         ],
         "responses": {

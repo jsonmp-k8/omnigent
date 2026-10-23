@@ -26,7 +26,17 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from importlib import import_module, resources
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Literal, NoReturn, TypeAlias, cast, get_args
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    BinaryIO,
+    Literal,
+    NoReturn,
+    TextIO,
+    TypeAlias,
+    cast,
+    get_args,
+)
 
 import click
 import psutil
@@ -7465,7 +7475,16 @@ def session(ctx: click.Context) -> None:
     default=False,
     help="Write the session's shape without its content. The file cannot be imported.",
 )
-def session_export(session_id: str, output: str | None, server: str | None, redact: bool) -> None:
+@click.option(
+    "--gzip",
+    "gzip_output",
+    is_flag=True,
+    default=False,
+    help="Write a gzipped file. Appends .gz to the default name; import reads it directly.",
+)
+def session_export(
+    session_id: str, output: str | None, server: str | None, redact: bool, gzip_output: bool
+) -> None:
     """Export a session transcript to a portable JSONL file.
 
     Writes an ``omnigent.transcript/1`` file (see ``docs/session-export.md``):
@@ -7486,6 +7505,7 @@ def session_export(session_id: str, output: str | None, server: str | None, reda
       omnigent session export --id conv_abc123
       omnigent session export --id conv_abc123 --output my_session.jsonl
       omnigent session export --id conv_abc123 --redact
+      omnigent session export --id conv_abc123 --gzip
       omnigent session export --id conv_abc123 --server https://myserver.com
     """
     import httpx
@@ -7500,7 +7520,8 @@ def session_export(session_id: str, output: str | None, server: str | None, reda
         resolved_server = ServerUrl(startup.url)
 
     base_url = resolved_server.api_base
-    out_path = Path(output) if output else Path(f"{session_id}.jsonl")
+    suffix = ".jsonl.gz" if gzip_output else ".jsonl"
+    out_path = Path(output) if output else Path(f"{session_id}{suffix}")
 
     with httpx.Client(
         base_url=base_url,
@@ -7551,7 +7572,7 @@ def session_export(session_id: str, output: str | None, server: str | None, reda
         # leaves a partial file that reads as a complete transcript.
         tmp_path = out_path.with_name(f".{out_path.name}.partial")
         try:
-            with tmp_path.open("w", encoding="utf-8") as fh:
+            with _transcript_writer(tmp_path, gzip_output) as fh:
                 fh.writelines(iter_transcript_lines(session_data, _items(), redact=redact))
             tmp_path.replace(out_path)
         finally:
@@ -7594,6 +7615,30 @@ def _import_item_payload(item: Mapping[str, object]) -> dict[str, object]:
     return {"type": item_type, "data": raw}
 
 
+def _transcript_writer(path: Path, compressed: bool) -> TextIO:
+    """Open *path* for writing a transcript, gzipped or plain."""
+    import gzip
+
+    if compressed:
+        return cast("TextIO", gzip.open(path, "wt", encoding="utf-8"))
+    return path.open("w", encoding="utf-8")
+
+
+def _open_transcript(path: Path) -> TextIO:
+    """Open a transcript for reading, decompressing a gzipped one.
+
+    Keyed on the bytes rather than the name, so a ``.gz`` file renamed by a
+    browser or a mail client still reads.
+    """
+    import gzip
+
+    with path.open("rb") as probe:
+        gzipped = probe.read(2) == b"\x1f\x8b"
+    if gzipped:
+        return cast("TextIO", gzip.open(path, "rt", encoding="utf-8"))
+    return path.open("r", encoding="utf-8")
+
+
 def _read_session_export(src_path: Path) -> tuple[_JsonObject, list[dict[str, object]]]:
     """
     Read a session export into ``(session meta, initial_items)``.
@@ -7617,7 +7662,7 @@ def _read_session_export(src_path: Path) -> tuple[_JsonObject, list[dict[str, ob
         read_transcript,
     )
 
-    with src_path.open("r", encoding="utf-8") as fh:
+    with _open_transcript(src_path) as fh:
         first = next((line for line in fh if line.strip()), "")
     try:
         first_record: object = json.loads(first) if first.strip() else None
@@ -7634,7 +7679,7 @@ def _read_session_export(src_path: Path) -> tuple[_JsonObject, list[dict[str, ob
         return _read_legacy_session_export(src_path)
 
     try:
-        with src_path.open("r", encoding="utf-8") as fh:
+        with _open_transcript(src_path) as fh:
             transcript = read_transcript(fh)
     except TranscriptSchemaError as exc:
         raise click.ClickException(f"{src_path}: {exc}") from exc

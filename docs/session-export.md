@@ -126,6 +126,21 @@ import` refuses it rather than building an empty session that looks like the
 original. Redaction is all or nothing today: there is no hook to rewrite
 content rather than drop it.
 
+### Compressed files
+
+A long session is mostly text, so both writers offer gzip:
+
+```sh
+omnigent session export --id conv_abc123 --gzip          # conv_abc123.jsonl.gz
+curl -o shape.jsonl.gz "$SERVER/v1/sessions/conv_abc123/export?compress=gzip"
+```
+
+The route sends `application/gzip` rather than a `Content-Encoding`, so what
+lands on disk is the archive itself rather than something the browser quietly
+expands under a `.gz` name. `omnigent session import` reads either form, and
+decides by the file's first bytes rather than its name, so a `.gz` renamed in
+transit still works.
+
 ### Compaction is a boundary, not a gap
 
 The entries a compaction replaced stay in the file. The `compaction` entry
