@@ -3325,20 +3325,23 @@ function ComposerImpl(
                 : server.auth_status === "sign_in_required"
                   ? "sign-in-required"
                   : undefined,
-            // Only the host can say where its sign-in happens; without a URL the
-            // row reports the state and offers nothing to click.
+            // No URL means the state is still worth showing, with nothing to click.
             signIn: server.sign_in_url ? { kind: "url", url: server.sign_in_url } : undefined,
           },
         ]),
     );
     const catalogLoaded = !registryCatalog.loading && !registryCatalog.error;
     for (const server of selectedAgent?.mcp_servers ?? []) {
+      // An agent server can share a host server's name. The host is the only
+      // source of that server's account state, so shadowing must not drop it.
+      const host = byName.get(server.name);
       const row: McpServerRow = {
         name: server.name,
-        description: server.description ?? undefined,
+        description: server.description ?? host?.description,
+        connection: host?.connection,
+        signIn: host?.signIn,
       };
-      // Only a catalog read that finished this open can be trusted: a stale
-      // "sign-in required" would offer a popup the user no longer needs.
+      // Only a read from this open: a stale row would offer a needless popup.
       if (hasRegistryServers && server.transport === "registry" && catalogLoaded) {
         const service = registryCatalog.services.find((s) => s.id === server.name);
         if (service) {

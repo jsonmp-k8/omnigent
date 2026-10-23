@@ -30,21 +30,22 @@ class McpServerSummary(BaseModel):
     :param name: Server name as configured, e.g. ``"github"``.
     :param harness: Harness family that loads it: ``claude``, ``codex``, or ``cursor``.
     :param transport: ``stdio`` for a local process, ``http`` for a remote server.
-    :param scope: Where the server is configured: ``user`` for this user's own
-        config, ``managed`` for one an organization pins for every user.
+    :param scope: Config scope; always ``user`` today.
+    :param managed: Whether an organization pins this server for every user on the
+        host (Claude Code's enterprise MCP config), so it is not the user's to edit.
     :param plugin: Plugin that bundles the server, e.g. ``"figma"``.
     :param url_host: Hostname of a remote server, e.g. ``"mcp.linear.app"``.
     :param auth_status: Account state reported by the host's sign-in manager:
         ``connected`` or ``sign_in_required``; ``None`` when nothing reports one.
-    :param sign_in_url: Where the user finishes signing in. Only set with
-        ``sign_in_required``, and only to an http(s) URL; both are enforced where
-        the host frame is decoded (``omnigent.host.frames.mcp_account_fields``).
+    :param sign_in_url: Where the user finishes signing in; only with
+        ``sign_in_required``, and only an http(s) URL carrying no credentials.
     """
 
     name: str
     harness: str
     transport: Literal["stdio", "http"]
-    scope: Literal["user", "managed"]
+    scope: Literal["user"]
+    managed: bool = False
     plugin: str | None = None
     source_id: str | None = None
     url_host: str | None = None

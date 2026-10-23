@@ -102,6 +102,7 @@ async def test_owner_gets_host_inventory(
                     "source_id": None,
                     "auth_status": None,
                     "sign_in_url": None,
+                    "managed": False,
                 }
             ]
         }

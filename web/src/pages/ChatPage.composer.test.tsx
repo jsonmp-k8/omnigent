@@ -3779,6 +3779,50 @@ describe("Composer MCP status command", () => {
     expect(hostMcpQueryMock).toHaveBeenLastCalledWith("host_native", false, expect.any(Function));
   });
 
+  it("keeps a host server's account state when an agent server shadows its name", () => {
+    composerSessionSnapshot.hostId = "host_native";
+    setComposerState({ boundAgentId: "agent_native", sessionHarness: "claude-native" });
+    hostMcpQueryMock.mockReturnValue({
+      data: [
+        {
+          name: "linear",
+          harness: "claude",
+          transport: "http",
+          scope: "user",
+          auth_status: "sign_in_required",
+          sign_in_url: "https://auth.example.com/start",
+        },
+      ] satisfies UseHarnessInventoryModule.HostMcpServer[],
+      isLoading: false,
+      isError: false,
+    });
+    render(
+      <MemoryRouter>
+        <Composer
+          {...composerProps({
+            agents: [
+              {
+                id: "agent_native",
+                name: "Native agent",
+                mcp_servers: [{ name: "linear", transport: "http", description: "Agent linear" }],
+              },
+            ],
+          })}
+        />
+      </MemoryRouter>,
+    );
+    fireEvent.change(textarea(), { target: { value: "/mcp" } });
+
+    const row = screen.getByTestId("mcp-server-row-linear");
+    expect(row).toHaveTextContent("Agent linear");
+    // The host is the only source of that state; shadowing must not drop it.
+    expect(row).toHaveTextContent("Sign-in required");
+    expect(within(row).getByRole("link", { name: "Sign in" })).toHaveAttribute(
+      "href",
+      "https://auth.example.com/start",
+    );
+  });
+
   it.each(["claude-native", "codex-native", "cursor-native"] as const)(
     "keeps host status unknown until a routing host is available for %s",
     (harness) => {

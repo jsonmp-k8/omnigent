@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -314,6 +315,14 @@ def test_an_oversized_status_file_is_ignored(home: Path) -> None:
     assert read_auth_status_overlay(home) == {}
 
 
+def test_a_status_path_that_is_not_a_regular_file_is_ignored(home: Path) -> None:
+    """A FIFO reports size 0 and would block this thread forever; the panel polls it."""
+    path = home / ".omnigent" / "mcp-auth-status.json"
+    path.parent.mkdir(parents=True)
+    os.mkfifo(path)
+    assert read_auth_status_overlay(home) == {}
+
+
 def test_an_unusable_status_file_is_logged_once_per_change(
     home: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -411,10 +420,17 @@ def test_managed_config_servers_are_discovered_and_outrank_user_config(
             "name": "linear",
             "harness": "claude",
             "transport": "http",
-            "scope": "managed",
+            "scope": "user",
+            "managed": "true",
             "url_host": "mcp.linear.app",
         },
-        {"name": "github", "harness": "claude", "transport": "stdio", "scope": "managed"},
+        {
+            "name": "github",
+            "harness": "claude",
+            "transport": "stdio",
+            "scope": "user",
+            "managed": "true",
+        },
         {"name": "own", "harness": "claude", "transport": "stdio", "scope": "user"},
     ]
     assert _SECRET not in json.dumps(servers)
@@ -466,7 +482,7 @@ def test_a_managed_server_reaches_the_panel_with_its_account_state(
     published = McpServerSummary.model_validate(answered.mcp_servers[0]).model_dump()
 
     assert published["name"] == "linear"
-    assert published["scope"] == "managed"
+    assert published["managed"] is True
     assert published["auth_status"] == "sign_in_required"
     assert published["sign_in_url"] == "https://auth.example.com/start"
 

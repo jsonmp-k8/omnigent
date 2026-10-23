@@ -3907,6 +3907,12 @@
             "title": "Harness",
             "type": "string"
           },
+          "managed": {
+            "default": false,
+            "description": "Whether an organization pins this server for every user on the host (Claude Code's enterprise MCP config), so it is not the user's to edit.",
+            "title": "Managed",
+            "type": "boolean"
+          },
           "name": {
             "description": "Server name as configured, e.g. `\"github\"`.",
             "title": "Name",
@@ -3925,11 +3931,8 @@
             "title": "Plugin"
           },
           "scope": {
-            "description": "Where the server is configured: `user` for this user's own config, `managed` for one an organization pins for every user.",
-            "enum": [
-              "user",
-              "managed"
-            ],
+            "const": "user",
+            "description": "Config scope; always `user` today.",
             "title": "Scope",
             "type": "string"
           },
@@ -3942,7 +3945,7 @@
                 "type": "null"
               }
             ],
-            "description": "Where the user finishes signing in. Only set with `sign_in_required`, and only to an http(s) URL; both are enforced where the host frame is decoded (`omnigent.host.frames.mcp_account_fields`).",
+            "description": "Where the user finishes signing in; only with `sign_in_required`, and only an http(s) URL carrying no credentials.",
             "title": "Sign In Url"
           },
           "source_id": {

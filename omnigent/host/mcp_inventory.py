@@ -3,12 +3,10 @@
 Only names and non-secret metadata leave the inventory response: ``env``, headers, stdio
 ``command``/``args`` and full URLs routinely carry tokens, so they are dropped.
 
-Optional per-server account state is read from ``~/.omnigent/mcp-auth-status.json``
-(or :data:`MCP_AUTH_STATUS_ENV`, for a deployment whose ``$HOME`` is read-only),
-validated, matched to discovered servers, and re-read on every request. Any process
-running as this user can write that file, so it is trusted exactly as much as the
-harness configs beside it: it can mark a known server as needing sign-in and name an
-http(s) page for it, nothing more.
+Optional per-server account state comes from ``mcp-auth-status.json``; see
+:func:`read_auth_status_overlay`. Any process running as this user can write it, so
+it is trusted as much as the harness configs beside it: it can mark a known server as
+needing sign-in and name an http(s) page for it, nothing more.
 """
 
 from __future__ import annotations
@@ -22,6 +20,7 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from stat import S_ISREG
 from urllib.parse import urlsplit
 
 from omnigent.host.frames import mcp_account_fields
@@ -71,9 +70,14 @@ def _summary(
     config: object,
     harness: str,
     plugin: str | None = None,
-    scope: str = "user",
+    managed: bool = False,
 ) -> McpServerSummary | None:
-    """Reduce one server entry to its name, transport, and at most a URL host."""
+    """Reduce one server entry to its name, transport, and at most a URL host.
+
+    ``scope`` stays ``"user"`` for every server: an older server pins it to that one
+    value and rejects the whole inventory otherwise. Enterprise config is reported
+    through the additive ``managed`` field, which an older server simply drops.
+    """
     if not isinstance(name, str) or not name or name == OMNIGENT_RELAY_SERVER:
         return None
     if not isinstance(config, Mapping) or config.get("enabled") is False:
@@ -88,7 +92,9 @@ def _summary(
         transport = "http"
     else:
         return None
-    summary = {"name": name, "harness": harness, "transport": transport, "scope": scope}
+    summary = {"name": name, "harness": harness, "transport": transport, "scope": "user"}
+    if managed:
+        summary["managed"] = "true"
     if plugin is not None:
         summary["plugin"] = plugin
     if transport == "http" and isinstance(url, str):
@@ -125,18 +131,19 @@ def _managed_mcp_paths() -> tuple[Path, ...]:
 
 
 def _managed_claude_servers() -> list[ConfiguredMcpServer]:
-    """Servers an organization pins for every user on this host.
+    """Servers an organization pins via Claude Code's ``managed-mcp.json``.
 
-    Absent on an ordinary install, so nothing changes there. Where it exists these
-    servers are the ones the user cannot edit, and are often the ones that need an
-    interactive sign-in, so the inventory has to know about them.
+    Absent on an ordinary install; where it exists these are often the servers that
+    need an interactive sign-in, so the inventory has to know about them.
     """
     out: list[ConfiguredMcpServer] = []
     seen: set[str] = set()
+    # Every platform's location is tried; only one exists on a given host, and the
+    # first match wins if a stranger setup somehow has two.
     for path in _managed_mcp_paths():
         data = _read_config(path, "claude managed")
         for name, config in _servers_in(data).items():
-            summary = _summary(name, config, "claude", scope="managed")
+            summary = _summary(name, config, "claude", managed=True)
             if isinstance(config, Mapping) and summary is not None and summary["name"] not in seen:
                 seen.add(summary["name"])
                 out.append(ConfiguredMcpServer(summary, config))
@@ -245,7 +252,11 @@ def discover_mcp_servers() -> list[McpServerSummary]:
 
 
 def auth_status_path(home: Path) -> Path:
-    """Where the sign-in manager's report is read from, honouring the env override."""
+    """Where the sign-in manager's report is read from, honouring the env override.
+
+    The override is used as given, so a relative path resolves against the host
+    process's working directory; deployments should set an absolute one.
+    """
     override = os.environ.get(MCP_AUTH_STATUS_ENV)
     return Path(override).expanduser() if override else home / MCP_AUTH_STATUS_RELPATH
 
@@ -253,19 +264,24 @@ def auth_status_path(home: Path) -> Path:
 def _read_auth_status(path: Path) -> Mapping[str, object] | None:
     """Read the status report, logging once per file change when it cannot be used."""
     global _warned_auth_status
+    stat: os.stat_result | None = None
+    data: object = None
     try:
-        stat = path.stat()
+        # O_NONBLOCK so a FIFO opens instead of waiting for a writer; the panel polls
+        # this path every few seconds and a blocked worker thread would pile up.
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        try:
+            stat = os.fstat(fd)
+            # Checked on the open descriptor, so nothing can be swapped in behind it.
+            if S_ISREG(stat.st_mode) and stat.st_size <= MCP_AUTH_STATUS_MAX_BYTES:
+                data = json.loads(os.read(fd, MCP_AUTH_STATUS_MAX_BYTES + 1))
+        finally:
+            os.close(fd)
     except FileNotFoundError:
         _warned_auth_status = None
         return None
-    except OSError:
-        stat = None
-    data: object = None
-    if stat is not None and stat.st_size <= MCP_AUTH_STATUS_MAX_BYTES:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            data = None
+    except (OSError, ValueError):
+        data = None
     if isinstance(data, Mapping):
         _warned_auth_status = None
         return data
