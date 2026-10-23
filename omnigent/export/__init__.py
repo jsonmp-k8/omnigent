@@ -1,6 +1,7 @@
 """Portable, versioned session transcripts (``omnigent.transcript/1``)."""
 
 from omnigent.export.transcript import (
+    CONTENT_FIELDS,
     ITEM_ENVELOPE_KEYS,
     SETTING_KEYS,
     SUPPORTED_SCHEMAS,
@@ -21,6 +22,7 @@ from omnigent.export.transcript import (
 )
 
 __all__ = [
+    "CONTENT_FIELDS",
     "ITEM_ENVELOPE_KEYS",
     "SETTING_KEYS",
     "SUPPORTED_SCHEMAS",

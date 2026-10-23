@@ -7,12 +7,14 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import click
 import httpx
 import pytest
 import respx
 from click.testing import CliRunner
 
-from omnigent.cli import _import_item_payload, cli
+from omnigent.cli import _import_item_payload, _read_session_export, cli
+from omnigent.export import iter_transcript_lines
 from omnigent.session_import.models import IMPORT_SOURCE_LABEL_KEY
 from omnigent.stores.conversation_store import FORK_CARRY_HISTORY_LABEL_KEY
 
@@ -476,3 +478,47 @@ def test_session_import_refuses_unknown_schema(tmp_path: Path) -> None:
 
     assert result.exit_code != 0
     assert "unsupported transcript schema" in result.output
+
+
+def test_import_refuses_a_redacted_transcript(tmp_path: Path) -> None:
+    """A redacted file has no content to restore, so importing it would build an
+    empty session that looks like the real one."""
+    src = tmp_path / "redacted.jsonl"
+    session = {"id": "conv_abc123", "title": "Churn", "created_at": 1_700_000_000}
+    items = [
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "a secret question"}],
+            "created_at": 1_700_000_000,
+        }
+    ]
+    src.write_text("".join(iter_transcript_lines(session, items, redact=True)))
+
+    with pytest.raises(click.ClickException) as excinfo:
+        _read_session_export(src)
+
+    assert "cannot be imported" in str(excinfo.value)
+    assert "--redact" in str(excinfo.value)
+
+
+def test_import_still_reads_a_full_transcript(tmp_path: Path) -> None:
+    """The refusal keys off the header flag, not off anything a full export carries."""
+    src = tmp_path / "full.jsonl"
+    session = {"id": "conv_abc123", "title": "Churn", "created_at": 1_700_000_000}
+    items = [
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "a question"}],
+            "created_at": 1_700_000_000,
+        }
+    ]
+    src.write_text("".join(iter_transcript_lines(session, items)))
+
+    meta, restored = _read_session_export(src)
+
+    assert meta["id"] == "conv_abc123"
+    assert len(restored) == 1

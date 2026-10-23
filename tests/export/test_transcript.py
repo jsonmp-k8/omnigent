@@ -9,7 +9,9 @@ import pytest
 
 from omnigent.entities.conversation import parse_item_data
 from omnigent.export import (
+    CONTENT_FIELDS,
     TRANSCRIPT_SCHEMA,
+    EntryNumbering,
     TranscriptSchemaError,
     entry_from_item,
     header_from_session,
@@ -612,3 +614,86 @@ def test_terminal_output_without_raw_keeps_the_text_as_stdout() -> None:
     )
 
     assert payload["data"] == {"kind": "output", "stdout": "out", "stderr": ""}
+
+
+def test_a_redacted_entry_keeps_its_shape_and_drops_every_content_field() -> None:
+    """What a session did survives; what it said does not."""
+    entry = EntryNumbering().entry(
+        {
+            "id": "fc_1",
+            "type": "function_call",
+            "name": "sql",
+            "call_id": "call_1",
+            "arguments": json.dumps({"query": "select * from customers"}),
+            "created_at": 1_700_000_000,
+        }
+    )
+    assert entry.tool_input == {"query": "select * from customers"}
+
+    redacted = entry.redacted()
+
+    assert (redacted.turn, redacted.seq) == (entry.turn, entry.seq)
+    assert (redacted.kind, redacted.role) == (entry.kind, entry.role)
+    assert (redacted.tool, redacted.call_id, redacted.time) == ("sql", "call_1", entry.time)
+    assert all(getattr(redacted, field) is None for field in CONTENT_FIELDS)
+    assert "customers" not in redacted.to_line()
+    # The original is untouched, so redacting is safe mid-stream.
+    assert entry.tool_input == {"query": "select * from customers"}
+
+
+def test_a_redacted_entry_still_reports_what_the_provider_withheld() -> None:
+    """``sealed`` is a structural marker, not content, so it outlives redaction."""
+    entry = EntryNumbering().entry(
+        {
+            "id": "rsn_1",
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "opaque",
+            "created_at": 1_700_000_000,
+        }
+    )
+    assert entry.sealed is True
+
+    assert entry.redacted().sealed is True
+
+
+def test_redacted_lines_flag_the_header_and_carry_no_content() -> None:
+    """The flag is what tells a reader the file is structure only."""
+    session = {"id": "conv_1", "title": "Churn", "created_at": 1_700_000_000}
+    items = [
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "a secret question"}],
+            "created_at": 1_700_000_000,
+        }
+    ]
+
+    lines = list(iter_transcript_lines(session, items, redact=True))
+    header, entry = (json.loads(line) for line in lines)
+
+    assert header["redacted"] is True
+    assert entry["kind"] == "message" and entry["role"] == "user"
+    assert not CONTENT_FIELDS & entry.keys()
+    assert "secret" not in "".join(lines)
+
+
+def test_an_ordinary_export_says_nothing_about_redaction() -> None:
+    """The flag is additive: a normal file reads exactly as it did before."""
+    session = {"id": "conv_1", "created_at": 1_700_000_000}
+    items = [
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hello"}],
+            "created_at": 1_700_000_000,
+        }
+    ]
+
+    header, entry = (json.loads(line) for line in iter_transcript_lines(session, items))
+
+    assert "redacted" not in header
+    assert entry["text"] == "hello"
+    assert read_transcript(iter_transcript_lines(session, items)).header.redacted is False

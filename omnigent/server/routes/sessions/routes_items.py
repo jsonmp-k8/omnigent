@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Literal
 
 from fastapi import (
     APIRouter,
@@ -96,6 +97,7 @@ def register_items_routes(
     async def export_session_transcript(
         request: Request,
         session_id: str,
+        content: Literal["full", "none"] = Query(default="full"),
     ) -> StreamingResponse:
         """
         Stream the session as a portable, versioned transcript.
@@ -111,6 +113,11 @@ def register_items_routes(
             used to authorize READ on the session.
         :param session_id: Session/conversation identifier,
             e.g. ``"conv_abc123"``.
+        :param content: ``"full"`` (default) writes the session as it is stored.
+            ``"none"`` writes its shape without content: turns, tool names,
+            call ids, timing and the ``sealed`` markers, with every
+            content field dropped and ``redacted`` set in the header. Such a
+            file is not importable.
         :returns: An ``application/x-ndjson`` download named
             ``<session_id>.jsonl``.
         :raises OmnigentError: 404 when no such session exists or the caller
@@ -142,6 +149,7 @@ def register_items_routes(
                 llm_model=concrete_reported_model(conv.reported_model) or identity.llm_model,
             )
 
+        redact = content == "none"
         # The file is the session as of ``exported``: stop at the item that was
         # newest then, so a turn still running cannot extend the download.
         newest = await asyncio.to_thread(
@@ -149,6 +157,8 @@ def register_items_routes(
         )
         stop_after_id = newest.data[0].id if newest.data else None
         header = await asyncio.to_thread(_header)
+        if redact:
+            header = header.model_copy(update={"redacted": True})
 
         async def _lines() -> AsyncIterator[str]:
             yield header.to_line() + "\n"
@@ -165,7 +175,8 @@ def register_items_routes(
                     order="asc",
                 )
                 for item in page.data:
-                    yield numbering.entry(item.to_api_dict()).to_line() + "\n"
+                    entry = numbering.entry(item.to_api_dict())
+                    yield (entry.redacted() if redact else entry).to_line() + "\n"
                     if item.id == stop_after_id:
                         return
                 if not page.has_more:

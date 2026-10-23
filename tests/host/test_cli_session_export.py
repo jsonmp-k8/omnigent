@@ -12,6 +12,7 @@ import respx
 from click.testing import CliRunner
 
 from omnigent.cli import cli
+from omnigent.export import CONTENT_FIELDS
 from omnigent.util.server_url import ServerUrl
 
 _BASE = "http://localhost:6767"
@@ -136,6 +137,38 @@ def test_session_export_spog_url_sends_workspace_selector(
 
     assert result.exit_code == 0, result.output
     assert session_route.calls[0].request.headers["X-Databricks-Org-Id"] == "123"
+
+
+@respx.mock
+def test_session_export_redact_writes_shape_without_content(tmp_path: Path) -> None:
+    """``--redact`` is for handing over what a session did, not what it said."""
+    respx.get(f"{_BASE}/v1/sessions/conv_abc123").mock(
+        return_value=httpx.Response(200, json=_SESSION_META)
+    )
+    respx.get(f"{_BASE}/v1/sessions/conv_abc123/items").mock(
+        return_value=httpx.Response(200, json=_ITEMS_PAGE)
+    )
+
+    out_file = tmp_path / "out.jsonl"
+    runner = CliRunner()
+    with _patch_server():
+        result = runner.invoke(
+            cli,
+            ["session", "export", "--id", "conv_abc123", "--output", str(out_file), "--redact"],
+        )
+
+    assert result.exit_code == 0, result.output
+    text = out_file.read_text()
+    lines = [json.loads(line) for line in text.splitlines() if line]
+    header, entries = lines[0], lines[1:]
+
+    assert header["redacted"] is True
+    assert header["session"] == "conv_abc123"
+    # Still a transcript: the same turns, kinds and roles as the full export.
+    assert [e["kind"] for e in entries] == ["message", "message"]
+    assert [(e["turn"], e["seq"]) for e in entries] == [(1, 1), (1, 2)]
+    assert all(not CONTENT_FIELDS & e.keys() for e in entries)
+    assert "hi there" not in text
 
 
 @respx.mock
