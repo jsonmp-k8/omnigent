@@ -271,7 +271,7 @@ describe("/mcp panel connection state", () => {
       onMcpSignIn: vi.fn(),
     });
     expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
-    expect(screen.getByRole("link", { name: "Sign in in Settings" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Sign in from Settings" })).toHaveAttribute(
       "href",
       "/settings/mcp",
     );

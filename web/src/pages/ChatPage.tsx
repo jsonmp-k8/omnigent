@@ -3176,12 +3176,13 @@ function ComposerImpl(
   // required"; it is only read while the panel is showing a registry row.
   const registryCatalog = useMcpRegistryCatalog(mcpPanelRequested && hasRegistryServers);
   const registrySignIn = useRegistrySignIn(registryCatalog.refresh);
+  const { signIn: signInToRegistryService } = registrySignIn;
   const onMcpSignIn = useCallback(
     (name: string) => {
       const service = registryCatalog.services.find((s) => s.id === name);
-      if (service) void registrySignIn.signIn(service);
+      if (service) void signInToRegistryService(service);
     },
-    [registryCatalog.services, registrySignIn],
+    [registryCatalog.services, signInToRegistryService],
   );
   const mcpServersStatus =
     hostMcpStatus ??

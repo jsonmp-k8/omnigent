@@ -256,7 +256,7 @@ function McpSignInAction({
         to={server.signInHref}
         data-testid={`mcp-sign-in-link-${server.name}`}
       >
-        Sign in in Settings
+        Sign in from Settings
       </Link>
     );
   if (!onSignIn) return null;
@@ -353,7 +353,7 @@ function McpServerRows({
 
 function McpServerMenu({
   settingsHref = "/settings/harnesses",
-  ...rows
+  ...rowProps
 }: McpServerRowsProps & { settingsHref?: string }) {
   return (
     <div
@@ -366,7 +366,7 @@ function McpServerMenu({
         <div className="text-xs leading-4 text-muted-foreground">Enabled for this session</div>
       </div>
       <div className="max-h-64 overflow-y-auto">
-        <McpServerRows {...rows} />
+        <McpServerRows {...rowProps} />
       </div>
       <div className="mt-1 border-border border-t px-2 pt-2 text-xs text-muted-foreground">
         <Link className="underline hover:text-foreground" to={settingsHref}>
