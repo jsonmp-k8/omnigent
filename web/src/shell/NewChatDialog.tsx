@@ -7299,7 +7299,9 @@ export function NewChatLandingScreen() {
                         effectiveAgentId={effectiveAgentId}
                         agentLabel={agentLabel}
                         hasAgents={agentList.length > 0}
-                        curatedEntries={curation.restrictToAgentNames.size > 0 ? agentList : undefined}
+                        curatedEntries={
+                          curation.restrictToAgentNames.size > 0 ? agentList : undefined
+                        }
                         loading={pickerLoading}
                         interactiveWhileLoading={pickerInteractiveWhileLoading}
                         disabledLabel={noExecutionTargetSelected ? "No host selected" : undefined}
