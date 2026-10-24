@@ -145,4 +145,16 @@ describe("AgentHarnessPicker per-entry visibility", () => {
 
     expect(row(codex.id)).toBeNull();
   });
+
+  it("points at Settings when the user has hidden every entry", async () => {
+    // With nothing selected, hiding all four leaves the menu with nothing to
+    // render — an empty box gives no hint that the user did this to themselves.
+    writeHiddenPickerAgents(new Set([claude.name, codex.name, polly.name, debby.name]));
+    renderPicker(null);
+    await openPicker();
+
+    expect(screen.getByTestId("new-chat-landing-all-hidden")).toHaveTextContent(
+      "Turn some back on in Settings",
+    );
+  });
 });

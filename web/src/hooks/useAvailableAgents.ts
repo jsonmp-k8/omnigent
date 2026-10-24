@@ -433,12 +433,8 @@ const AVAILABLE_AGENTS_STALE_MS = 30_000;
 /**
  * The server's agent catalog alone — no session discovery.
  *
- * Shares {@link AGENT_CATALOG_QUERY_KEY} with {@link useAvailableAgents}, so a
- * consumer mounted alongside the picker reuses its fetch rather than issuing a
- * second one. Unlike the full hook this does not read ``useSidebarData``, so it
- * works outside a ``SidebarDataProvider`` (e.g. the Settings page). The
- * trade-off is that agents discovered only from a session — a one-off upload
- * never registered as a template — are absent.
+ * Shares the picker's query key, and works outside a ``SidebarDataProvider``.
+ * Agents known only from a session (a one-off upload) are therefore absent.
  *
  * @param enabled - Whether to fetch; defaults true.
  */

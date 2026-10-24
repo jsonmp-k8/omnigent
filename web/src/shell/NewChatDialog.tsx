@@ -233,8 +233,8 @@ import {
 } from "@/lib/smartRoutingAvailability";
 import { CLAUDE_NATIVE_MODELS } from "@/lib/claudeNativeModels";
 import {
-  isAcpHarnessAgent,
   partitionAgentsByKind,
+  partitionPickerEntries,
   selectableSessionAgents,
 } from "@/lib/agentGrouping";
 import { cn } from "@/lib/utils";
@@ -1840,6 +1840,16 @@ export function AgentHarnessPicker({
       )}
     </>
   );
+  // The user hid every agent the picker could offer. "Create custom agent" may
+  // still render, but there is nothing left to pick, so say where they went.
+  const allEntriesHidden =
+    hiddenAgents.size > 0 &&
+    !autoHarnessAvailable &&
+    readyHarnessEntries.length === 0 &&
+    moreHarnessEntries.length === 0 &&
+    bundleEntries.length === 0 &&
+    customEntries.length === 0 &&
+    pendingAgent == null;
   const showMore = isMobile && menuPage === "more" && moreHarnessEntries.length > 0;
   const showCustom = isMobile && menuPage === "custom" && hasCustomGroup;
   const showConfig = isMobile && menuPage === "config" && selectedConfigContent != null;
@@ -1990,6 +2000,20 @@ export function AgentHarnessPicker({
           <DropdownMenuSeparator />
           {customAgentsBody}
         </div>
+      ) : allEntriesHidden ? (
+        <>
+          <div
+            data-testid="new-chat-landing-all-hidden"
+            role="status"
+            className="px-2 py-3 text-ui whitespace-normal text-muted-foreground"
+          >
+            Every entry is hidden.
+            <div className="text-xs leading-4">
+              Turn some back on in Settings, under Appearance.
+            </div>
+          </div>
+          {createAgentItem}
+        </>
       ) : (
         <>
           {/* Smart Routing sits in its own unlabeled group above the
@@ -2301,12 +2325,8 @@ export function NewChatLandingScreen() {
   // under "Agents". ACP agents aren't native, so they fold into "More". The
   // user's own agents stay under "Agents" even on a native harness, so one never
   // passes for a harness row (or for the Claude Code wrapper Smart Routing binds).
-  const harnessEntries = useMemo(
-    () => agentList.filter((a) => !a.mine && (isNativeCodingAgent(a) || isAcpHarnessAgent(a))),
-    [agentList],
-  );
-  const agentEntries = useMemo(
-    () => agentList.filter((a) => a.mine || (!isNativeCodingAgent(a) && !isAcpHarnessAgent(a))),
+  const { harnesses: harnessEntries, agents: agentEntries } = useMemo(
+    () => partitionPickerEntries(agentList),
     [agentList],
   );
 

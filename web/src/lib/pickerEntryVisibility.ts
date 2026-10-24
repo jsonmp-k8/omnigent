@@ -1,21 +1,8 @@
-// Persisted, per-device set of picker entries the user has hidden.
+// Persisted, per-device set of picker entries the user hid.
 //
-// The "hide unconfigured harnesses" preference next door filters on *host
-// readiness* — it can only drop rows that cannot launch. This one is the
-// user's own choice: any harness or agent row, including ones that are
-// perfectly launchable, and including the bundle agents (Polly / Debby) that
-// readiness filtering never touches.
-//
-// Entries are keyed by agent NAME, not id. A built-in's id is name-derived and
-// stable, but a user-registered template gets a fresh random id every time it
-// is re-registered — hiding by id would silently un-hide it. The name is also
-// the unit the server-side OMNIGENT_SEEDED_AGENTS allowlist works in, so the
-// two stay legible together.
-//
-// Unlike the read-once boolean preference, this is exposed as a subscribable
-// store: the Settings switch and an open picker are mounted at the same time,
-// and a per-entry list gets toggled far more often than a one-time flag, so it
-// has to update without a page reload.
+// Keyed by agent NAME, not id: a re-registered template gets a fresh id, so
+// hiding by id would silently un-hide it. Subscribable, because the Settings
+// switch and an open picker are mounted at the same time.
 
 export const HIDDEN_PICKER_AGENTS_STORAGE_KEY = "omnigent:hidden-picker-agents";
 
