@@ -99,13 +99,16 @@ describe("a curated New Chat picker", () => {
     { roster: "two agents", curatedEntries: [polly, codex], labels: ["Polly", "Codex"] },
     // One agent is the common case: the picker collapses to that row.
     { roster: "one agent", curatedEntries: [polly], labels: ["Polly"] },
-  ])("offers exactly the handed-down $roster, in that order", async ({ curatedEntries, labels }) => {
-    renderPicker({ harnessEntries: [claude, codex], agentEntries: [polly], curatedEntries });
-    await openPicker();
+  ])(
+    "offers exactly the handed-down $roster, in that order",
+    async ({ curatedEntries, labels }) => {
+      renderPicker({ harnessEntries: [claude, codex], agentEntries: [polly], curatedEntries });
+      await openPicker();
 
-    expect(curatedLabels()).toEqual(labels);
-    expect(screen.queryByText("Claude Code")).toBeNull();
-  });
+      expect(curatedLabels()).toEqual(labels);
+      expect(screen.queryByText("Claude Code")).toBeNull();
+    },
+  );
 
   it("drops the groups and actions that can no longer lead anywhere", async () => {
     renderPicker({
