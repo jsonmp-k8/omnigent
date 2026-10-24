@@ -1453,6 +1453,7 @@ export function AgentHarnessPicker({
   openNonce = 0,
   blockedReasons,
   onPrefetchEntries,
+  curatedEntries,
 }: {
   agentEntries: AvailableAgent[];
   harnessEntries: AvailableAgent[];
@@ -1531,6 +1532,9 @@ export function AgentHarnessPicker({
   blockedReasons?: ReadonlyMap<string, string>;
   /** Called with the ids of rows the menu is about to show. */
   onPrefetchEntries?: (agentIds: string[]) => void;
+  /** Set when the deployment curates New Chat: exactly these rows, in this
+   *  order, as one flat list. Other embedders leave it unset. */
+  curatedEntries?: AvailableAgent[];
 }) {
   // Controlled so picking a row can close the menu.
   const [open, setOpen] = useState(false);
@@ -1812,23 +1816,8 @@ export function AgentHarnessPicker({
     [agentEntries],
   );
 
-  // A curated deployment names the agents New Chat may offer. The roster is
-  // already filtered upstream; what changes here is the shape of the menu —
-  // one flat list in the configured order, with no Harnesses heading, no
-  // "Other..." submenus and no create action, because none of those can lead
-  // anywhere the deployment allows.
-  const curation = pickerCuration(useServerInfo());
-  const curated = curation.restrictToAgentNames.size > 0;
-  const curatedEntries = useMemo(() => {
-    if (!curated) return [];
-    const order = [...curation.restrictToAgentNames];
-    // Filtered here as well as upstream: the caller narrows the roster so the
-    // selection cannot land on a hidden agent, and the picker narrows it so it
-    // cannot show one whatever it is handed.
-    return [...harnessEntries, ...agentEntries]
-      .filter((entry) => curation.restrictToAgentNames.has(entry.name))
-      .sort((first, second) => order.indexOf(first.name) - order.indexOf(second.name));
-  }, [agentEntries, curated, curation.restrictToAgentNames, harnessEntries]);
+  // Curated deployments get one flat list in config order.
+  const curated = curatedEntries !== undefined;
 
   // Existing custom / pending agents fold into an "Other..." submenu so a
   // long roster doesn't crowd the recommended picks. When there are none, the
@@ -1931,7 +1920,7 @@ export function AgentHarnessPicker({
         }
       }}
       trigger={{
-        disabled: disabledLabel !== undefined || previewOnly || !hasAgents,
+        disabled: disabledLabel !== undefined || previewOnly || (!hasAgents && !curated),
         "aria-busy": loading || undefined,
         label: disabledLabel ?? visibleCachedPreview?.label ?? triggerAccessibleName,
         model: disabledLabel ?? visibleCachedPreview?.model ?? triggerText,
@@ -2032,7 +2021,7 @@ export function AgentHarnessPicker({
       ) : curated ? (
         // One flat list: the agents this deployment offers, in its order.
         <div data-testid="new-chat-landing-curated">
-          {curatedEntries.length === 0 ? (
+          {curatedEntries?.length === 0 ? (
             <div
               data-testid="new-chat-landing-no-agents"
               role="status"
@@ -2045,7 +2034,7 @@ export function AgentHarnessPicker({
               </div>
             </div>
           ) : (
-            curatedEntries.map(renderEntry)
+            curatedEntries?.map(renderEntry)
           )}
         </div>
       ) : (
@@ -2348,11 +2337,9 @@ export function NewChatLandingScreen() {
     conversationsData !== undefined &&
     conversationsData.pages.every((page) => page.data.length === 0);
 
-  // A deployment can narrow what New Chat offers (server config
-  // ``restrict_to_agent_names``). Display only: an unlisted agent is still
-  // seeded, still forkable and still reachable by id, and a session already
-  // bound to one keeps working — this decides what a *fresh* chat shows.
-  const curation = pickerCuration(useServerInfo());
+  // Narrow to the deployment's restrict_to_agent_names, in config order.
+  const serverInfo = useServerInfo();
+  const curation = pickerCuration(serverInfo);
   const agentList = useMemo(() => {
     const selectable = selectableSessionAgents(
       (agentsLoading ? cachedPickerOptions?.agents : undefined) ?? agents ?? [],
@@ -3248,10 +3235,7 @@ export function NewChatLandingScreen() {
           : (agentsLoading || prefillConfig === undefined) &&
               agentList.some((agent) => agent.id === cachedPickerOptions?.agent.id)
             ? cachedPickerOptions!.agent.id
-            : // No usable remembered pick: start on the agent the deployment
-              // names (server config ``default_agent_name``), else the first
-              // offered. A remembered pick is honoured above, so configuring a
-              // default only decides where someone with no history begins.
+            : // No remembered pick: use the configured default, else the first agent.
               (agentList.find((agent) => agent.name === curation.defaultAgentName)?.id ??
               agentList[0]?.id ??
               null);
@@ -3798,7 +3782,8 @@ export function NewChatLandingScreen() {
   useEffect(() => {
     setPickerReadyTarget(pickerDataLoading ? null : pickerTarget);
   }, [pickerDataLoading, pickerTarget]);
-  const pickerLoading = pickerDataLoading || pickerReadyTarget !== pickerTarget;
+  const pickerLoading =
+    pickerDataLoading || pickerReadyTarget !== pickerTarget || serverInfo === "loading";
   const [interactiveCacheKey, setInteractiveCacheKey] = useState<string | null>(null);
   useEffect(() => {
     setInteractiveCacheKey(cachedPickerOptions ? pickerCacheKey : null);
@@ -7314,6 +7299,7 @@ export function NewChatLandingScreen() {
                         effectiveAgentId={effectiveAgentId}
                         agentLabel={agentLabel}
                         hasAgents={agentList.length > 0}
+                        curatedEntries={curation.restrictToAgentNames.size > 0 ? agentList : undefined}
                         loading={pickerLoading}
                         interactiveWhileLoading={pickerInteractiveWhileLoading}
                         disabledLabel={noExecutionTargetSelected ? "No host selected" : undefined}

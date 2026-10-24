@@ -251,15 +251,9 @@ export interface ServerInfo {
 
 /** The deployment's New Chat picker curation, as reported by ``/v1/info``. */
 export interface PickerCuration {
-  /**
-   * Agent names the picker may offer. Empty means the full roster, which is
-   * the default and what every older server reports.
-   */
+  /** Agent names the picker may offer, in config order. Empty means all. */
   restrictToAgentNames: ReadonlySet<string>;
-  /**
-   * Agent name a fresh New Chat starts on, or null. A user's remembered pick
-   * wins over it; this only decides where someone with no history begins.
-   */
+  /** Agent a fresh New Chat starts on; a remembered pick still wins. */
   defaultAgentName: string | null;
 }
 
@@ -283,14 +277,16 @@ export function pickerCuration(info: ServerInfo | "loading"): PickerCuration {
 function parsePicker(raw: unknown): PickerCuration {
   if (raw === null || typeof raw !== "object") return UNRESTRICTED_PICKER;
   const value = raw as Record<string, unknown>;
+  // Blank names read as unset, the same way the server strips them.
   const names = Array.isArray(value.restrict_to_agent_names)
-    ? value.restrict_to_agent_names.filter(
-        (name): name is string => typeof name === "string" && name !== "",
-      )
+    ? value.restrict_to_agent_names
+        .filter((name): name is string => typeof name === "string")
+        .map((name) => name.trim())
+        .filter((name) => name !== "")
     : [];
   const fallbackDefault =
-    typeof value.default_agent_name === "string" && value.default_agent_name !== ""
-      ? value.default_agent_name
+    typeof value.default_agent_name === "string" && value.default_agent_name.trim() !== ""
+      ? value.default_agent_name.trim()
       : null;
   // A default outside the restriction could never be selected; the server drops
   // it too, so agreeing here keeps a stale payload from pinning an absent pick.

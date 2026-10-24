@@ -711,7 +711,7 @@ def test_picker_curation_accepts_a_single_name_without_a_list() -> None:
     assert curation.restrict_to_agent_names == ("polly",)
 
 
-@pytest.mark.parametrize("value", [42, {"polly": True}, True])
+@pytest.mark.parametrize("value", [42, {"polly": True}, True, [42], ["polly", 42]])
 def test_picker_restriction_of_the_wrong_type_is_ignored(
     value: object, caplog: pytest.LogCaptureFixture
 ) -> None:
