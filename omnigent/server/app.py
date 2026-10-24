@@ -1220,7 +1220,9 @@ def _ensure_default_acp_agents(
     server: gating the row on the server's own PATH left Devin and Grok missing from
     the picker on every remote server, even when the runner had them installed.
 
-    User-configured ``acp:<slug>`` agents stay config-gated. Their launch command is
+    User-configured ``acp:<slug>`` agents are always seeded and never suppressed:
+    they are the operator's roster, which is what trimming the packaged one makes
+    room for. Their launch command is
     resolved from the *host's* own ``acp:`` block at spawn time, so a row naming a
     slug the executing host does not define could never launch; surfacing those on a
     remote server first needs the host to advertise its configured slugs.
@@ -1261,9 +1263,10 @@ def _ensure_default_acp_agents(
         # ``[a-zA-Z0-9_-]+`` (the spec validator rejects spaces/dots), and a label
         # like "Gemini CLI" would fail to load. The web picker capitalizes the slug
         # for display (e.g. ``devin`` -> "Devin").
-        owned.add(agent.slug)
-        if not seeded_agent_allowed(agent.slug, allowlist):
-            continue
+        # Outside the allowlist, and outside ``owned``: these rows are the
+        # operator's own config (the ``acp:`` block), not something packaged
+        # here, so trimming the packaged roster must not take them with it —
+        # the same exemption ``OMNIGENT_BUILTIN_AGENT_DIRS`` extras get.
         _ensure_builtin_agent(
             agent_store,
             artifact_store,

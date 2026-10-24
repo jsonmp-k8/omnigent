@@ -351,3 +351,36 @@ def test_unknown_allowlist_name_warns_instead_of_silently_hiding_everything(
     # Both unknown names are called out, and the real roster is offered.
     assert "claude-native" in message and "Polly" in message
     assert "claude-native-ui" in message
+
+
+def test_configured_acp_agents_are_never_trimmed(
+    seed_stores: _SeedStores, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ``acp:`` entry is the operator's own roster, not a packaged built-in.
+
+    Trimming the packaged set is how a deployment makes room for its own agents,
+    so the allowlist must not take those with it — and their slugs, which are
+    operator-specific, must not be published as suppressed names either.
+    """
+    from omnigent.onboarding.acp_auth import AcpAgentEntry
+
+    configured = [AcpAgentEntry(name="Gemini CLI", slug="gemini-cli", command=["gemini", "--acp"])]
+    monkeypatch.setattr(
+        "omnigent.onboarding.acp_auth.acp_agents", lambda *args, **kwargs: configured
+    )
+    monkeypatch.setattr(
+        "omnigent.onboarding.acp_auth.shadowed_builtin_acp_rows",
+        lambda *args, **kwargs: frozenset(),
+    )
+    # The strictest case: keep nothing packaged at all.
+    monkeypatch.setenv(seeded_agents.SEEDED_AGENTS_ENV, "")
+
+    server_app._ensure_default_agents(
+        seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
+    )
+
+    names = {agent.name for agent in seed_stores.agent_store.list(limit=200).data}
+    assert "gemini-cli" in names, "a configured acp: agent was trimmed with the packaged roster"
+    assert "gemini-cli" not in seeded_agents.suppressed_agent_names()
+    # The packaged rows really were trimmed, so the test is not passing by accident.
+    assert "polly" not in names
