@@ -575,7 +575,7 @@ def candidate_models(
         isn't treated as unservable; the static table fills any harness the
         catalog has no row for.
     :param allow_static_fallback: Whether the static :func:`infer_models` table
-        may fill a harness the catalog has no row for. Off the AI Gateway it may
+        may fill a harness the catalog has no row for. Off the Unity Gateway it may
         not: every id in that table is a ``databricks-*`` endpoint the spawn
         could not reach, so the catalog is the only provider-accurate source.
     :returns: Harness → model ids, cheapest first, empty entries dropped.
@@ -801,7 +801,7 @@ async def _decide(
     result = None
     try:
         call = await route_with_fallback(backends, task, candidates, gateway_backed=gateway_backed)
-    except Exception as exc:  # noqa: BLE001 — router outages are a normal path here
+    except Exception as exc:  # router outages are a normal path here
         _logger.warning(
             "route-subagent: router call failed for session=%s", session_id, exc_info=True
         )
@@ -1160,7 +1160,7 @@ def _handler_factory(
                     _awaited(resolver(session_id, req)), loop
                 )
                 decision = future.result(timeout=request_timeout_s)
-            except Exception:  # noqa: BLE001 — never wedge the spawn path
+            except Exception:  # never wedge the spawn path
                 _logger.warning(
                     "route-subagent: resolver failed for session=%s", session_id, exc_info=True
                 )
@@ -1226,7 +1226,7 @@ def make_server_relay_resolver(
             )
             resp.raise_for_status()
             payload = resp.json()
-        except Exception:  # noqa: BLE001 — server hop failures are expected
+        except Exception:  # server hop failures are expected
             _logger.warning(
                 "route-subagent: server relay failed for session=%s", session_id, exc_info=True
             )

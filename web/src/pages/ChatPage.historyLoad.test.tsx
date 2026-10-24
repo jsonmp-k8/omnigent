@@ -1566,7 +1566,7 @@ describe("LatestTurnSpacer", () => {
     // WHY: the anchor row can be absent for the first frame(s) on a cold load of
     // a windowed transcript (the scroll element is published before the
     // virtualizer fills its window). Capture must retry rather than depend on a
-    // resize that need not fire — the wrapper height is estimate-fixed.
+    // resize that need not fire — the wrapper height tracks the estimate.
     const holder: { cb: (() => void) | null } = { cb: null };
     class StubResizeObserver {
       constructor(cb: () => void) {
@@ -1696,6 +1696,17 @@ describe("JumpToTopButton", () => {
     const stopScroll = vi.fn();
     return { container, scroll, scroller: { el: scroll, state, stopScroll } };
   }
+
+  it("hides the action on mobile", () => {
+    const { container, scroller } = makeScroller({
+      scrollTop: 100,
+      scrollHeight: 500,
+      clientHeight: 200,
+    });
+
+    render(<JumpToTopButton containerEl={container} scroller={scroller} hasMoreHistory />);
+    expect(pill().parentElement).toHaveClass("max-md:hidden");
+  });
 
   it("stays non-interactive at the first message (nothing above)", () => {
     const { container, scroller } = makeScroller({

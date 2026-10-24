@@ -1,3 +1,4 @@
+import type * as WorkspacePickerModule from "./WorkspacePicker";
 import type * as SandboxModelOptionsModule from "@/hooks/useSandboxModelOptions";
 
 vi.mock("@/hooks/useSandboxModelOptions", async (importOriginal) => ({
@@ -69,6 +70,7 @@ const EXISTING_WORKTREE = "/Users/corey/worktrees/alpha-feature";
 // Mutable so a test can choose a project-driven or plain visit.
 let searchParams = new URLSearchParams("project=Alpha");
 vi.mock("@/lib/routing", () => ({
+  useLocation: () => ({ hash: "", state: null }),
   useNavigate: () => navigateMock,
   useSearchParams: () => [searchParams, vi.fn()],
 }));
@@ -116,7 +118,8 @@ vi.mock("@/hooks/RunnerHealthProvider", () => ({
 }));
 // The file browser is heavy UI; a stub button stands in for a user selection —
 // deliberately re-picking the config workspace through the modal commit path.
-vi.mock("./WorkspacePicker", () => ({
+vi.mock("./WorkspacePicker", async (importOriginal) => ({
+  ...(await importOriginal<typeof WorkspacePickerModule>()),
   isNavigablePath: () => false,
   WorkspacePicker: (props: { onSelect: (path: string) => void }) => (
     <button
