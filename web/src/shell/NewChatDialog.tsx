@@ -2036,7 +2036,8 @@ export function AgentHarnessPicker({
             <div
               data-testid="new-chat-landing-no-agents"
               role="status"
-              className="px-2 py-3 text-ui text-muted-foreground"
+              // The menu is whitespace-nowrap; this copy is a sentence and has to wrap.
+              className="px-2 py-3 text-ui whitespace-normal text-muted-foreground"
             >
               No agents are available here.
               <div className="text-xs leading-4">
