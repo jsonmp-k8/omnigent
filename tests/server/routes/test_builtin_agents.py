@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import httpx
 import pytest_asyncio
+from fastapi import FastAPI
 
 from omnigent.db.utils import builtin_agent_id, generate_agent_id
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
@@ -90,6 +91,7 @@ async def test_builtin_flag_distinguishes_seeded_from_registered(
 
 
 async def test_suppressed_agents_are_hidden_from_discovery(
+    app: FastAPI,
     client: httpx.AsyncClient,
     db_uri: str,
 ) -> None:
@@ -101,19 +103,14 @@ async def test_suppressed_agents_are_hidden_from_discovery(
     still bound to any session that used it), but discovery skips it. An
     operator's own agent is never suppressed, so it keeps its place.
     """
-    from omnigent.server import seeded_agents
-
     agent_store = SqlAlchemyAgentStore(db_uri)
     agent_store.create(builtin_agent_id("polly"), name="polly", bundle_location="test:///p")
     agent_store.create(
         builtin_agent_id("house-agent"), name="house-agent", bundle_location="test:///h"
     )
 
-    seeded_agents.record_suppressed_agents(frozenset({"polly"}))
-    try:
-        resp = await client.get("/v1/agents?limit=100")
-    finally:
-        seeded_agents.record_suppressed_agents(frozenset())
+    app.state.suppressed_agent_names = frozenset({"polly"})
+    resp = await client.get("/v1/agents?limit=100")
 
     assert resp.status_code == 200
     names = [a["name"] for a in resp.json()["data"]]
@@ -124,6 +121,7 @@ async def test_suppressed_agents_are_hidden_from_discovery(
 
 
 async def test_list_publishes_suppressed_agent_names(
+    app: FastAPI,
     client: httpx.AsyncClient,
     db_uri: str,
 ) -> None:
@@ -132,15 +130,10 @@ async def test_list_publishes_suppressed_agent_names(
     discovers agents from session history (the web picker) can drop a hidden
     built-in instead of resurfacing it as a custom agent.
     """
-    from omnigent.server import seeded_agents
-
     agent_store = SqlAlchemyAgentStore(db_uri)
     agent_store.create(builtin_agent_id("polly"), name="polly", bundle_location="test:///p")
-    seeded_agents.record_suppressed_agents(frozenset({"polly", "debby"}))
-    try:
-        resp = await client.get("/v1/agents?limit=100")
-    finally:
-        seeded_agents.record_suppressed_agents(frozenset())
+    app.state.suppressed_agent_names = frozenset({"polly", "debby"})
+    resp = await client.get("/v1/agents?limit=100")
 
     assert resp.status_code == 200
     body = resp.json()

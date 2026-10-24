@@ -15,6 +15,10 @@ Agents supplied through ``OMNIGENT_BUILTIN_AGENT_DIRS`` are never filtered:
 they are the operator's own roster, which is the whole point of trimming the
 packaged one.
 
+The suppressed names live on ``app.state.suppressed_agent_names``, written
+once per lifespan startup and read by ``GET /v1/agents``, so two apps in one
+process (and two tests) never share one roster.
+
 Suppression hides, it never deletes. ``conversations.agent_id`` is a
 cascade-delete foreign key onto ``agents.id``, so removing a seeded row would
 take every conversation that ever used it. A suppressed agent keeps its row
@@ -22,18 +26,11 @@ and its history; only the discovery list omits it, and clearing the env var
 brings it back.
 """
 
-import logging
 import os
-
-_logger = logging.getLogger(__name__)
 
 #: Comma-separated allowlist of packaged built-in agent names to seed and
 #: serve, e.g. ``"claude-native-ui,polly"``. Unset means "all".
 SEEDED_AGENTS_ENV = "OMNIGENT_SEEDED_AGENTS"
-
-# Packaged names the current configuration suppresses: written once per
-# lifespan startup by ``_ensure_default_agents``, read by GET /v1/agents.
-_suppressed: frozenset[str] = frozenset()
 
 
 def seeded_agent_allowlist() -> frozenset[str] | None:
@@ -63,36 +60,3 @@ def seeded_agent_allowed(name: str, allowlist: frozenset[str] | None) -> bool:
     :returns: ``True`` when the allowlist is absent or names this agent.
     """
     return allowlist is None or name in allowlist
-
-
-def record_suppressed_agents(names: frozenset[str]) -> None:
-    """
-    Publish the packaged names this deployment suppresses.
-
-    Overwrites rather than accumulates, so a re-seed (a second app in the
-    same process, a test) reflects the current environment instead of
-    unioning a stale run.
-
-    :param names: Packaged built-in names to hide from ``GET /v1/agents``.
-    """
-    global _suppressed
-    _suppressed = names
-    if names:
-        _logger.info(
-            "Suppressing %d packaged built-in agent(s) from the picker (%s): %s",
-            len(names),
-            SEEDED_AGENTS_ENV,
-            ", ".join(sorted(names)),
-        )
-
-
-def suppressed_agent_names() -> frozenset[str]:
-    """
-    Packaged built-in names to omit from built-in discovery.
-
-    Empty unless :data:`SEEDED_AGENTS_ENV` is set, so the default
-    deployment serves exactly what it always did.
-
-    :returns: The suppressed names.
-    """
-    return _suppressed

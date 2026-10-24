@@ -56,19 +56,6 @@ def seed_stores(tmp_path: Path, db_uri: str) -> _SeedStores:
     )
 
 
-@pytest.fixture(autouse=True)
-def _reset_suppressed() -> object:
-    """
-    Clear the module-level suppression set around every test.
-
-    It is process-global (written once per lifespan startup), so a test
-    that leaves it populated would hide agents from every later test.
-    """
-    seeded_agents.record_suppressed_agents(frozenset())
-    yield
-    seeded_agents.record_suppressed_agents(frozenset())
-
-
 # ── parser ───────────────────────────────────────────────────────────────
 
 
@@ -183,11 +170,10 @@ def test_ensure_default_agents_publishes_suppressed_names(
     """A trimmed roster seeds only the allowlist and suppresses the rest."""
     monkeypatch.setenv(seeded_agents.SEEDED_AGENTS_ENV, "claude-native-ui")
 
-    server_app._ensure_default_agents(
+    suppressed = server_app._ensure_default_agents(
         seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
     )
 
-    suppressed = seeded_agents.suppressed_agent_names()
     assert "claude-native-ui" not in suppressed
     assert server_app._POLLY_AGENT_NAME in suppressed
     assert "codex-native-ui" in suppressed
@@ -201,11 +187,11 @@ def test_ensure_default_agents_suppresses_nothing_by_default(
     """With the var unset, nothing is hidden — the pre-change behavior."""
     monkeypatch.delenv(seeded_agents.SEEDED_AGENTS_ENV, raising=False)
 
-    server_app._ensure_default_agents(
+    suppressed = server_app._ensure_default_agents(
         seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
     )
 
-    assert seeded_agents.suppressed_agent_names() == frozenset()
+    assert suppressed == frozenset()
 
 
 def test_extra_builtin_agents_bypass_the_allowlist(
@@ -228,13 +214,13 @@ def test_extra_builtin_agents_bypass_the_allowlist(
     monkeypatch.setenv(seeded_agents.SEEDED_AGENTS_ENV, "")
     monkeypatch.setenv(server_app._EXTRA_BUILTIN_AGENTS_ENV, str(custom))
 
-    server_app._ensure_default_agents(
+    suppressed = server_app._ensure_default_agents(
         seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
     )
 
     seeded = seed_stores.agent_store.get_by_name("house-agent")
     assert seeded is not None, "operator extras must survive an empty allowlist"
-    assert seeded.name not in seeded_agents.suppressed_agent_names()
+    assert seeded.name not in suppressed
     assert seed_stores.agent_store.get_by_name(server_app._POLLY_AGENT_NAME) is None
 
 
@@ -248,21 +234,21 @@ def test_suppression_does_not_delete_an_already_seeded_row(
     leave the row intact and only report it as suppressed.
     """
     monkeypatch.delenv(seeded_agents.SEEDED_AGENTS_ENV, raising=False)
-    server_app._ensure_default_agents(
+    suppressed = server_app._ensure_default_agents(
         seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
     )
     before = seed_stores.agent_store.get_by_name(server_app._POLLY_AGENT_NAME)
     assert before is not None, "precondition: polly seeded on the default path"
 
     monkeypatch.setenv(seeded_agents.SEEDED_AGENTS_ENV, "claude-native-ui")
-    server_app._ensure_default_agents(
+    suppressed = server_app._ensure_default_agents(
         seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
     )
 
     after = seed_stores.agent_store.get_by_name(server_app._POLLY_AGENT_NAME)
     assert after is not None, "suppression must not delete the row"
     assert after.id == before.id
-    assert server_app._POLLY_AGENT_NAME in seeded_agents.suppressed_agent_names()
+    assert server_app._POLLY_AGENT_NAME in suppressed
 
 
 def test_os_pathsep_is_not_a_separator(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -298,11 +284,11 @@ def test_extra_that_overrides_a_packaged_name_is_not_suppressed(
     )
     monkeypatch.setenv(seeded_agents.SEEDED_AGENTS_ENV, "")
     monkeypatch.setenv(server_app._EXTRA_BUILTIN_AGENTS_ENV, str(override))
-    server_app._ensure_default_agents(
+    suppressed = server_app._ensure_default_agents(
         seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
     )
     assert seed_stores.agent_store.get_by_name(server_app._POLLY_AGENT_NAME) is not None
-    assert server_app._POLLY_AGENT_NAME not in seeded_agents.suppressed_agent_names()
+    assert server_app._POLLY_AGENT_NAME not in suppressed
 
 
 def test_extras_seeder_reports_the_names_it_seeded(
@@ -375,12 +361,15 @@ def test_configured_acp_agents_are_never_trimmed(
     # The strictest case: keep nothing packaged at all.
     monkeypatch.setenv(seeded_agents.SEEDED_AGENTS_ENV, "")
 
-    server_app._ensure_default_agents(
+    suppressed = server_app._ensure_default_agents(
         seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
     )
 
     names = {agent.name for agent in seed_stores.agent_store.list(limit=200).data}
     assert "gemini-cli" in names, "a configured acp: agent was trimmed with the packaged roster"
-    assert "gemini-cli" not in seeded_agents.suppressed_agent_names()
+    assert "gemini-cli" not in suppressed
     # The packaged rows really were trimmed, so the test is not passing by accident.
     assert "polly" not in names
+    # A builtin ACP row is packaged, not the operator's, so it obeys the allowlist.
+    assert "grok" not in names
+    assert "grok" in suppressed

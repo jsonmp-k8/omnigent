@@ -51,7 +51,6 @@ from omnigent.server.schemas import (
     MCPServerSummary,
     SkillSummary,
 )
-from omnigent.server.seeded_agents import suppressed_agent_names
 from omnigent.spec import AgentSpec
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
@@ -475,7 +474,10 @@ def create_builtin_agents_router(
         user_id = _require_user(request, auth_provider)
         if scope != "user":
             page = agent_store.list(limit=limit, after=after, before=before, order=order)
-            suppressed = suppressed_agent_names()
+            # Written at lifespan startup; absent when the app never seeded.
+            suppressed: frozenset[str] = getattr(
+                request.app.state, "suppressed_agent_names", frozenset()
+            )
             return AgentList(
                 data=[
                     _to_agent_object(a, agent_cache) for a in page.data if a.name not in suppressed

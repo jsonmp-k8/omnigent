@@ -143,7 +143,6 @@ from omnigent.server.scheduled.dispatch_scheduler import (
 )
 from omnigent.server.seeded_agents import (
     SEEDED_AGENTS_ENV,
-    record_suppressed_agents,
     seeded_agent_allowed,
     seeded_agent_allowlist,
 )
@@ -948,7 +947,7 @@ def _ensure_default_agents(
     agent_store: AgentStore,
     artifact_store: ArtifactStore,
     agent_cache: Any,
-) -> None:
+) -> frozenset[str]:
     """
     Register all built-in agents that should always be available.
 
@@ -960,9 +959,8 @@ def _ensure_default_agents(
 
     ``OMNIGENT_SEEDED_AGENTS`` trims the packaged roster. Each helper
     returns the packaged names it owns (seeded or not), so whatever the
-    allowlist leaves out is published to
-    :func:`~omnigent.server.seeded_agents.record_suppressed_agents` and
-    hidden from ``GET /v1/agents``. A row seeded by an earlier boot is
+    allowlist leaves out is returned here and hidden from ``GET /v1/agents``
+    by the caller that stores it. A row seeded by an earlier boot is
     suppressed rather than deleted: ``conversations.agent_id`` cascades on
     delete, so dropping the row would take its session history with it.
 
@@ -973,6 +971,7 @@ def _ensure_default_agents(
     :param agent_store: Store for agent metadata.
     :param artifact_store: Store for agent bundles.
     :param agent_cache: Cache for loaded agent specs.
+    :returns: Packaged built-in names to hide from ``GET /v1/agents``.
     """
     allowlist = seeded_agent_allowlist()
     packaged = (
@@ -983,8 +982,7 @@ def _ensure_default_agents(
     )
     extras = _ensure_extra_builtin_agents(agent_store, artifact_store, agent_cache)
     if allowlist is None:
-        record_suppressed_agents(frozenset())
-        return
+        return frozenset()
     unknown = allowlist - packaged
     if unknown:
         _logger.warning(
@@ -995,7 +993,15 @@ def _ensure_default_agents(
         )
     # An extra that overrides a packaged name by design is the operator's own
     # roster, never a suppressed row.
-    record_suppressed_agents((packaged - allowlist) - extras)
+    suppressed = (packaged - allowlist) - extras
+    if suppressed:
+        _logger.info(
+            "Suppressing %d packaged built-in agent(s) from the picker (%s): %s",
+            len(suppressed),
+            SEEDED_AGENTS_ENV,
+            ", ".join(sorted(suppressed)),
+        )
+    return suppressed
 
 
 # Env var listing extra built-in agent specs to seed at startup, in addition
@@ -1878,7 +1884,9 @@ def create_app(
         # SessionFilesystemRegistry moved to the runner. Both
         # warmup blocks deleted here.
 
-        _ensure_default_agents(agent_store, artifact_store, agent_cache)
+        app_inst.state.suppressed_agent_names = _ensure_default_agents(
+            agent_store, artifact_store, agent_cache
+        )
 
         # Populate the policy registry (builtins + user-configured
         # modules) so GET /v1/policy-registry serves the catalog.
