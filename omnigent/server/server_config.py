@@ -149,11 +149,7 @@ def session_title_instructions(config: Mapping[str, Any]) -> str | None:
 class PickerCuration:
     """Which agents the New Chat picker offers, and which one it starts on.
 
-    Display only. This decides what a fresh New Chat *shows*; it does not
-    decide what exists. Every agent stays seeded, forkable, reachable through
-    the API and usable by a session already bound to it — trimming what a
-    deployment installs is a separate, server-side concern. A deployment that
-    wants an agent gone removes it there, not here.
+    Display only: see ``docs/PICKER_CURATION.md`` for what it does not change.
 
     :param restrict_to_agent_names: Names the picker may show. Empty means no
         restriction, which is the default.
@@ -190,7 +186,10 @@ def load_picker_curation(config: Mapping[str, Any]) -> PickerCuration:
     :returns: The curation, empty when neither key is set.
     """
     raw_names = config.get(RESTRICT_TO_AGENT_NAMES_KEY)
-    if raw_names is not None and not isinstance(raw_names, str | list):
+    # Each element has to be a string too: ``[42]`` would otherwise become an
+    # active restriction on ``"42"`` that matches nothing.
+    elements = raw_names if isinstance(raw_names, list) else [raw_names]
+    if raw_names is not None and not all(isinstance(item, str) for item in elements):
         logger.warning(
             "server config %s must be a name or a list of names — ignoring it",
             RESTRICT_TO_AGENT_NAMES_KEY,

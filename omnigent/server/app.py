@@ -994,12 +994,11 @@ def _ensure_builtin_agent(
 
 
 def _warn_on_empty_picker_restriction(agent_store: AgentStore, curation: PickerCuration) -> None:
-    """Say so at startup when ``restrict_to_agent_names`` matches no agent.
+    """Say so at startup when ``restrict_to_agent_names`` names an unknown agent.
 
-    The restriction is display-only, so a name that matches nothing fails
-    quietly: the picker simply has less in it, or nothing at all. An operator
-    who mistypes a name would otherwise have only an empty New Chat menu to
-    go on.
+    The restriction is display-only, so a mistyped name fails quietly: the
+    picker simply has less in it, or nothing at all. Each name is looked up
+    directly, so the check holds however many agents the server has.
 
     :param agent_store: Store the picker's roster is read from.
     :param curation: The configured curation; checked only when it restricts.
@@ -1007,20 +1006,22 @@ def _warn_on_empty_picker_restriction(agent_store: AgentStore, curation: PickerC
     if not curation.restricted:
         return
     try:
-        known = {agent.name for agent in agent_store.list(limit=200).data}
+        missing = [
+            name
+            for name in curation.restrict_to_agent_names
+            if agent_store.get_by_name(name) is None
+        ]
     except Exception:  # noqa: BLE001 — a store hiccup must not stop startup
         _logger.warning("could not check %s against the agent roster", RESTRICT_TO_AGENT_NAMES_KEY)
         return
-    missing = [name for name in curation.restrict_to_agent_names if name not in known]
     if not missing:
         return
     if len(missing) == len(curation.restrict_to_agent_names):
         _logger.warning(
             "server config %s names no agent this server has (%s); the New Chat picker "
-            "will be empty. Available: %s",
+            "will be empty",
             RESTRICT_TO_AGENT_NAMES_KEY,
             ", ".join(missing),
-            ", ".join(sorted(known)),
         )
         return
     _logger.warning(

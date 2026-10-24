@@ -1,6 +1,8 @@
 // A deployment can name which agents New Chat offers (server config
-// `restrict_to_agent_names`). These cover what that does to the menu: the
-// roster, the groups that stop making sense, and the empty case.
+// `restrict_to_agent_names`). The landing screen filters the roster and hands
+// the picker the result as `curatedEntries`; these cover what that does to the
+// menu's shape. Default selection and the real-flow empty state live with the
+// landing screen's tests.
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -34,7 +36,7 @@ const polly = agent({
   id: "agent-polly",
   name: "polly",
   display_name: "Polly",
-  harness: null,
+  harness: "claude-sdk",
 });
 
 const readyHost: Host = {
@@ -45,35 +47,27 @@ const readyHost: Host = {
   configured_harnesses: {
     "claude-native": true,
     "codex-native": true,
-    "pi-native": true,
+    "claude-sdk": true,
   },
 };
 
 function renderPicker(props: {
   harnessEntries: AvailableAgent[];
   agentEntries?: AvailableAgent[];
-  restrictToAgentNames?: string[];
-  defaultAgentName?: string | null;
+  curatedEntries?: AvailableAgent[];
+  hasAgents?: boolean;
 }) {
-  const restrict = props.restrictToAgentNames;
   return render(
-    <CapabilitiesProvider
-      info={{
-        ...FALLBACK_SERVER_INFO,
-        picker: {
-          restrictToAgentNames: new Set(restrict ?? []),
-          defaultAgentName: props.defaultAgentName ?? null,
-        },
-      }}
-    >
+    <CapabilitiesProvider info={FALLBACK_SERVER_INFO}>
       <StoryQueryRouter>
         <TooltipProvider>
           <AgentHarnessPicker
             agentEntries={props.agentEntries ?? []}
             harnessEntries={props.harnessEntries}
+            curatedEntries={props.curatedEntries}
             effectiveAgentId={null}
             agentLabel="Picker"
-            hasAgents
+            hasAgents={props.hasAgents ?? true}
             host={readyHost}
             onSelectAgent={() => undefined}
             pendingAgent={null}
@@ -90,24 +84,26 @@ function renderPicker(props: {
 }
 
 const openPicker = () => userEvent.click(screen.getByTestId("new-chat-landing-agent-select"));
+const curatedLabels = () =>
+  [
+    ...screen
+      .getByTestId("new-chat-landing-curated")
+      .querySelectorAll("[data-harness-menu-choice-label]"),
+  ].map((node) => node.textContent);
 
 afterEach(cleanup);
 
 describe("a curated New Chat picker", () => {
-  it("offers only the named agents, in the configured order", async () => {
-    renderPicker({
-      harnessEntries: [claude, codex],
-      agentEntries: [polly],
-      // The deployment's own pick leads, which is the point of configuring it.
-      restrictToAgentNames: ["polly", "codex-native-ui"],
-    });
+  it.each([
+    // The deployment's own pick leads, which is the point of configuring it.
+    { roster: "two agents", curatedEntries: [polly, codex], labels: ["Polly", "Codex"] },
+    // One agent is the common case: the picker collapses to that row.
+    { roster: "one agent", curatedEntries: [polly], labels: ["Polly"] },
+  ])("offers exactly the handed-down $roster, in that order", async ({ curatedEntries, labels }) => {
+    renderPicker({ harnessEntries: [claude, codex], agentEntries: [polly], curatedEntries });
     await openPicker();
 
-    const curated = screen.getByTestId("new-chat-landing-curated");
-    const labels = [...curated.querySelectorAll("[data-harness-menu-choice-label]")].map(
-      (node) => node.textContent,
-    );
-    expect(labels).toEqual(["Polly", "Codex"]);
+    expect(curatedLabels()).toEqual(labels);
     expect(screen.queryByText("Claude Code")).toBeNull();
   });
 
@@ -115,7 +111,7 @@ describe("a curated New Chat picker", () => {
     renderPicker({
       harnessEntries: [claude, codex],
       agentEntries: [polly],
-      restrictToAgentNames: ["polly", "codex-native-ui"],
+      curatedEntries: [polly, codex],
     });
     await openPicker();
 
@@ -128,37 +124,19 @@ describe("a curated New Chat picker", () => {
     expect(screen.queryByTestId("new-chat-landing-create-agent")).toBeNull();
   });
 
-  it("collapses to the single agent a deployment names", async () => {
-    renderPicker({
-      harnessEntries: [claude, codex],
-      agentEntries: [polly],
-      restrictToAgentNames: ["polly"],
-    });
-    await openPicker();
+  it("still opens when the curation matches nothing, so the empty state can explain", async () => {
+    // The caller reports no agents, which would normally disable the trigger.
+    renderPicker({ harnessEntries: [claude], curatedEntries: [], hasAgents: false });
 
-    const curated = screen.getByTestId("new-chat-landing-curated");
-    const labels = [...curated.querySelectorAll("[data-harness-menu-choice-label]")].map(
-      (node) => node.textContent,
+    expect(screen.getByTestId("new-chat-landing-agent-select")).toBeEnabled();
+    await openPicker();
+    expect(screen.getByTestId("new-chat-landing-no-agents")).toHaveTextContent(
+      "limits which agents New Chat offers",
     );
-    expect(labels).toEqual(["Polly"]);
-    expect(screen.queryByText("Harnesses")).toBeNull();
   });
 
-  it("says so when the restriction matches nothing, rather than opening blank", async () => {
-    renderPicker({
-      harnessEntries: [claude, codex],
-      agentEntries: [polly],
-      // A typo, or an agent this server does not have.
-      restrictToAgentNames: ["not-installed"],
-    });
-    await openPicker();
-
-    const empty = screen.getByTestId("new-chat-landing-no-agents");
-    expect(empty).toHaveTextContent("No agents are available here");
-    expect(empty).toHaveTextContent("limits which agents New Chat offers");
-  });
-
-  it("leaves the grouped menu alone when nothing is configured", async () => {
+  it("leaves the grouped menu alone when no curation is handed down", async () => {
+    // Also what every other embedder gets: curation is the landing's to pass.
     renderPicker({ harnessEntries: [claude, codex], agentEntries: [polly] });
     await openPicker();
 

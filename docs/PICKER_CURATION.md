@@ -16,6 +16,9 @@ default_agent_name: polly
 Both keys are optional. With neither set, the picker behaves exactly as it
 always has.
 
+Both values are published on `GET /v1/info`, which needs no authentication,
+so the names you put here are visible to anyone who can reach the server.
+
 ## What this does and does not do
 
 It is **display only**. It narrows what a fresh New Chat *shows*; it never
