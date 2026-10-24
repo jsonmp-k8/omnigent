@@ -235,7 +235,12 @@ import {
   readHideUnconfiguredHarnesses,
   writeHideUnconfiguredHarnesses,
 } from "@/lib/harnessVisibilityPreferences";
-import { resetHiddenPickerAgents, setPickerAgentHidden } from "@/lib/pickerEntryVisibility";
+import {
+  HIDDEN_PICKER_AGENTS_STORAGE_KEY,
+  notifyHiddenPickerAgentsChanged,
+  resetHiddenPickerAgents,
+  setPickerAgentHidden,
+} from "@/lib/pickerEntryVisibility";
 import { useHiddenPickerAgents } from "@/hooks/useHiddenPickerAgents";
 import { useAgentCatalog } from "@/hooks/useAvailableAgents";
 import { partitionAgentsByKind, selectableSessionAgents } from "@/lib/agentGrouping";
@@ -1087,13 +1092,15 @@ function AppearanceSection() {
           PINNED_WORKSPACE_TABS_STORAGE_KEY,
           "omnigent:hide-unconfigured-harnesses",
           FOLD_ASSISTANT_NARRATION_STORAGE_KEY,
-          "omnigent:hidden-picker-agents",
+          HIDDEN_PICKER_AGENTS_STORAGE_KEY,
         ]) {
           window.localStorage.removeItem(key);
         }
       } catch {
         // localStorage access errors are non-fatal.
       }
+      // As with import: a same-tab write fires no storage event.
+      notifyHiddenPickerAgentsChanged();
     }
     applyStoredUiFontSize();
 
