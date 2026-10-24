@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   HIDDEN_PICKER_AGENTS_STORAGE_KEY,
+  notifyHiddenPickerAgentsChanged,
   readHiddenPickerAgents,
   resetHiddenPickerAgents,
   setPickerAgentHidden,
@@ -112,5 +113,26 @@ describe("resetHiddenPickerAgents", () => {
     writeHiddenPickerAgents(new Set(["polly", "debby"]));
     resetHiddenPickerAgents();
     expect(readHiddenPickerAgents().size).toBe(0);
+  });
+});
+
+describe("wholesale storage rewrites", () => {
+  it("notifies subscribers, since a same-tab write fires no storage event", () => {
+    // Importing settings and resetting Appearance both rewrite localStorage
+    // directly. Without a signal, a picker mounted beside Settings keeps the
+    // old set until it remounts.
+    const seen: ReadonlySet<string>[] = [];
+    const unsubscribe = subscribeHiddenPickerAgents(() => seen.push(readHiddenPickerAgents()));
+    window.localStorage.setItem(HIDDEN_PICKER_AGENTS_STORAGE_KEY, JSON.stringify(["polly"]));
+
+    notifyHiddenPickerAgentsChanged();
+
+    expect(seen).toHaveLength(1);
+    expect([...seen[0]!]).toEqual(["polly"]);
+
+    window.localStorage.removeItem(HIDDEN_PICKER_AGENTS_STORAGE_KEY);
+    notifyHiddenPickerAgentsChanged();
+    expect([...seen[1]!]).toEqual([]);
+    unsubscribe();
   });
 });

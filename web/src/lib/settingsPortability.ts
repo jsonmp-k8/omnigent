@@ -8,7 +8,10 @@
 
 import { DELETE_WORKTREES_ON_ARCHIVE_STORAGE_KEY } from "./archiveWorktreePreferences";
 import { COMPOSER_SEND_SHORTCUT_STORAGE_KEY } from "./composerSendShortcutPreferences";
-import { HIDDEN_PICKER_AGENTS_STORAGE_KEY } from "./pickerEntryVisibility";
+import {
+  HIDDEN_PICKER_AGENTS_STORAGE_KEY,
+  notifyHiddenPickerAgentsChanged,
+} from "./pickerEntryVisibility";
 import {
   resetSessionWorkspaceTabSelections,
   unpinSessionWorkspaceTabs,
@@ -155,6 +158,9 @@ export function applyImportedSettings(imported: ExportedSettings): number {
       // Swallow individual write failures.
     }
   }
+  // Same-tab writes fire no storage event, so the subscribable preferences
+  // have to be told; otherwise an open picker keeps the pre-import set.
+  notifyHiddenPickerAgentsChanged();
   const nextPins = readPinnedWorkspaceTabs();
   const removedPins = previousPins.filter((tab) => !nextPins.includes(tab));
   unpinSessionWorkspaceTabs(removedPins);

@@ -91,6 +91,19 @@ export function writeHiddenPickerAgents(names: ReadonlySet<string>): void {
 }
 
 /**
+ * Tell subscribers the stored set changed underneath them.
+ *
+ * Writing through :func:`writeHiddenPickerAgents` notifies on its own. This is
+ * for the paths that rewrite ``localStorage`` wholesale — importing settings,
+ * resetting Appearance — because a same-tab write fires no ``storage`` event,
+ * so a picker mounted beside Settings would keep the old set until it
+ * remounted.
+ */
+export function notifyHiddenPickerAgentsChanged(): void {
+  for (const listener of listeners) listener();
+}
+
+/**
  * Subscribe to hidden-entry changes, including writes from another tab.
  *
  * @param listener - Called after every change.
