@@ -161,6 +161,10 @@ from omnigent.server.seeded_agents import (
     seeded_agent_allowed,
     seeded_agent_allowlist,
 )
+from omnigent.server.server_config import (
+    RESTRICT_TO_AGENT_NAMES_KEY,
+    PickerCuration,
+)
 from omnigent.server.ws_origin import WebSocketOriginMiddleware
 from omnigent.stores import (
     AgentStore,
@@ -208,6 +212,22 @@ class BrandingInfo(BaseModel):
     heading: str | None
     logos: BrandingLogosInfo
     powered_by: bool
+
+
+class PickerInfo(BaseModel):
+    """How a deployment curates what the New Chat picker shows.
+
+    Display only: it narrows the picker, never what exists. Every agent stays
+    seeded, forkable and reachable through the API.
+
+    :param restrict_to_agent_names: Names the picker may offer; empty means
+        the full roster.
+    :param default_agent_name: Name a fresh New Chat starts on, or ``None``.
+        A user's remembered pick wins over it.
+    """
+
+    restrict_to_agent_names: list[str] = []
+    default_agent_name: str | None = None
 
 
 class FilesystemAttachmentsInfo(BaseModel):
@@ -271,6 +291,7 @@ class ServerInfoResponse(BaseModel):
     # Scheduled tasks accept ``project_id``; older servers reject it.
     scheduled_task_projects: bool = False
     branding: BrandingInfo
+    picker: PickerInfo = PickerInfo()
 
 
 def _resolve_extension_state(
@@ -970,6 +991,44 @@ def _ensure_builtin_agent(
     agent_store.create(agent_id, name, bundle_key)
     agent_cache.evict(agent_id)
     _logger.info("Registered built-in %s agent as %s", name, agent_id)
+
+
+def _warn_on_empty_picker_restriction(agent_store: AgentStore, curation: PickerCuration) -> None:
+    """Say so at startup when ``restrict_to_agent_names`` matches no agent.
+
+    The restriction is display-only, so a name that matches nothing fails
+    quietly: the picker simply has less in it, or nothing at all. An operator
+    who mistypes a name would otherwise have only an empty New Chat menu to
+    go on.
+
+    :param agent_store: Store the picker's roster is read from.
+    :param curation: The configured curation; checked only when it restricts.
+    """
+    if not curation.restricted:
+        return
+    try:
+        known = {agent.name for agent in agent_store.list(limit=200).data}
+    except Exception:  # noqa: BLE001 — a store hiccup must not stop startup
+        _logger.warning("could not check %s against the agent roster", RESTRICT_TO_AGENT_NAMES_KEY)
+        return
+    missing = [name for name in curation.restrict_to_agent_names if name not in known]
+    if not missing:
+        return
+    if len(missing) == len(curation.restrict_to_agent_names):
+        _logger.warning(
+            "server config %s names no agent this server has (%s); the New Chat picker "
+            "will be empty. Available: %s",
+            RESTRICT_TO_AGENT_NAMES_KEY,
+            ", ".join(missing),
+            ", ".join(sorted(known)),
+        )
+        return
+    _logger.warning(
+        "server config %s names %d agent(s) this server does not have: %s",
+        RESTRICT_TO_AGENT_NAMES_KEY,
+        len(missing),
+        ", ".join(missing),
+    )
 
 
 def _ensure_default_agents(
@@ -1690,12 +1749,14 @@ def create_app(
 
     from omnigent.server.server_config import (
         load_branding_snapshot,
+        load_picker_curation,
         load_server_config,
         session_title_instructions,
     )
 
     resolved_server_config = load_server_config() if server_config is None else server_config
     branding_snapshot = load_branding_snapshot(resolved_server_config)
+    picker_curation = load_picker_curation(resolved_server_config)
     title_instructions = session_title_instructions(resolved_server_config)
     resolved_feature_flags = feature_flags or resolve_feature_flags()
     if harness_install is None:
@@ -1928,6 +1989,8 @@ def create_app(
             app_inst.state.suppressed_agent_names = _ensure_default_agents(
                 agent_store, artifact_store, agent_cache
             )
+        # The roster exists either way, so the check does not depend on seeding here.
+        _warn_on_empty_picker_restriction(agent_store, picker_curation)
 
         # Populate the policy registry (builtins + user-configured
         # modules) so GET /v1/policy-registry serves the catalog.
@@ -2221,6 +2284,7 @@ def create_app(
     app.state.agent_store = agent_store
     app.state.sandbox_config = sandbox_config
     app.state.branding_snapshot = branding_snapshot
+    app.state.picker_curation = picker_curation
     app.state.feature_flags = resolved_feature_flags
     app.state.harness_install = app_harness_install
     app.state.automations = True if automations is None else automations
@@ -3516,6 +3580,7 @@ def create_app(
                 "automations_enabled": scheduled_task_store is not None
                 and deployment_gate_enabled(app.state.automations, "automations"),
                 "branding": branding_snapshot.config(),
+                "picker": picker_curation.config(),
             }
         )
 
