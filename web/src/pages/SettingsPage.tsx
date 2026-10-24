@@ -243,8 +243,11 @@ import {
 } from "@/lib/pickerEntryVisibility";
 import { useHiddenPickerAgents } from "@/hooks/useHiddenPickerAgents";
 import { useAgentCatalog } from "@/hooks/useAvailableAgents";
-import { partitionAgentsByKind, selectableSessionAgents } from "@/lib/agentGrouping";
-import { isNativeCodingAgent } from "@/lib/nativeCodingAgents";
+import {
+  partitionAgentsByKind,
+  partitionPickerEntries,
+  selectableSessionAgents,
+} from "@/lib/agentGrouping";
 import {
   applyThemePalette,
   DEFAULT_PALETTE,
@@ -967,8 +970,7 @@ function PickerEntryVisibilityControl() {
   const { data: agents, isLoading } = useAgentCatalog();
   const groups = useMemo(() => {
     const selectable = selectableSessionAgents(agents ?? []);
-    const harnesses = selectable.filter(isNativeCodingAgent);
-    const rest = selectable.filter((a) => !isNativeCodingAgent(a));
+    const { harnesses, agents: rest } = partitionPickerEntries(selectable);
     const { builtins, customs } = partitionAgentsByKind(rest);
     return [
       { label: "Harnesses", entries: harnesses },
@@ -982,8 +984,9 @@ function PickerEntryVisibilityControl() {
         <div className="flex flex-col">
           <span className="text-ui font-medium">Show in the new-chat picker</span>
           <span className="text-sm text-muted-foreground">
-            Turn off any harness or agent you don't use to keep the picker short. Hiding one here
-            never affects existing sessions, and the entry you have selected always stays visible.
+            Turn off any of this server's harnesses and agents you don't use to keep the picker
+            short. Hiding one here never affects existing sessions, and the entry you have selected
+            always stays visible.
           </span>
         </div>
         <Button
