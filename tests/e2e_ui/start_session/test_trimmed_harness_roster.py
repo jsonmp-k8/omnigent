@@ -121,10 +121,11 @@ async def _drive_trimmed_roster(base_url: str, session_id: str) -> None:
             await page.get_by_test_id("new-chat-landing-agent-select").click()
 
             # polly must actually be the pick, or the harness promotion below
-            # would be the selected-entry path rather than the backfill.
+            # would be the selected-entry path rather than the backfill. Being
+            # visible is not enough to show that: assert the selection itself.
             await expect(
                 page.get_by_test_id(f"new-chat-landing-agent-{_POLLY_AGENT_ID}")
-            ).to_be_visible()
+            ).to_have_attribute("data-active", "true")
 
             # The assertion: Pi renders inline. Pre-fix nothing promoted it, so
             # the row lived only inside the "Other..." flyout.

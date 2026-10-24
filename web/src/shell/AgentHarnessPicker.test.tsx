@@ -177,3 +177,20 @@ describe("AgentHarnessPicker Agents group header", () => {
     expect(screen.getByText("Harnesses")).toBeInTheDocument();
   });
 });
+
+it("omits the rule above an Agents group that will not render", async () => {
+  // Same leftover as the header: a trimmed deployment with no bundle agents
+  // and no custom group would otherwise close the menu with a divider and
+  // nothing under it.
+  renderPicker({
+    harnessEntries: [claude],
+    agentEntries: [],
+    allowCreateCustomAgent: false,
+    sandboxSelected: true,
+  });
+  await openPicker();
+
+  expect(screen.queryByText("Agents")).toBeNull();
+  const menu = screen.getByRole("menu");
+  expect(menu.querySelectorAll('[role="separator"]')).toHaveLength(0);
+});

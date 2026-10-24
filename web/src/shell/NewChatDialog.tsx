@@ -1351,15 +1351,6 @@ const SECONDARY_HARNESS_ORDER: readonly string[] = ["opencode", "pi"];
 // How many rows the backfill promotes — matches the inline list's usual size.
 const INLINE_HARNESS_FALLBACK = PRIMARY_HARNESS_ORDER.length;
 
-// Harness icon kinds preferred for the picker's inline list, in display order.
-// A deployment that seeds none of these (OMNIGENT_SEEDED_AGENTS) backfills the
-// list from whatever is launchable rather than showing an empty group.
-const PRIMARY_HARNESS_ORDER: readonly string[] = ["claude", "cursor", "codex"];
-// Preferred order within the "Other..." submenu.
-const SECONDARY_HARNESS_ORDER: readonly string[] = ["opencode", "pi"];
-// How many rows the backfill promotes — matches the inline list's usual size.
-const INLINE_HARNESS_FALLBACK = PRIMARY_HARNESS_ORDER.length;
-
 function agentHasModelSettings(agent: AvailableAgent | undefined): boolean {
   return (
     nativeAgentHasCapability(agent, "modelPicker") ||
@@ -1754,12 +1745,16 @@ export function AgentHarnessPicker({
   const hideUnconfigured = useMemo(() => readHideUnconfiguredHarnesses(), []);
   const { readyHarnessEntries, moreHarnessEntries } = useMemo(() => {
     const ready: AvailableAgent[] = [];
-    const more: AvailableAgent[] = [];
+    let more: AvailableAgent[] = [];
+    // Recorded during the split so the backfill below asks the same question
+    // rather than restating it inverted.
+    const unavailableIds = new Set<string>();
     for (const agent of harnessEntries) {
       const selected = agent.id === effectiveAgentId;
       const readiness = harnessReadinessOnHost(agent.harness, host);
       const unavailable = !readiness.selectable && readiness.fallbackRelevant;
       if (!selected && hideUnconfigured && unavailable) continue;
+      if (unavailable) unavailableIds.add(agent.id);
       const key = nativeCodingAgentForAvailableAgent(agent)?.iconKind ?? "";
       const primary = PRIMARY_HARNESS_ORDER.includes(key) || agent.id === promotedHarnessId;
       // Unavailable primaries demote to "Other..." — the main list stays
@@ -1779,18 +1774,15 @@ export function AgentHarnessPicker({
       (first, second) =>
         rank(first, SECONDARY_HARNESS_ORDER) - rank(second, SECONDARY_HARNESS_ORDER),
     );
-    // Nothing preferred survived, but something launchable did: pull the best
-    // of it inline. A deployment that trims to harnesses outside
-    // PRIMARY_HARNESS_ORDER would otherwise render an empty "Harnesses" list
-    // with its only choices buried in the "Other..." submenu.
+    // No preferred harness survived: promote the best launchable ones inline.
     if (ready.length === 0) {
-      const launchable = more.filter((agent) => {
-        const readiness = harnessReadinessOnHost(agent.harness, host);
-        return readiness.selectable || !readiness.fallbackRelevant;
-      });
-      for (const agent of launchable.slice(0, INLINE_HARNESS_FALLBACK)) {
-        ready.push(agent);
-        more.splice(more.indexOf(agent), 1);
+      const promoted = more
+        .filter((agent) => !unavailableIds.has(agent.id))
+        .slice(0, INLINE_HARNESS_FALLBACK);
+      if (promoted.length > 0) {
+        ready.push(...promoted);
+        const promotedIds = new Set(promoted.map((agent) => agent.id));
+        more = more.filter((agent) => !promotedIds.has(agent.id));
       }
     }
     return { readyHarnessEntries: ready, moreHarnessEntries: more };
@@ -2097,13 +2089,15 @@ export function AgentHarnessPicker({
                     </HarnessPickerSubContent>
                   </DropdownMenuSub>
                 ))}
-              <DropdownMenuSeparator />
+              {/* Only when something follows it. A trimmed deployment can have
+                no bundle agents and no custom group, and a rule closing the
+                menu with nothing under it is the same leftover the Agents
+                header below avoids. */}
+              {(bundleEntries.length > 0 || hasCustomGroup) && <DropdownMenuSeparator />}
             </>
           )}
-          {/* Agents group — built-in bundle agents (Polly / Debby) inline. The
-            header is conditional like "Harnesses" above: a deployment that
-            seeds no bundle agents and has no custom group would otherwise
-            render a heading with nothing under it. */}
+          {/* Agents group — bundle agents inline; header only when the group
+            has content, like "Harnesses" above. */}
           {(bundleEntries.length > 0 || hasCustomGroup) && (
             <PickerSectionHeader>Agents</PickerSectionHeader>
           )}
