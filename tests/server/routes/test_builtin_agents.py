@@ -116,7 +116,7 @@ async def test_suppressed_agents_are_hidden_from_discovery(
     names = [a["name"] for a in resp.json()["data"]]
     assert "polly" not in names
     assert "house-agent" in names
-    # Hidden, not deleted — the row (and its cascade-linked history) survives.
+    # Hidden, not deleted: sessions bound to the row can still resolve it.
     assert agent_store.get_by_name("polly") is not None
 
 

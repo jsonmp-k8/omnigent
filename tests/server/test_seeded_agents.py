@@ -229,8 +229,8 @@ def test_suppression_does_not_delete_an_already_seeded_row(
 ) -> None:
     """A row seeded before the allowlist landed is hidden, never dropped.
 
-    ``conversations.agent_id`` cascades on delete, so removing the row would
-    take its session history. Re-seeding with a narrower allowlist must
+    Sessions look their agent up by ``conversations.agent_id``, so removing the
+    row would leave them without one. Re-seeding with a narrower allowlist must
     leave the row intact and only report it as suppressed.
     """
     monkeypatch.delenv(seeded_agents.SEEDED_AGENTS_ENV, raising=False)

@@ -454,12 +454,12 @@ def create_builtin_agents_router(
         is the last row the server read, which may not be in ``data``.
 
         Packaged built-ins the deployment suppressed via
-        ``OMNIGENT_SEEDED_AGENTS`` are filtered out. The filter runs after
-        the store page is read, so the cursor stays store-based and
-        ``has_more`` / ``last_id`` remain correct — a filtered page can
-        return fewer than ``limit`` rows, which the paginating client
-        already handles. Suppressing hides a row without deleting it, so a
-        session already bound to one keeps working.
+        ``OMNIGENT_SEEDED_AGENTS`` are filtered out after the store page is
+        read, so ``first_id``, ``last_id`` and ``has_more`` describe the rows
+        read, not the rows returned. A page can hold fewer than ``limit`` rows,
+        or none; keep following ``last_id`` while ``has_more`` is true.
+        Suppressing hides a row without deleting it, so a session already
+        bound to one keeps working.
 
         :param request: The incoming FastAPI request (for auth).
         :param limit: Maximum number of agents to return (1-1000; ``scope=user``

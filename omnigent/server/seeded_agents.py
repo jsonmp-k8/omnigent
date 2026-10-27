@@ -19,11 +19,10 @@ The suppressed names live on ``app.state.suppressed_agent_names``, written
 once per lifespan startup and read by ``GET /v1/agents``, so two apps in one
 process (and two tests) never share one roster.
 
-Suppression hides, it never deletes. ``conversations.agent_id`` is a
-cascade-delete foreign key onto ``agents.id``, so removing a seeded row would
-take every conversation that ever used it. A suppressed agent keeps its row
-and its history; only the discovery list omits it, and clearing the env var
-brings it back.
+Suppression hides, it never deletes. Sessions look their agent up by
+``conversations.agent_id``, so removing a seeded row would leave every session
+that used it without an agent. A suppressed agent keeps its row; only the
+discovery list omits it, and clearing the env var brings it back.
 """
 
 import os

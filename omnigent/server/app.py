@@ -980,8 +980,8 @@ def _ensure_default_agents(
     returns the packaged names it owns (seeded or not), so whatever the
     allowlist leaves out is returned here and hidden from ``GET /v1/agents``
     by the caller that stores it. A row seeded by an earlier boot is
-    suppressed rather than deleted: ``conversations.agent_id`` cascades on
-    delete, so dropping the row would take its session history with it.
+    suppressed rather than deleted: sessions look their agent up by
+    ``conversations.agent_id``, so dropping the row would leave them without one.
 
     Extras from ``OMNIGENT_BUILTIN_AGENT_DIRS`` are deliberately outside
     the allowlist — trimming the packaged roster exists to make room for
