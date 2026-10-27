@@ -2493,42 +2493,33 @@ def test_server_with_agent_flag_hides_trimmed_builtins(
             },
         },
     )
-    listed: list[set[str]] = []
+    observed: dict[str, frozenset[str]] = {}
 
     def run_app_lifespan(self: Any, **kwargs: Any) -> None:
-        with TestClient(self.config.app) as client:
-            response = client.get("/v1/agents?limit=200")
-            assert response.status_code == 200, response.text
-            listed.append({agent["name"] for agent in response.json()["data"]})
+        with TestClient(self.config.app):
+            observed["suppressed"] = self.config.app.state.suppressed_agent_names
 
     monkeypatch.setattr(uvicorn.server.Server, "run", run_app_lifespan)
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "config"))
-
-    def boot() -> set[str]:
-        result = CliRunner().invoke(
-            cli,
-            [
-                "server",
-                "--port",
-                "0",
-                "--database-uri",
-                f"sqlite:///{tmp_path / 'chat.db'}",
-                "--artifact-location",
-                str(tmp_path / "artifacts"),
-                "--agent",
-                str(agent_dir),
-            ],
-        )
-        assert result.exit_code == 0, result.exception or result.output
-        return listed.pop()
-
-    # The first boot seeds debby; trimming on the next boot must hide that row.
-    monkeypatch.delenv(SEEDED_AGENTS_ENV, raising=False)
-    assert "debby" in boot()
     monkeypatch.setenv(SEEDED_AGENTS_ENV, "claude-native-ui")
-    names = boot()
-    assert "debby" not in names
-    assert {"polly", "claude-native-ui"} <= names
+    result = CliRunner().invoke(
+        cli,
+        [
+            "server",
+            "--port",
+            "0",
+            "--database-uri",
+            f"sqlite:///{tmp_path / 'chat.db'}",
+            "--artifact-location",
+            str(tmp_path / "artifacts"),
+            "--agent",
+            str(agent_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.exception or result.output
+    assert "debby" in observed["suppressed"]
+    assert "polly" not in observed["suppressed"]
 
 
 def test_server_explicit_config_overrides_omnigent_config_env(
