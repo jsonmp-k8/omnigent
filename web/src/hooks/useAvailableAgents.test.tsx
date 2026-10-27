@@ -1418,7 +1418,11 @@ describe("useAvailableAgents slow discovery scan", () => {
         has_more: false,
       }),
     });
-    const { result } = renderHook(() => ({ ...useAvailableAgents() }), { wrapper });
+    // A project default pinning the trimmed row must not bring it back either.
+    const { result } = renderHook(
+      () => ({ ...useAvailableAgents({ pinnedAgentIds: ["ag_polly"] }) }),
+      { wrapper },
+    );
     await waitFor(() => {
       expect(result.current.isSuccess).toBe(true);
       expect(result.current.isPlaceholderData).toBe(false);

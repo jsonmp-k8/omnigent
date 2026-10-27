@@ -126,8 +126,10 @@ OMNIGENT_SEEDED_AGENTS=
 ```
 
 Names are the agent's slug, not its display label (`claude-native-ui`, not
-"Claude Code"). Use `docker compose logs omnigent | grep Suppressing` to see
-what a given value trimmed.
+"Claude Code"). `docker-compose.yaml` forwards the variable from `.env`
+without a default, so leaving it out of `.env` keeps it unset (keep all)
+rather than empty (keep none). Use `docker compose logs omnigent | grep
+Suppressing` to see what a given value trimmed.
 
 Agents from `OMNIGENT_BUILTIN_AGENT_DIRS` are never filtered — pairing an
 empty allowlist with your own specs is the supported way to run a picker that
@@ -135,8 +137,10 @@ offers only your agents.
 
 Trimming hides, it never deletes. A packaged agent already seeded by an
 earlier boot keeps its database row, so sessions bound to it keep working and
-their history is untouched; only the new-session picker omits it. Adding a
-name back to the allowlist brings it straight back on the next restart.
+their history is untouched; only the new-session picker omits it. The native
+CLI harness rows are always seeded, even when trimmed, because transcript
+imports bind to them. Adding a name back to the allowlist brings it straight
+back on the next restart.
 
 Built-ins are keyed by name. If an extra's file stem or directory name matches
 an existing built-in, startup refreshes that stable row with the extra bundle;

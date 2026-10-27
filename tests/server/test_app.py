@@ -2050,20 +2050,19 @@ def test_ensure_default_debby_agent_skips_when_bundle_absent(
     assert seed_stores.agent_store.get_by_name(server_app._DEBBY_AGENT_NAME) is None
 
 
-def test_ensure_default_native_agents_skips_names_outside_the_allowlist(
-    seed_stores: _SeedStores,
+def test_ensure_default_agents_seeds_trimmed_native_rows_but_hides_them(
+    seed_stores: _SeedStores, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Only allowlisted rows seed, but every owned name is returned so older rows can be hidden."""
-    owned = server_app._ensure_default_native_agents(
-        seed_stores.agent_store,
-        seed_stores.artifact_store,
-        seed_stores.agent_cache,
-        frozenset({"claude-native-ui"}),
+    """Imports and smart routing bind native rows by id, so trimming only hides them."""
+    monkeypatch.setenv(SEEDED_AGENTS_ENV, "claude-native-ui")
+
+    suppressed = server_app._ensure_default_agents(
+        seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
     )
 
-    assert seed_stores.agent_store.get_by_name("claude-native-ui") is not None
-    assert seed_stores.agent_store.get_by_name("codex-native-ui") is None
-    assert {"claude-native-ui", "codex-native-ui"} <= owned
+    assert seed_stores.agent_store.get_by_name("codex-native-ui") is not None
+    assert "codex-native-ui" in suppressed
+    assert "claude-native-ui" not in suppressed
 
 
 @pytest.mark.parametrize(

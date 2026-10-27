@@ -994,7 +994,7 @@ def _ensure_default_agents(
     """
     allowlist = seeded_agent_allowlist()
     packaged = (
-        _ensure_default_native_agents(agent_store, artifact_store, agent_cache, allowlist)
+        _ensure_default_native_agents(agent_store, artifact_store, agent_cache)
         | _ensure_default_acp_agents(agent_store, artifact_store, agent_cache, allowlist)
         | _ensure_default_debby_agent(agent_store, artifact_store, agent_cache, allowlist)
         | _ensure_default_polly_agent(agent_store, artifact_store, agent_cache, allowlist)
@@ -1137,7 +1137,6 @@ def _ensure_default_native_agents(
     agent_store: AgentStore,
     artifact_store: ArtifactStore,
     agent_cache: Any,
-    allowlist: frozenset[str] | None = None,
 ) -> frozenset[str]:
     """
     Register or refresh every built-in native-CLI agent (claude/codex/pi/...).
@@ -1149,15 +1148,15 @@ def _ensure_default_native_agents(
     of the name — stays byte-identical and a redeploy does not orphan persisted
     ``conversation.agent_id`` rows.
 
-    The provider lookup runs before the allowlist check so a missing provider
-    row still fails loudly on a trimmed deployment — it is a packaging bug,
-    not something an operator's allowlist should be able to mask.
+    These rows are seeded even when ``OMNIGENT_SEEDED_AGENTS`` leaves them
+    out: transcript imports and smart routing bind sessions to them by
+    ``builtin_agent_id``, so a trimmed deployment only hides them from
+    discovery (the caller suppresses the names this returns).
 
     :param agent_store: Store for agent metadata.
     :param artifact_store: Store for agent bundles.
     :param agent_cache: Cache for loaded agent specs.
-    :param allowlist: Packaged names to seed, or ``None`` to seed all.
-    :returns: Every native agent name this helper owns, seeded or skipped.
+    :returns: Every native agent name this helper owns.
     """
     from omnigent.native.native_coding_agents import NATIVE_CODING_AGENTS
 
@@ -1167,8 +1166,6 @@ def _ensure_default_native_agents(
             raise OmnigentError(
                 f"native coding agent {agent.key!r} has no provider row to seed from"
             )
-        if not seeded_agent_allowed(agent.agent_name, allowlist):
-            continue
         _ensure_builtin_agent(
             agent_store,
             artifact_store,
@@ -1237,9 +1234,9 @@ def _ensure_default_acp_agents(
     Seed a picker agent per builtin ACP CLI row and per configured ``acp:`` agent.
 
     Native harnesses seed a fixed ``<harness>-ui`` agent each
-    (:func:`_ensure_default_native_agents`), gated by the same allowlist as the
-    ACP rows here; the picker additionally hides a row the selected host cannot
-    launch, reading that host's ``configured_harnesses``
+    (:func:`_ensure_default_native_agents`), hidden but still seeded when the
+    allowlist drops them; the picker additionally hides a row the selected host
+    cannot launch, reading that host's ``configured_harnesses``
     readiness map. Builtin ACP CLI harnesses follow the same model, because the
     vendor CLI runs on the *executing* host (the attached runner) rather than on the
     server: gating the row on the server's own PATH left Devin and Grok missing from

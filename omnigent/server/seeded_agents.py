@@ -1,28 +1,16 @@
 """
 Operator control over which packaged built-in agents a deployment offers.
 
-The server seeds a fixed roster on every lifespan startup — the native CLI
-harnesses, the builtin ACP rows, polly and debby — and the Web UI's
-new-session picker lists whatever ``GET /v1/agents`` returns. A deployment
-that only runs its own agents has no way to trim that roster.
+:data:`SEEDED_AGENTS_ENV` names the packaged built-ins to keep in
+``GET /v1/agents``:
 
-:data:`SEEDED_AGENTS_ENV` names the packaged built-ins to keep:
+- **unset** → offer every packaged built-in (the default).
+- **set** → offer only the named ones. An empty value offers none.
 
-- **unset** → seed and serve every packaged built-in (the default).
-- **set** → seed and serve only the named ones. An empty value keeps none.
+Agents supplied through ``OMNIGENT_BUILTIN_AGENT_DIRS`` are never filtered.
 
-Agents supplied through ``OMNIGENT_BUILTIN_AGENT_DIRS`` are never filtered:
-they are the operator's own roster, which is the whole point of trimming the
-packaged one.
-
-The suppressed names live on ``app.state.suppressed_agent_names``, written
-once per lifespan startup and read by ``GET /v1/agents``, so two apps in one
-process (and two tests) never share one roster.
-
-Suppression hides, it never deletes. Sessions look their agent up by
-``conversations.agent_id``, so removing a seeded row would leave every session
-that used it without an agent. A suppressed agent keeps its row; only the
-discovery list omits it, and clearing the env var brings it back.
+Suppression hides, it never deletes: a session bound to a hidden agent keeps
+its row and history. See ``deploy/docker/README.md`` for the operator guide.
 """
 
 import os

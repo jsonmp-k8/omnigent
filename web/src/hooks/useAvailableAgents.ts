@@ -363,8 +363,14 @@ async function fetchAvailableAgents(
   );
   for (const id of pinnedAgentIds) {
     if (merged.some((agent) => agent.id === id)) continue;
+    // A pin (e.g. a project default) must not resurface a trimmed built-in
+    // from session history; the caller's own same-named agent still resolves
+    // through `userAgents` below.
+    const sessionAgent = sessionAgents.find((a) => a.id === id);
     const agent =
-      sessionAgents.find((a) => a.id === id) ??
+      (sessionAgent && !catalog.suppressedNames.has(agentRootName(sessionAgent.name))
+        ? sessionAgent
+        : undefined) ??
       catalog.agents.find((a) => a.id === id) ??
       userAgents.find((a) => a.id === id);
     if (agent) merged.push(agent);
