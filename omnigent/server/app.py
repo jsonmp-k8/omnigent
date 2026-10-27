@@ -1499,6 +1499,7 @@ def create_app(
     host_sharded: bool = False,
     *,
     default_agents_seeded: bool = False,
+    suppressed_agent_names: frozenset[str] = frozenset(),
     preference_store: PreferenceStore | None = None,
     preference_policy: PreferencePolicy = DEFAULT_PREFERENCE_POLICY,
     scheduled_task_dispatch: ScheduledTaskDispatchHooks | None = None,
@@ -1521,6 +1522,8 @@ def create_app(
         directories.
     :param default_agents_seeded: The CLI already refreshed built-ins before
         registering explicit agent bundles; skip a second refresh at startup.
+    :param suppressed_agent_names: With ``default_agents_seeded``, the packaged
+        built-ins the CLI's refresh suppressed; startup computes its own otherwise.
     :param runner_tunnel_tokens: Optional allow-list of binding
         tokens accepted by the runner WebSocket tunnel route, e.g.
         ``frozenset({"uA6Zz..."})``. ``None`` accepts any
@@ -1909,7 +1912,9 @@ def create_app(
         # SessionFilesystemRegistry moved to the runner. Both
         # warmup blocks deleted here.
 
-        if not default_agents_seeded:
+        if default_agents_seeded:
+            app_inst.state.suppressed_agent_names = suppressed_agent_names
+        else:
             app_inst.state.suppressed_agent_names = _ensure_default_agents(
                 agent_store, artifact_store, agent_cache
             )
