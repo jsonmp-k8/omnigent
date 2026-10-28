@@ -2050,21 +2050,6 @@ def test_ensure_default_debby_agent_skips_when_bundle_absent(
     assert seed_stores.agent_store.get_by_name(server_app._DEBBY_AGENT_NAME) is None
 
 
-def test_ensure_default_agents_seeds_trimmed_native_rows_but_hides_them(
-    seed_stores: _SeedStores, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Imports and smart routing bind native rows by id, so trimming only hides them."""
-    monkeypatch.setenv(SEEDED_AGENTS_ENV, "claude-native-ui")
-
-    suppressed = server_app._ensure_default_agents(
-        seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache
-    )
-
-    assert seed_stores.agent_store.get_by_name("codex-native-ui") is not None
-    assert "codex-native-ui" in suppressed
-    assert "claude-native-ui" not in suppressed
-
-
 @pytest.mark.parametrize(
     "seeder",
     [server_app._ensure_default_polly_agent, server_app._ensure_default_debby_agent],
@@ -2084,8 +2069,14 @@ def test_bundle_agent_seeders_skip_when_not_allowlisted(
 def test_ensure_default_agents_hides_trimmed_rows_without_deleting_them(
     seed_stores: _SeedStores, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Unset hides nothing; a later allowlist hides rows an earlier boot seeded, and keeps them."""
+    """A trimmed boot still seeds native rows; unset hides nothing; trimming again keeps rows."""
     stores = (seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache)
+    monkeypatch.setenv(SEEDED_AGENTS_ENV, "claude-native-ui")
+    suppressed = server_app._ensure_default_agents(*stores)
+    # Imports and smart routing bind native rows by id, so trimming only hides them.
+    assert seed_stores.agent_store.get_by_name("codex-native-ui") is not None
+    assert "codex-native-ui" in suppressed
+
     monkeypatch.delenv(SEEDED_AGENTS_ENV, raising=False)
     assert server_app._ensure_default_agents(*stores) == frozenset()
     polly = seed_stores.agent_store.get_by_name(server_app._POLLY_AGENT_NAME)

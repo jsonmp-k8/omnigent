@@ -1285,10 +1285,7 @@ def _ensure_default_acp_agents(
         # ``[a-zA-Z0-9_-]+`` (the spec validator rejects spaces/dots), and a label
         # like "Gemini CLI" would fail to load. The web picker capitalizes the slug
         # for display (e.g. ``devin`` -> "Devin").
-        # Outside the allowlist, and outside ``owned``: these rows are the
-        # operator's own config (the ``acp:`` block), not something packaged
-        # here, so trimming the packaged roster must not take them with it —
-        # the same exemption ``OMNIGENT_BUILTIN_AGENT_DIRS`` extras get.
+        # Configured ACP agents are operator-owned and bypass packaged allowlisting.
         _ensure_builtin_agent(
             agent_store,
             artifact_store,

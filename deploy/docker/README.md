@@ -142,6 +142,9 @@ CLI harness rows are always seeded, even when trimmed, because transcript
 imports bind to them. Adding a name back to the allowlist brings it straight
 back on the next restart.
 
+Trimming is not access control: a hidden agent can still be read and launched
+by its id through the API.
+
 Built-ins are keyed by name. If an extra's file stem or directory name matches
 an existing built-in, startup refreshes that stable row with the extra bundle;
 it does not create a second agent. Use a distinct name unless that override is
