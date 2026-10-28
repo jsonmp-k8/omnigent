@@ -683,9 +683,14 @@ def test_filesystem_attachment_policy_reads_the_config_file(
 # ── New Chat picker curation ──────────────────────────────────────
 
 
-def test_picker_curation_is_empty_without_config() -> None:
-    """Absent keys mean the full roster, which is every existing deployment."""
-    curation = load_picker_curation({})
+@pytest.mark.parametrize(
+    "config",
+    [{}, {"restrict_to_agent_names": []}, {"restrict_to_agent_names": [""]}],
+    ids=["absent", "empty-list", "blank-name"],
+)
+def test_picker_curation_is_empty_without_config(config: dict[str, object]) -> None:
+    """Absent or empty keys mean the full roster, which is every existing deployment."""
+    curation = load_picker_curation(config)
 
     assert curation.restrict_to_agent_names == ()
     assert curation.default_agent_name is None

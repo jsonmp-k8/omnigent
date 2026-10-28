@@ -38,8 +38,11 @@ should stay available but only some belong in front of a user.
 
 When `restrict_to_agent_names` is set, the menu becomes one flat list of the
 named agents in the configured order. The Harnesses heading, the "Other..."
-submenus and the "Create custom agent" action all disappear, because none of
-them can lead anywhere the deployment allows. Name exactly one agent and the
+submenus, the "Create custom agent" action and the Smart Routing entry all
+disappear, because none of them can lead anywhere the deployment allows. A
+returning user's cached picker stays closed until the server has answered
+`GET /v1/info`, so the full roster is never shown ahead of the curation. Name
+exactly one agent and the
 picker collapses to that one row. If the names match nothing the menu says so
 rather than opening blank, and the server logs a warning at startup naming the
 agents it could not find.

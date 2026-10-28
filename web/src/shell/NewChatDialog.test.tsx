@@ -1355,7 +1355,7 @@ function LandingNavigationProbe() {
 }
 
 function renderLanding(
-  infoOverrides: Partial<ServerInfo> = {},
+  infoOverrides: Partial<ServerInfo> | "loading" = {},
   route = "/",
   onRender?: ProfilerOnRenderCallback,
   strictMode = false,
@@ -1363,7 +1363,35 @@ function renderLanding(
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  const info: ServerInfo = {
+  // "loading" renders the probe still pending; `rerenderWith` resolves it later.
+  const tree = (overrides: Partial<ServerInfo> | "loading") => (
+    <QueryClientProvider client={client}>
+      <CapabilitiesProvider info={overrides === "loading" ? "loading" : landingInfo(overrides)}>
+        <TooltipProvider>
+          <MemoryRouter initialEntries={[route]}>
+            <LandingNavigationProbe />
+            {onRender ? (
+              <Profiler id="landing" onRender={onRender}>
+                <NewChatLandingScreen />
+              </Profiler>
+            ) : (
+              <NewChatLandingScreen />
+            )}
+          </MemoryRouter>
+        </TooltipProvider>
+      </CapabilitiesProvider>
+    </QueryClientProvider>
+  );
+  const rendered = render(tree(infoOverrides), { reactStrictMode: strictMode });
+  return {
+    ...rendered,
+    rerenderWith: (overrides: Partial<ServerInfo> | "loading") =>
+      rendered.rerender(tree(overrides)),
+  };
+}
+
+function landingInfo(infoOverrides: Partial<ServerInfo>): ServerInfo {
+  return {
     accounts_enabled: false,
     single_user: false,
     login_url: null,
@@ -1390,25 +1418,6 @@ function renderLanding(
     dictation_available: false,
     ...infoOverrides,
   };
-  return render(
-    <QueryClientProvider client={client}>
-      <CapabilitiesProvider info={info}>
-        <TooltipProvider>
-          <MemoryRouter initialEntries={[route]}>
-            <LandingNavigationProbe />
-            {onRender ? (
-              <Profiler id="landing" onRender={onRender}>
-                <NewChatLandingScreen />
-              </Profiler>
-            ) : (
-              <NewChatLandingScreen />
-            )}
-          </MemoryRouter>
-        </TooltipProvider>
-      </CapabilitiesProvider>
-    </QueryClientProvider>,
-    { reactStrictMode: strictMode },
-  );
 }
 
 function tooltipKeys(tooltip: HTMLElement): string[] {
@@ -12840,5 +12849,48 @@ describe("NewChatLandingScreen picker curation", () => {
     expect(screen.getByTestId("new-chat-landing-no-agents")).toHaveTextContent(
       "This deployment limits which agents New Chat offers.",
     );
+  });
+
+  it("pre-selects a default on its own, leaving the grouped menu when nothing is restricted", () => {
+    mockClaudeModels([{ id: "opus", displayName: "Opus", isDefault: true }]);
+    // The documented configuration: a default without a restriction.
+    curated([], "codex-native-ui");
+    openPicker();
+
+    expect(row("a2")).toHaveAttribute("data-active", "true");
+    expect(row("a1")).not.toHaveAttribute("data-active");
+    expect(screen.queryByTestId("new-chat-landing-curated")).toBeNull();
+    expect(screen.getByText("Harnesses")).toBeVisible();
+  });
+
+  it("keeps a returning user's cached picker closed until the curation is known", () => {
+    getCurrentUserIdMock.mockReturnValue("picker-user@example.test");
+    mockClaudeModels([{ id: "opus", displayName: "Opus", isDefault: true }]);
+    // An earlier, unrestricted visit cached the full roster for this user.
+    const earlier = renderLanding();
+    const cached = readNewChatPickerOptionsCache(getNewChatPickerCacheKey(""));
+    expect(cached?.agents.map((agent) => agent.id)).toEqual(expect.arrayContaining(["a1", "a2"]));
+    earlier.unmount();
+    resetLandingDraft();
+
+    // Agents and sessions have answered, but /v1/info has not: the cached
+    // picker shows the remembered pick and stays closed, since the cached
+    // roster could hold agents this deployment no longer offers.
+    const view = renderLanding("loading");
+    const trigger = screen.getByTestId("new-chat-landing-agent-select");
+    expect(trigger).toHaveAttribute("aria-busy", "true");
+    expect(trigger).toBeDisabled();
+    openPicker();
+    expect(row("a1")).toBeNull();
+    expect(row("a2")).toBeNull();
+
+    view.rerenderWith({
+      picker: { restrictToAgentNames: new Set(["codex-native-ui"]), defaultAgentName: null },
+    });
+    expect(screen.getByTestId("new-chat-landing-agent-select")).toBeEnabled();
+    openPicker();
+    expect(row("a1")).toBeNull();
+    expect(row("a2")).not.toBeNull();
+    expect(screen.queryByText("Harnesses")).toBeNull();
   });
 });

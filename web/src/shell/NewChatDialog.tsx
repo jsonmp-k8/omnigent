@@ -2401,7 +2401,7 @@ export function NewChatLandingScreen() {
     conversationsData !== undefined &&
     conversationsData.pages.every((page) => page.data.length === 0);
 
-  // Narrow to the deployment's restrict_to_agent_names, in config order.
+  // Filter and order selectable agents by deployment curation.
   const serverInfo = useServerInfo();
   const curation = pickerCuration(serverInfo);
   const agentList = useMemo(() => {
@@ -2410,7 +2410,6 @@ export function NewChatLandingScreen() {
     );
     if (curation.restrictToAgentNames.size === 0) return selectable;
     const allowed = selectable.filter((agent) => curation.restrictToAgentNames.has(agent.name));
-    // Order follows the config, so a deployment can put its own agent first.
     const order = [...curation.restrictToAgentNames];
     return allowed.sort((first, second) => order.indexOf(first.name) - order.indexOf(second.name));
   }, [agents, agentsLoading, cachedPickerOptions, curation.restrictToAgentNames]);
@@ -3876,9 +3875,12 @@ export function NewChatLandingScreen() {
   useEffect(() => {
     setInteractiveCacheKey(cachedPickerOptions ? pickerCacheKey : null);
   }, [cachedPickerOptions, pickerCacheKey]);
+  // A cached roster is only safe to open once the server's curation is known:
+  // before that it could show agents this deployment does not offer.
   const interactiveWhileLoading =
     cachedPickerOptions !== null &&
     interactiveCacheKey === pickerCacheKey &&
+    serverInfo !== "loading" &&
     selectedAgent !== undefined &&
     (!harnessTriggerDetails.some((row) => row.label === "Model") ||
       pickerModelOptions.length > 0 ||
