@@ -300,13 +300,13 @@ export function pickerCuration(info: ServerInfo | "loading"): PickerCuration {
 function parsePicker(raw: unknown): PickerCuration {
   if (raw === null || typeof raw !== "object") return UNRESTRICTED_PICKER;
   const value = raw as Record<string, unknown>;
-  // Blank names read as unset, the same way the server strips them.
-  const names = Array.isArray(value.restrict_to_agent_names)
-    ? value.restrict_to_agent_names
-        .filter((name): name is string => typeof name === "string")
-        .map((name) => name.trim())
-        .filter((name) => name !== "")
-    : [];
+  // Blank names read as unset, the same way the server strips them; a list with
+  // a non-string member is ignored whole, as the server ignores it.
+  const rawNames = value.restrict_to_agent_names;
+  const names =
+    Array.isArray(rawNames) && rawNames.every((name) => typeof name === "string")
+      ? rawNames.map((name) => name.trim()).filter((name) => name !== "")
+      : [];
   const fallbackDefault =
     typeof value.default_agent_name === "string" && value.default_agent_name.trim() !== ""
       ? value.default_agent_name.trim()

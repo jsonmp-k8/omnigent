@@ -685,11 +685,17 @@ def test_filesystem_attachment_policy_reads_the_config_file(
 
 @pytest.mark.parametrize(
     "config",
-    [{}, {"restrict_to_agent_names": []}, {"restrict_to_agent_names": [""]}],
-    ids=["absent", "empty-list", "blank-name"],
+    [
+        {},
+        {"restrict_to_agent_names": []},
+        {"restrict_to_agent_names": [""]},
+        # An operator clearing a key in place means "no curation", not "nothing".
+        {"restrict_to_agent_names": "  ", "default_agent_name": "  "},
+    ],
+    ids=["absent", "empty-list", "blank-name", "blank-values"],
 )
 def test_picker_curation_is_empty_without_config(config: dict[str, object]) -> None:
-    """Absent or empty keys mean the full roster, which is every existing deployment."""
+    """Absent, empty or blank keys mean the full roster, which is every existing deployment."""
     curation = load_picker_curation(config)
 
     assert curation.restrict_to_agent_names == ()
@@ -755,11 +761,3 @@ def test_a_default_without_any_restriction_is_kept() -> None:
 
     assert curation.restrict_to_agent_names == ()
     assert curation.default_agent_name == "polly"
-
-
-def test_blank_values_read_as_unset() -> None:
-    """An operator clearing a key in place means "no curation", not "nothing"."""
-    curation = load_picker_curation({"restrict_to_agent_names": "  ", "default_agent_name": "  "})
-
-    assert curation.restrict_to_agent_names == ()
-    assert curation.default_agent_name is None

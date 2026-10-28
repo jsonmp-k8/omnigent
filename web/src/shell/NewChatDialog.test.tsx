@@ -12863,6 +12863,41 @@ describe("NewChatLandingScreen picker curation", () => {
     expect(screen.getByText("Harnesses")).toBeVisible();
   });
 
+  it("drops a remembered Smart Routing pick the curated menu cannot show", async () => {
+    // A user chose Smart Routing before the deployment was curated: the
+    // placeholder wrapper is remembered as the agent and the sentinel as its
+    // harness. Both lead nowhere now, so the configured default takes over and
+    // the create carries no "auto" override.
+    localStorage.setItem(LAST_AGENT_KEY, "a1");
+    localStorage.setItem(LAST_HARNESS_KEY, JSON.stringify({ a1: "auto-native" }));
+    mockClaudeModels([{ id: "opus", displayName: "Opus", isDefault: true }]);
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_curated" }),
+    } as unknown as Response);
+    renderLanding({
+      smart_routing_enabled: true,
+      picker: {
+        restrictToAgentNames: new Set(["claude-native-ui", "codex-native-ui"]),
+        defaultAgentName: "codex-native-ui",
+      },
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("repo"),
+    );
+    const trigger = screen.getByTestId("new-chat-landing-agent-select");
+    expect(trigger).toHaveAttribute("aria-label", expect.stringContaining("Codex"));
+    expect(trigger).not.toHaveAttribute("aria-label", expect.stringContaining("Smart Routing"));
+
+    const { body } = await submitAndReadBody();
+    expect(body.harness_override).not.toBe("auto");
+
+    openPicker();
+    expect(screen.queryByTestId("new-chat-landing-harness-smart-routing")).toBeNull();
+    expect(row("a2")).toHaveAttribute("data-active", "true");
+    expect(row("a1")).not.toHaveAttribute("data-active");
+  });
+
   it("keeps a returning user's cached picker closed until the curation is known", () => {
     getCurrentUserIdMock.mockReturnValue("picker-user@example.test");
     mockClaudeModels([{ id: "opus", displayName: "Opus", isDefault: true }]);

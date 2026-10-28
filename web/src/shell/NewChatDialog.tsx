@@ -4724,7 +4724,11 @@ export function NewChatLandingScreen() {
       }),
     [smartRoutingEnabled, smartRoutingWrappers, harnessWarningHost, externalRoutingConfigured],
   );
-  const smartRoutingHarnessAvailable = smartRoutingUnavailableCause === null;
+  // The curated menu has no Smart Routing row, so a remembered pick of it has
+  // nothing behind it either.
+  const smartRoutingCuratedAway = curation.restrictToAgentNames.size > 0;
+  const smartRoutingHarnessAvailable =
+    smartRoutingUnavailableCause === null && !smartRoutingCuratedAway;
   // The fully-auto brain needs SOME router able to answer for both model
   // families — the router may land the session's work on either, and an arm the
   // external router can't reach (off the workspace Unity Gateway) is only a loss
@@ -4765,12 +4769,18 @@ export function NewChatLandingScreen() {
     if (!smartRoutingHarnessSelected || smartRoutingHarnessAvailable) return;
     setPickedHarness(null);
     _setCostControlMode(null);
-    if (wasAvailable) setSmartRoutingDropped(smartRoutingUnavailableCause);
+    // The placeholder wrapper was picked only to carry Smart Routing; under
+    // curation the configured default decides instead of that leftover.
+    if (smartRoutingCuratedAway) setPickedAgentId(null);
+    if (wasAvailable && smartRoutingUnavailableCause !== null) {
+      setSmartRoutingDropped(smartRoutingUnavailableCause);
+    }
   }, [
     smartRoutingHarnessSelected,
     smartRoutingAvailabilityKnown,
     smartRoutingHarnessAvailable,
     smartRoutingUnavailableCause,
+    smartRoutingCuratedAway,
   ]);
   // Routing came back (host switched again, or the missing arm installed) —
   // there is nothing left to explain. An explicit pick clears it too, from the
