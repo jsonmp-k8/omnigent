@@ -364,8 +364,8 @@ apply only to that side chat. See the [side-chat settings recipe](sessions.md).
   selects the agent, which stays listed after a reload. A rejected bundle (for
   example a server agent's name) keeps the dialog open with the server's reason.
   Under picker curation (`restrict_to_agent_names`, see
-  `native-harnesses.md`) this New Chat entry point is absent; import bundles
-  from Settings → Custom agents instead.
+  `native-harnesses.md`) this New Chat entry point is absent: a curated
+  deployment offers no bundle import from New Chat.
 
 **Fork dialog** (Fork in the session header menu, or Fork from here on a
 message, with a native target): the same model, effort, and permission mode

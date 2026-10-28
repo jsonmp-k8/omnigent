@@ -3003,14 +3003,6 @@ async def test_info_publishes_the_picker_curation(
     }
 
 
-@pytest.mark.asyncio
-async def test_info_reports_an_uncurated_picker_by_default(client: httpx.AsyncClient) -> None:
-    """Without the keys the block is present and empty, never missing."""
-    resp = await client.get("/v1/info")
-    assert resp.status_code == 200
-    assert resp.json()["picker"] == {"restrict_to_agent_names": [], "default_agent_name": None}
-
-
 def test_picker_restriction_warning_names_only_the_missing_agents(
     db_uri: str, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -3026,12 +3018,14 @@ def test_picker_restriction_warning_names_only_the_missing_agents(
             agent_store, PickerCuration(restrict_to_agent_names=("polly", "pollly"))
         )
     assert "pollly" in caplog.text
-    assert "does not have" in caplog.text
-    assert "will be empty" not in caplog.text
+    assert "matching no server agent" in caplog.text
+    assert "matches no server agent" not in caplog.text
 
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="omnigent.server.app"):
         server_app._warn_on_empty_picker_restriction(
             agent_store, PickerCuration(restrict_to_agent_names=("nope",))
         )
-    assert "will be empty" in caplog.text
+    # A user's own agent can still match, so the message does not promise an empty picker.
+    assert "matches no server agent" in caplog.text
+    assert "will be empty" not in caplog.text

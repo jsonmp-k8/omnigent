@@ -12851,6 +12851,22 @@ describe("NewChatLandingScreen picker curation", () => {
     );
   });
 
+  it("orders the curated list as configured, not as the roster came", () => {
+    mockClaudeModels([{ id: "opus", displayName: "Opus", isDefault: true }]);
+    // The roster lists Claude Code (a1) before Codex (a2); the config says otherwise.
+    curated(["codex-native-ui", "claude-native-ui"]);
+    openPicker();
+
+    const ids = [
+      ...screen
+        .getByTestId("new-chat-landing-curated")
+        .querySelectorAll("[data-testid^='new-chat-landing-agent-']"),
+    ]
+      .map((node) => node.getAttribute("data-testid"))
+      .filter((id) => /^new-chat-landing-agent-a\d+$/.test(id ?? ""));
+    expect(ids).toEqual(["new-chat-landing-agent-a2", "new-chat-landing-agent-a1"]);
+  });
+
   it("pre-selects a default on its own, leaving the grouped menu when nothing is restricted", () => {
     mockClaudeModels([{ id: "opus", displayName: "Opus", isDefault: true }]);
     // The documented configuration: a default without a restriction.

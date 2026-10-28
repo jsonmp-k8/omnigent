@@ -1821,13 +1821,35 @@ export function AgentHarnessPicker({
     }
     return { readyHarnessEntries: ready, moreHarnessEntries: more };
   }, [harnessEntries, host, hideUnconfigured, effectiveAgentId, promotedHarnessId]);
+  // A curated list keeps the deployment's order but honours the same
+  // "hide unconfigured harnesses" preference as the grouped menu, with the
+  // selected row always kept so the trigger's choice stays in the list.
+  const visibleCuratedEntries = useMemo(() => {
+    if (curatedEntries === undefined) return undefined;
+    const harnessIds = new Set(harnessEntries.map((agent) => agent.id));
+    return curatedEntries.filter((agent) => {
+      if (agent.id === effectiveAgentId || !hideUnconfigured || !harnessIds.has(agent.id)) {
+        return true;
+      }
+      const readiness = harnessReadinessOnHost(agent.harness, host);
+      return readiness.selectable || !readiness.fallbackRelevant;
+    });
+  }, [curatedEntries, harnessEntries, hideUnconfigured, effectiveAgentId, host]);
+  // What a menu open prefetches sandbox support for: every harness row it shows.
+  const prefetchIds = useMemo(
+    () =>
+      (visibleCuratedEntries ?? readyHarnessEntries)
+        .filter((agent) => harnessEntries.some((entry) => entry.id === agent.id))
+        .map((agent) => agent.id),
+    [visibleCuratedEntries, readyHarnessEntries, harnessEntries],
+  );
   // Opening by hotkey skips onOpenChange, so prefetch here like a pointer open.
   const prefetchedOpenNonce = useRef(0);
   useEffect(() => {
     if (!openNonce || openNonce === prefetchedOpenNonce.current) return;
     prefetchedOpenNonce.current = openNonce;
-    onPrefetchEntries?.(readyHarnessEntries.map((agent) => agent.id));
-  }, [openNonce, onPrefetchEntries, readyHarnessEntries]);
+    onPrefetchEntries?.(prefetchIds);
+  }, [openNonce, onPrefetchEntries, prefetchIds]);
   const selectedOtherHarness = moreHarnessEntries.find((agent) => agent.id === effectiveAgentId);
   const otherHarnessLabel =
     selectedOtherHarness && !autoHarnessActive
@@ -1944,7 +1966,7 @@ export function AgentHarnessPicker({
           for (const agent of [...harnessEntries, ...agentEntries]) {
             void prefetchAvailableAgentDetails(agent, queryClient);
           }
-          onPrefetchEntries?.(readyHarnessEntries.map((agent) => agent.id));
+          onPrefetchEntries?.(prefetchIds);
         }
       }}
       trigger={{
@@ -2049,7 +2071,7 @@ export function AgentHarnessPicker({
       ) : curated ? (
         // One flat list: the agents this deployment offers, in its order.
         <div data-testid="new-chat-landing-curated">
-          {curatedEntries?.length === 0 ? (
+          {visibleCuratedEntries?.length === 0 ? (
             <div
               data-testid="new-chat-landing-no-agents"
               role="status"
@@ -2058,11 +2080,13 @@ export function AgentHarnessPicker({
             >
               No agents are available here.
               <div className="text-xs leading-4">
-                This deployment limits which agents New Chat offers.
+                {curatedEntries?.length === 0
+                  ? "This deployment limits which agents New Chat offers."
+                  : "The offered harnesses are not set up on this host and are hidden by your settings."}
               </div>
             </div>
           ) : (
-            curatedEntries?.map(renderEntry)
+            visibleCuratedEntries?.map(renderEntry)
           )}
         </div>
       ) : (
@@ -2402,8 +2426,8 @@ export function NewChatLandingScreen() {
     conversationsData.pages.every((page) => page.data.length === 0);
 
   // Filter and order selectable agents by deployment curation.
-  const serverInfo = useServerInfo();
-  const curation = pickerCuration(serverInfo);
+  const info = useServerInfo();
+  const curation = pickerCuration(info);
   const agentList = useMemo(() => {
     const selectable = selectableSessionAgents(
       (agentsLoading ? cachedPickerOptions?.agents : undefined) ?? agents ?? [],
@@ -2532,7 +2556,6 @@ export function NewChatLandingScreen() {
   // Gates the sandbox host option: only servers whose sandbox
   // config can actually serve a managed launch advertise it. "loading"
   // fails closed (option hidden) until the boot probe resolves.
-  const info = useServerInfo();
   const managedSandboxesEnabled = info !== "loading" && info.managed_sandboxes_enabled;
   const mcpRegistryEnabled = info !== "loading" && !!info.enabled_connections?.includes("mcp");
   const {
@@ -3870,7 +3893,7 @@ export function NewChatLandingScreen() {
     setPickerReadyTarget(pickerDataLoading ? null : pickerTarget);
   }, [pickerDataLoading, pickerTarget]);
   const pickerLoading =
-    pickerDataLoading || pickerReadyTarget !== pickerTarget || serverInfo === "loading";
+    pickerDataLoading || pickerReadyTarget !== pickerTarget || info === "loading";
   const [interactiveCacheKey, setInteractiveCacheKey] = useState<string | null>(null);
   useEffect(() => {
     setInteractiveCacheKey(cachedPickerOptions ? pickerCacheKey : null);
@@ -3880,7 +3903,7 @@ export function NewChatLandingScreen() {
   const interactiveWhileLoading =
     cachedPickerOptions !== null &&
     interactiveCacheKey === pickerCacheKey &&
-    serverInfo !== "loading" &&
+    info !== "loading" &&
     selectedAgent !== undefined &&
     (!harnessTriggerDetails.some((row) => row.label === "Model") ||
       pickerModelOptions.length > 0 ||
@@ -5988,8 +6011,8 @@ export function NewChatLandingScreen() {
       const skill = isNativeTerminalAgent
         ? null
         : matchSkillInvocation(initialPrompt, availableSkills);
-      const serverOwnsInitialInput =
-        sandboxSelected && info !== "loading" && info.durable_initial_input === true;
+      // canSubmit already waited for the server probe, so `info` is settled here.
+      const serverOwnsInitialInput = sandboxSelected && info.durable_initial_input === true;
       const initialInput =
         skill !== null
           ? {
@@ -6106,7 +6129,7 @@ export function NewChatLandingScreen() {
                 ...(sandboxProvider !== null ? { sandbox_provider: sandboxProvider } : {}),
                 // The new sandbox host's id, in the server's minted shape;
                 // keys the create and the session's requests until it binds.
-                ...(info !== "loading" && info.request_managed_sandbox_host_id
+                ...(info.request_managed_sandbox_host_id
                   ? { host_id: randomUUID().replace(/-/g, "") }
                   : {}),
                 ...(sandboxPreviewEnabled && sandboxModels.data?.configuration_revision

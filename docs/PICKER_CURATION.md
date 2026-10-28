@@ -40,9 +40,12 @@ When `restrict_to_agent_names` is set, the menu becomes one flat list of the
 named agents in the configured order. The Harnesses heading, the "Other..."
 submenus, the "Create custom agent" action and the Smart Routing entry all
 disappear, because none of them can lead anywhere the deployment allows. A
-returning user's cached picker stays closed until the server has answered
-`GET /v1/info`, so the full roster is never shown ahead of the curation. Name
-exactly one agent and the
+returning user's cached picker stays closed while `GET /v1/info` is still
+pending, so the full roster is never shown ahead of the curation; if that
+probe fails outright, the client falls back to the uncurated picker, as it
+does for an older server that has no `picker` block. The "Hide unconfigured
+harnesses" setting applies to the curated list as it does to the grouped
+menu. Name exactly one agent and the
 picker collapses to that one row. If the names match nothing the menu says so
 rather than opening blank, and the server logs a warning at startup naming the
 agents it could not find.

@@ -8,6 +8,8 @@ import type { Host } from "@/hooks/useHosts";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
 import { StoryQueryRouter } from "@/storybook/StoryProviders";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { writeHideUnconfiguredHarnesses } from "@/lib/harnessVisibilityPreferences";
 
 const agent = (
   overrides: Partial<AvailableAgent> &
@@ -80,26 +82,31 @@ function renderPicker(props: {
   /** The deployment's curated roster, as only the New Chat landing passes it. */
   curatedEntries?: AvailableAgent[];
   hasAgents?: boolean;
+  host?: Host;
+  onPrefetchEntries?: (ids: string[]) => void;
 }) {
   return render(
     <CapabilitiesProvider info={FALLBACK_SERVER_INFO}>
       <StoryQueryRouter>
-        <AgentHarnessPicker
-          agentEntries={props.agentEntries ?? []}
-          harnessEntries={props.harnessEntries}
-          curatedEntries={props.curatedEntries}
-          effectiveAgentId={props.effectiveAgentId ?? null}
-          agentLabel="Picker"
-          hasAgents={props.hasAgents ?? true}
-          host={readyHost}
-          onSelectAgent={() => undefined}
-          pendingAgent={null}
-          pendingAgentId="pending-agent"
-          onSelectPending={() => undefined}
-          onCreateCustomAgent={() => undefined}
-          sandboxSelected={props.sandboxSelected ?? false}
-          allowCreateCustomAgent={props.allowCreateCustomAgent ?? true}
-        />
+        <TooltipProvider>
+          <AgentHarnessPicker
+            agentEntries={props.agentEntries ?? []}
+            harnessEntries={props.harnessEntries}
+            curatedEntries={props.curatedEntries}
+            onPrefetchEntries={props.onPrefetchEntries}
+            effectiveAgentId={props.effectiveAgentId ?? null}
+            agentLabel="Picker"
+            hasAgents={props.hasAgents ?? true}
+            host={props.host ?? readyHost}
+            onSelectAgent={() => undefined}
+            pendingAgent={null}
+            pendingAgentId="pending-agent"
+            onSelectPending={() => undefined}
+            onCreateCustomAgent={() => undefined}
+            sandboxSelected={props.sandboxSelected ?? false}
+            allowCreateCustomAgent={props.allowCreateCustomAgent ?? true}
+          />
+        </TooltipProvider>
       </StoryQueryRouter>
     </CapabilitiesProvider>,
   );
@@ -125,6 +132,8 @@ describe("AgentHarnessPicker inline harness list", () => {
     expect(inlineHarnessIds([claude.id, codex.id])).toEqual([claude.id, codex.id]);
     expect(screen.queryByTestId(`new-chat-landing-agent-${pi.id}`)).toBeNull();
     expect(screen.getByTestId("new-chat-landing-harness-more")).toBeInTheDocument();
+    // With no curation handed down there is no flat curated list either.
+    expect(screen.queryByTestId("new-chat-landing-curated")).toBeNull();
   });
 
   it("backfills the inline list when no preferred harness is seeded", async () => {
@@ -199,11 +208,7 @@ it("omits the rule above an Agents group that will not render", async () => {
   expect(menu.querySelectorAll('[role="separator"]')).toHaveLength(0);
 });
 
-// A deployment can name which agents New Chat offers (server config
-// `restrict_to_agent_names`). The landing screen filters the roster and hands
-// the picker the result as `curatedEntries`; these cover what that does to the
-// menu's shape. Default selection and the real-flow empty state live with the
-// landing screen's tests.
+// Tests the curated menu shape; landing selection is covered in NewChatDialog.test.tsx.
 describe("a curated New Chat picker", () => {
   const curatedLabels = () =>
     [
@@ -261,9 +266,72 @@ describe("a curated New Chat picker", () => {
     renderPicker({ harnessEntries: [claude, codex], agentEntries: [polly] });
     await openPicker();
 
-    expect(screen.queryByTestId("new-chat-landing-curated")).toBeNull();
     expect(screen.getByText("Harnesses")).toBeVisible();
     // Creating stays reachable, in the submenu that groups custom agents.
     expect(screen.getByTestId("new-chat-landing-custom-agents")).toBeVisible();
+  });
+
+  describe("with unconfigured harnesses hidden", () => {
+    // Codex is not set up on this host; Claude Code and Polly are.
+    const partialHost: Host = {
+      ...readyHost,
+      configured_harnesses: {
+        "claude-native": true,
+        "codex-native": "binary-missing",
+        "claude-sdk": true,
+      },
+    };
+    afterEach(() => localStorage.clear());
+
+    it("hides an unconfigured harness from the curated list, keeping the order", async () => {
+      writeHideUnconfiguredHarnesses(true);
+      renderPicker({
+        harnessEntries: [claude, codex],
+        agentEntries: [polly],
+        curatedEntries: [polly, codex, claude],
+        host: partialHost,
+      });
+      await openPicker();
+
+      expect(curatedLabels()).toEqual(["Polly", "Claude Code"]);
+    });
+
+    it("keeps the selected harness in the list even when it is unconfigured", async () => {
+      writeHideUnconfiguredHarnesses(true);
+      renderPicker({
+        harnessEntries: [claude, codex],
+        agentEntries: [polly],
+        curatedEntries: [polly, codex, claude],
+        effectiveAgentId: codex.id,
+        host: partialHost,
+      });
+      await openPicker();
+
+      expect(curatedLabels()).toEqual(["Polly", "Codex", "Claude Code"]);
+    });
+
+    it("explains an empty list that the preference, not the deployment, emptied", async () => {
+      writeHideUnconfiguredHarnesses(true);
+      renderPicker({ harnessEntries: [codex], curatedEntries: [codex], host: partialHost });
+      await openPicker();
+
+      expect(screen.getByTestId("new-chat-landing-no-agents")).toHaveTextContent(
+        "hidden by your settings",
+      );
+    });
+  });
+
+  it("prefetches sandbox support for every curated harness row it shows", async () => {
+    const prefetched: string[][] = [];
+    renderPicker({
+      harnessEntries: [claude, codex, pi],
+      agentEntries: [polly],
+      curatedEntries: [polly, pi, codex],
+      onPrefetchEntries: (ids) => prefetched.push(ids),
+    });
+    await openPicker();
+
+    // The harness rows the curated list shows, not the grouped menu's inline set.
+    expect(prefetched.at(-1)).toEqual([pi.id, codex.id]);
   });
 });

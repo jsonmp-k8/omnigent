@@ -1018,14 +1018,14 @@ def _warn_on_empty_picker_restriction(agent_store: AgentStore, curation: PickerC
         return
     if len(missing) == len(curation.restrict_to_agent_names):
         _logger.warning(
-            "server config %s names no agent this server has (%s); the New Chat picker "
-            "will be empty",
+            "server config %s matches no server agent (%s); only a user's own agent "
+            "with one of these names will show in New Chat",
             RESTRICT_TO_AGENT_NAMES_KEY,
             ", ".join(missing),
         )
         return
     _logger.warning(
-        "server config %s names %d agent(s) this server does not have: %s",
+        "server config %s has %d name(s) matching no server agent: %s",
         RESTRICT_TO_AGENT_NAMES_KEY,
         len(missing),
         ", ".join(missing),
