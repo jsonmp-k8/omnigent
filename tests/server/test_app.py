@@ -2127,6 +2127,21 @@ def test_ensure_default_agents_warns_on_unknown_allowlist_names(
     assert "claude-native-ui" in warning
 
 
+def test_ensure_default_agents_allowlist_recognizes_every_packaged_name(
+    seed_stores: _SeedStores, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty allowlist hides every packaged row; naming them all hides none."""
+    monkeypatch.setattr("omnigent.onboarding.acp_auth.acp_agents", lambda *a, **k: [])
+    stores = (seed_stores.agent_store, seed_stores.artifact_store, seed_stores.agent_cache)
+    monkeypatch.setenv(SEEDED_AGENTS_ENV, "")
+    packaged = server_app._ensure_default_agents(*stores)
+    assert {a.name for a in seed_stores.agent_store.list(limit=200).data} <= packaged
+
+    monkeypatch.setenv(SEEDED_AGENTS_ENV, ",".join(sorted(packaged)))
+    assert server_app._ensure_default_agents(*stores) == frozenset()
+    assert {a.name for a in seed_stores.agent_store.list(limit=200).data} == packaged
+
+
 def _build_api_only_app(db_uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     """Build an app with the web UI bundle ABSENT (the API-only branch).
 
