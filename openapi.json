@@ -5930,6 +5930,11 @@
             "title": "Archive Worktree Cleanup",
             "type": "boolean"
           },
+          "automations_enabled": {
+            "default": false,
+            "title": "Automations Enabled",
+            "type": "boolean"
+          },
           "branding": {
             "$ref": "#/components/schemas/BrandingInfo"
           },
@@ -6046,6 +6051,11 @@
             },
             "title": "Sandbox Providers",
             "type": "array"
+          },
+          "scheduled_task_projects": {
+            "default": false,
+            "title": "Scheduled Task Projects",
+            "type": "boolean"
           },
           "server_version": {
             "title": "Server Version",
@@ -13931,7 +13941,7 @@
             }
           },
           {
-            "description": "Ownership/archive filter for the sidebar tabs. `\"mine\"` returns only sessions the caller owns (owner-level grant). `\"shared\"` returns only sessions accessible but not owned. `\"archived\"` returns only archived sessions. `\"all\"` (default) returns all accessible non-archived sessions, matching the legacy behaviour.",
+            "description": "Ownership/archive filter for the sidebar tabs. `\"mine\"` returns only sessions the caller owns (owner-level grant). `\"shared\"` returns only sessions accessible but not owned. `\"archived\"` returns only archived sessions; with `project`, only owned sessions are returned so first-class project names resolve within the caller's projects. `\"all\"` (default) returns all accessible non-archived sessions, matching the legacy behaviour.",
             "in": "query",
             "name": "visibility",
             "required": false,
