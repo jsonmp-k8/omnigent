@@ -1,8 +1,10 @@
-// Persisted, per-device set of picker entries the user hid.
+// Set of picker entries the user hid, stored in this browser. Like the other
+// Appearance preferences, it reaches another device only through settings
+// export and import.
 //
 // Keyed by agent NAME, not id: a re-registered template gets a fresh id, so
 // hiding by id would silently un-hide it. Subscribable, because the Settings
-// switch and an open picker are mounted at the same time.
+// checklist and an open picker are mounted at the same time.
 
 export const HIDDEN_PICKER_AGENTS_STORAGE_KEY = "omnigent:hidden-picker-agents";
 

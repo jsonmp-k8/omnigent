@@ -1767,11 +1767,13 @@ export function AgentHarnessPicker({
   // harnessUnconfiguredOnHost returns false with no host / no readiness map, so
   // nothing is hidden in those cases, and unrecognized harnesses stay visible.
   const hideUnconfigured = useMemo(() => readHideUnconfiguredHarnesses(), []);
-  // Per-entry hides the user chose in Settings › Appearance. Orthogonal to
-  // hideUnconfigured above, which can only drop rows that cannot launch. The
-  // selected entry is never hidden, so a stored pick can't vanish from its own
-  // picker.
+  // Per-entry hides from Settings › Appearance; the selected entry is never
+  // hidden, so a stored pick can't vanish from its own picker.
   const hiddenAgents = useHiddenPickerAgents();
+  const isHiddenEntry = useCallback(
+    (agent: AvailableAgent) => agent.id !== effectiveAgentId && hiddenAgents.has(agent.name),
+    [hiddenAgents, effectiveAgentId],
+  );
   const { readyHarnessEntries, moreHarnessEntries } = useMemo(() => {
     const ready: AvailableAgent[] = [];
     let more: AvailableAgent[] = [];
@@ -1780,7 +1782,7 @@ export function AgentHarnessPicker({
     const unavailableIds = new Set<string>();
     for (const agent of harnessEntries) {
       const selected = agent.id === effectiveAgentId;
-      if (!selected && hiddenAgents.has(agent.name)) continue;
+      if (isHiddenEntry(agent)) continue;
       const readiness = harnessReadinessOnHost(agent.harness, host);
       const unavailable = !readiness.selectable && readiness.fallbackRelevant;
       if (!selected && hideUnconfigured && unavailable) continue;
@@ -1816,7 +1818,7 @@ export function AgentHarnessPicker({
       }
     }
     return { readyHarnessEntries: ready, moreHarnessEntries: more };
-  }, [harnessEntries, host, hideUnconfigured, hiddenAgents, effectiveAgentId, promotedHarnessId]);
+  }, [harnessEntries, host, hideUnconfigured, isHiddenEntry, effectiveAgentId, promotedHarnessId]);
   // Opening by hotkey skips onOpenChange, so prefetch here like a pointer open.
   const prefetchedOpenNonce = useRef(0);
   useEffect(() => {
@@ -1834,11 +1836,8 @@ export function AgentHarnessPicker({
   // in the main list; user-registered custom agents fold into an "Other..."
   // submenu so a long roster doesn't crowd out the recommended picks.
   const { builtins: bundleEntries, customs: customEntries } = useMemo(
-    () =>
-      partitionAgentsByKind(
-        agentEntries.filter((a) => a.id === effectiveAgentId || !hiddenAgents.has(a.name)),
-      ),
-    [agentEntries, hiddenAgents, effectiveAgentId],
+    () => partitionAgentsByKind(agentEntries.filter((agent) => !isHiddenEntry(agent))),
+    [agentEntries, isHiddenEntry],
   );
 
   // Existing custom / pending agents fold into an "Other..." submenu so a
@@ -1890,10 +1889,10 @@ export function AgentHarnessPicker({
       )}
     </>
   );
-  // The user hid every agent the picker could offer. "Create custom agent" may
-  // still render, but there is nothing left to pick, so say where they went.
+  // Nothing is left to pick and the per-entry hides removed at least one row,
+  // so point at Settings ("Create custom agent" may still render).
   const allEntriesHidden =
-    hiddenAgents.size > 0 &&
+    (harnessEntries.some(isHiddenEntry) || agentEntries.some(isHiddenEntry)) &&
     !autoHarnessAvailable &&
     readyHarnessEntries.length === 0 &&
     moreHarnessEntries.length === 0 &&

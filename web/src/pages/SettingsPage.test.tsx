@@ -1025,6 +1025,7 @@ describe("SettingsPage", () => {
       target: { value: "Fira Code" },
     });
     fireEvent.click(screen.getByTestId("heavier-code-text-toggle"));
+    localStorage.setItem("omnigent:hidden-picker-agents", '["polly"]');
 
     // Sanity: the non-default choices were persisted.
     expect(localStorage.getItem("omnigent:terminal-theme")).toBe("dark");
@@ -1092,6 +1093,7 @@ describe("SettingsPage", () => {
       "false",
     );
     expect(localStorage.getItem("omnigent:fold-assistant-narration")).toBeNull();
+    expect(localStorage.getItem("omnigent:hidden-picker-agents")).toBeNull();
   });
 
   it("lets you clear and retype the font size without clamping mid-edit", () => {

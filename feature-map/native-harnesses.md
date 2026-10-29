@@ -153,11 +153,13 @@ Real-provider history compatibility requires a separate live check.
 **CLI:** run `omnigent <name>` from the matrix below; add `--resume` with or
 without a session ID to resume.
 
-**Picker visibility:** open Settings → Appearance → **Show in agent pickers**
-and turn an entry off, or press **Show all** to restore them. The entry drops
-from the New Chat, New automation and project-default pickers. This is
-the user's own per-device choice, unlike "Hide unconfigured harnesses" next to
-it, which only drops rows that cannot launch on the selected host.
+**Picker visibility:** open Settings → Appearance → **Show in agent pickers**.
+The row summarizes what is shown ("Showing 15 of 17. Hidden: …"). Press
+**Edit**, filter the checklist and uncheck an entry, or press **Show all** to
+restore them. The entry drops from the New Chat, New automation and
+project-default pickers. This is the user's own per-device choice, unlike "Hide
+unconfigured harnesses" next to it, which only drops rows that cannot launch on
+the selected host.
 
 **Claude sub-agents:** from a web-launched Claude session or a locally launched
 `omnigent claude` session, ask Claude to delegate through its Agent tool. Open
@@ -460,10 +462,13 @@ Cross-harness journeys:
   These cases do not cover live providers or a post-refusal retry.
 - **`picker-entry-visibility`:**
   `web/src/shell/AgentHarnessPicker.visibility.test.tsx` covers the picker rows
-  a hidden entry drops, `web/src/lib/pickerEntryVisibility.test.ts` the stored
-  set, `web/src/hooks/useAvailableAgents.test.tsx` (`useAgentCatalog`) the
-  Settings list's agents, and `web/src/lib/agentGrouping.test.ts` that Settings
-  and the picker group an entry the same way.
+  a hidden entry drops and when the picker points at Settings,
+  `web/src/pages/settings/PickerVisibilitySetting.test.tsx` the Settings
+  summary, checklist and **Show all**, `web/src/lib/pickerEntryVisibility.test.ts`
+  the stored set, `web/src/lib/settingsPortability.test.ts` export and import,
+  `web/src/hooks/useAvailableAgents.test.tsx` (`useAgentCatalog`) the Settings
+  list's agents, and `web/src/lib/agentGrouping.test.ts` that Settings and the
+  picker group an entry the same way.
 - **`model-and-effort`, Pi inference bindings (component):**
   `tests/runtime/test_inference_routing.py::test_pi_single_model_policy_preserves_literal_ids_and_stays_curated`
   checks default/literal inputs and generated picker options, including a literal

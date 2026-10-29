@@ -12,6 +12,7 @@ import {
   HIDDEN_PICKER_AGENTS_STORAGE_KEY,
   writeHiddenPickerAgents,
 } from "@/lib/pickerEntryVisibility";
+import { writeHideUnconfiguredHarnesses } from "@/lib/harnessVisibilityPreferences";
 
 const agent = (
   overrides: Partial<AvailableAgent> &
@@ -60,17 +61,20 @@ const readyHost: Host = {
   },
 };
 
-function renderPicker(effectiveAgentId: string | null = claude.id) {
+function renderPicker(
+  effectiveAgentId: string | null = claude.id,
+  { agentEntries = [polly, debby], host = readyHost } = {},
+) {
   return render(
     <CapabilitiesProvider info={FALLBACK_SERVER_INFO}>
       <StoryQueryRouter>
         <AgentHarnessPicker
-          agentEntries={[polly, debby]}
+          agentEntries={agentEntries}
           harnessEntries={[claude, codex]}
           effectiveAgentId={effectiveAgentId}
           agentLabel="Picker"
           hasAgents
-          host={readyHost}
+          host={host}
           onSelectAgent={() => undefined}
           pendingAgent={null}
           pendingAgentId="pending-agent"
@@ -89,6 +93,7 @@ const row = (id: string) => screen.queryByTestId(`new-chat-landing-agent-${id}`)
 afterEach(() => {
   cleanup();
   window.localStorage.removeItem(HIDDEN_PICKER_AGENTS_STORAGE_KEY);
+  writeHideUnconfiguredHarnesses(false);
 });
 
 describe("AgentHarnessPicker per-entry visibility", () => {
@@ -156,5 +161,21 @@ describe("AgentHarnessPicker per-entry visibility", () => {
     expect(screen.getByTestId("new-chat-landing-all-hidden")).toHaveTextContent(
       "Turn some back on in Settings",
     );
+  });
+
+  it("does not blame the per-entry list when another filter emptied the picker", async () => {
+    // Only a stale name is stored; "hide unconfigured harnesses" removed every row.
+    writeHiddenPickerAgents(new Set(["removed-agent"]));
+    writeHideUnconfiguredHarnesses(true);
+    const unconfiguredHost: Host = {
+      ...readyHost,
+      configured_harnesses: { "claude-native": false, "codex-native": false },
+    };
+    renderPicker(null, { agentEntries: [], host: unconfiguredHost });
+    await openPicker();
+
+    expect(row(claude.id)).toBeNull();
+    expect(row(codex.id)).toBeNull();
+    expect(screen.queryByTestId("new-chat-landing-all-hidden")).toBeNull();
   });
 });
