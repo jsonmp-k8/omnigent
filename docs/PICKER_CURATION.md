@@ -55,6 +55,29 @@ who has picked an agent before still returns to their own pick. A default that
 the restriction does not offer is ignored, by both the server and the client,
 since it could never be selected.
 
+## What a restriction outranks
+
+A restriction is a constraint on what New Chat may start, so it wins over the
+selections it conflicts with:
+
+- **A remembered pick** the restriction leaves out falls back to
+  `default_agent_name`, or to the first offered agent. Its run settings do not
+  follow it there: the brain harness is the one remembered for the agent that
+  actually runs, so its cost-control override and the model and effort that
+  hang off that harness are resolved for that agent too. A session never
+  starts under a brain stored for an agent the user cannot select. The
+  remembered values stay on the device in case the agent is offered again.
+- **A project's configured agent** outside the restriction is reported as
+  unavailable and the user picks from the offered agents before starting.
+  Project settings still lists and stores that agent, and a scheduled task or
+  API create bound to it is unaffected; only starting a session from New Chat
+  is restricted.
+- **A remembered Smart Routing pick** has no row left, so it degrades to the
+  configured default, and the create carries no routing override.
+
+An empty menu is not always the deployment's doing: when the agent list fails
+to load the picker says so instead of blaming the restriction.
+
 ## Reporting
 
 Both values are published on `GET /v1/info` under `picker`:

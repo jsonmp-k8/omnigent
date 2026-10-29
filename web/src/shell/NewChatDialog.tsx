@@ -1477,6 +1477,7 @@ export function AgentHarnessPicker({
   blockedReasons,
   onPrefetchEntries,
   curatedEntries,
+  entriesFailed = false,
 }: {
   agentEntries: AvailableAgent[];
   harnessEntries: AvailableAgent[];
@@ -1560,6 +1561,9 @@ export function AgentHarnessPicker({
   /** Set when the deployment curates New Chat: exactly these rows, in this
    *  order, as one flat list. Other embedders leave it unset. */
   curatedEntries?: AvailableAgent[];
+  /** Whether the roster could not be loaded, so an empty curated list is a
+   *  failed fetch rather than the deployment's doing. */
+  entriesFailed?: boolean;
 }) {
   // Controlled so picking a row can close the menu.
   const [open, setOpen] = useState(false);
@@ -1835,6 +1839,17 @@ export function AgentHarnessPicker({
       return readiness.selectable || !readiness.fallbackRelevant;
     });
   }, [curatedEntries, harnessEntries, hideUnconfigured, effectiveAgentId, host]);
+  // Why a curated list is empty, which is not always the deployment's doing:
+  // a failed roster fetch and a harness this host lacks read differently.
+  const curatedEmptyState = entriesFailed
+    ? { title: "Agents could not be loaded.", detail: "Check your connection and try again." }
+    : {
+        title: "No agents are available here.",
+        detail:
+          curatedEntries?.length === 0
+            ? "This deployment limits which agents New Chat offers."
+            : "The offered harnesses are not set up on this host and are hidden by your settings.",
+      };
   // What a menu open prefetches sandbox support for: every harness row it shows.
   const prefetchIds = useMemo(
     () =>
@@ -2078,12 +2093,8 @@ export function AgentHarnessPicker({
               // The menu is whitespace-nowrap; this copy is a sentence and has to wrap.
               className="px-2 py-3 text-ui whitespace-normal text-muted-foreground"
             >
-              No agents are available here.
-              <div className="text-xs leading-4">
-                {curatedEntries?.length === 0
-                  ? "This deployment limits which agents New Chat offers."
-                  : "The offered harnesses are not set up on this host and are hidden by your settings."}
-              </div>
+              {curatedEmptyState.title}
+              <div className="text-xs leading-4">{curatedEmptyState.detail}</div>
             </div>
           ) : (
             visibleCuratedEntries?.map(renderEntry)
@@ -3351,6 +3362,16 @@ export function NewChatLandingScreen() {
               agentList[0]?.id ??
               null);
   const effectiveAgentId = automaticHarnessFallback?.candidate?.value.id ?? defaultEffectiveAgentId;
+  // The remembered agent is not one this deployment offers, so the configured
+  // default runs in its place. Drives the harness re-seed below: an override
+  // belongs to the agent it was stored under, not to whatever runs instead.
+  const curationRejectedTheRememberedPick =
+    curation.restrictToAgentNames.size > 0 &&
+    agents !== undefined &&
+    !agentsArePlaceholder &&
+    pickedAgentId !== null &&
+    pickedAgentId !== PENDING_AGENT_ID &&
+    !agentList.some((agent) => agent.id === pickedAgentId);
   const selectedAgent = useMemo(
     () =>
       effectiveAgentId === PENDING_AGENT_ID && pendingAgent
@@ -4823,6 +4844,21 @@ export function NewChatLandingScreen() {
     setPickedHarness(null);
     _setCostControlMode(null);
   }, [info, smartRoutingEnabled, pickedHarness]);
+  // Same degrade when curation, not the routing flag, is what took the pick
+  // away. The create binds the configured default, and a brain is one agent's
+  // preference: Debby's routed brain (or a concrete SDK of hers) and its
+  // cost-control override must not ride along into Polly's session. Re-seed
+  // from the agent that actually runs, as picking it would; the stored value
+  // stays put in case the deployment offers that agent again.
+  useEffect(() => {
+    if (!curationRejectedTheRememberedPick || effectiveAgentId === null) return;
+    const remembered = readLastHarness(effectiveAgentId);
+    // Top-level Smart Routing has no curated row either, so its sentinel is no
+    // more adopted here than it is restored above.
+    const inherited = remembered === AUTO_NATIVE_HARNESS_ID ? null : remembered;
+    setPickedHarness(inherited);
+    _setCostControlMode(isAutoHarness(inherited) ? "on" : null);
+  }, [curationRejectedTheRememberedPick, effectiveAgentId]);
   const workspaceTrimmed = workspace.trim();
   const workspaceValid = isValidWorkspace(workspace);
   const isCloudHost =
@@ -7577,6 +7613,7 @@ export function NewChatLandingScreen() {
                         curatedEntries={
                           curation.restrictToAgentNames.size > 0 ? agentList : undefined
                         }
+                        entriesFailed={agentsError}
                         loading={pickerLoading}
                         interactiveWhileLoading={pickerInteractiveWhileLoading}
                         disabledLabel={noExecutionTargetSelected ? "No host selected" : undefined}

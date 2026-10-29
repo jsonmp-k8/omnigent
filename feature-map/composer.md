@@ -72,7 +72,10 @@ apply only to that side chat. See the [side-chat settings recipe](sessions.md).
   or effort. States: no default, a Codex
   effort the pinned model lacks (or, with no project model, the remembered
   model lacks), an explicit composer pick, remembered Smart Routing, another
-  agent chosen.
+  agent chosen, and a configured agent that picker curation
+  (`restrict_to_agent_names`, see `native-harnesses.md`) does not offer, which
+  New Chat reports as unavailable until the user picks an offered agent while
+  project settings keeps storing it.
 - `config-cycle-hotkeys`: Ctrl+Alt+M cycles models and Ctrl+Alt+E cycles effort
   in both composers (Ctrl on every platform). The relevant menu briefly opens
   with the selected choice highlighted, preserving draft and input focus. In an

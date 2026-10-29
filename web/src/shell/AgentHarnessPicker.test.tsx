@@ -81,6 +81,7 @@ function renderPicker(props: {
   sandboxSelected?: boolean;
   /** The deployment's curated roster, as only the New Chat landing passes it. */
   curatedEntries?: AvailableAgent[];
+  entriesFailed?: boolean;
   hasAgents?: boolean;
   host?: Host;
   onPrefetchEntries?: (ids: string[]) => void;
@@ -93,6 +94,7 @@ function renderPicker(props: {
             agentEntries={props.agentEntries ?? []}
             harnessEntries={props.harnessEntries}
             curatedEntries={props.curatedEntries}
+            entriesFailed={props.entriesFailed}
             onPrefetchEntries={props.onPrefetchEntries}
             effectiveAgentId={props.effectiveAgentId ?? null}
             agentLabel="Picker"
@@ -319,6 +321,18 @@ describe("a curated New Chat picker", () => {
         "hidden by your settings",
       );
     });
+  });
+
+  it("blames the fetch, not the deployment, when the roster could not be loaded", async () => {
+    // An agents-fetch failure empties the list too, and the trigger still
+    // opens; saying the deployment limits the picker would be wrong.
+    renderPicker({ harnessEntries: [], curatedEntries: [], entriesFailed: true });
+    await openPicker();
+
+    const empty = screen.getByTestId("new-chat-landing-no-agents");
+    expect(empty).toHaveTextContent("Agents could not be loaded.");
+    expect(empty).toHaveTextContent("Check your connection and try again.");
+    expect(empty).not.toHaveTextContent("This deployment limits");
   });
 
   it("prefetches sandbox support for every curated harness row it shows", async () => {

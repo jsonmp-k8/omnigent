@@ -15,10 +15,14 @@ implements them separately, so a fix for one harness does not reach the others.
   with no remembered pick. Curated, the menu is one flat list with no Harnesses
   heading, no "Other..." submenus, no "Create custom agent" entry and no Smart
   Routing entry; a name matching nothing shows an empty state and logs at
-  startup. A returning user's cached picker stays closed while `/v1/info` is
+  startup, while a failed agent fetch says so rather than blaming the
+  deployment. A returning user's cached picker stays closed while `/v1/info` is
   pending, so the full roster never shows ahead of the curation (a failed probe
   falls back to the uncurated picker); "Hide unconfigured harnesses" applies to
-  the curated list too. Display only,
+  the curated list too. A remembered pick the curation drops falls back to the
+  configured default carrying that agent's own brain harness, never the
+  rejected agent's, and a project's configured agent outside the curation is
+  reported unavailable until the user picks an offered one. Display only,
   and New Chat only: the scheduled-task and project-settings pickers are untouched.
 - `agent-instructions`: Pi native delivers authored instructions at launch/resume;
   authors can keep or replace Pi's base prompt and disable automatic context files.

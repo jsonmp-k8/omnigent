@@ -12839,6 +12839,102 @@ describe("NewChatLandingScreen picker curation", () => {
     expect(row("a2")).toHaveAttribute("data-active", "true");
   });
 
+  // A brain override is stored per agent. When curation drops the remembered
+  // agent the configured default runs instead, so the override must be resolved
+  // for that agent rather than inherited from the one nobody can select.
+  describe("falling back off an agent the deployment no longer offers", () => {
+    const MIXED_ROSTER: AvailableAgent[] = [
+      testAgent("ag_debby", "debby", { display_name: "Debby", harness: "claude-sdk" }),
+      testAgent("ag_polly", "polly", { display_name: "Polly", harness: "claude-sdk" }),
+    ];
+
+    const landOnPolly = async (remembered: Record<string, string>) => {
+      localStorage.setItem(LAST_AGENT_KEY, "ag_debby");
+      localStorage.setItem(LAST_HARNESS_KEY, JSON.stringify(remembered));
+      mockAgents(MIXED_ROSTER);
+      authenticatedFetchMock.mockResolvedValue({
+        ok: true,
+        json: async () => ({ id: "conv_fallback" }),
+      } as unknown as Response);
+      renderLanding({
+        smart_routing_enabled: true,
+        picker: { restrictToAgentNames: new Set(["polly"]), defaultAgentName: "polly" },
+      });
+      await waitFor(() =>
+        expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("repo"),
+      );
+      expect(screen.getByTestId("new-chat-landing-agent-select").textContent).toContain("Polly");
+      return submitAndReadBody();
+    };
+
+    it("sends no override when the agent that runs has no remembered brain", async () => {
+      // Debby's routed brain would otherwise route Polly's session and turn on
+      // her cost control, neither of which the user asked for here.
+      const { body } = await landOnPolly({ ag_debby: "auto" });
+
+      expect(body.agent_id).toBe("ag_polly");
+      expect(body.harness_override).toBeUndefined();
+      expect(body.cost_control_mode_override).toBeUndefined();
+      // The deployment may offer Debby again, so her pick stays stored.
+      expect(JSON.parse(localStorage.getItem(LAST_HARNESS_KEY) ?? "{}")).toEqual({
+        ag_debby: "auto",
+      });
+    });
+
+    it("sends the brain remembered for the agent that runs, not the rejected one", async () => {
+      const { body } = await landOnPolly({ ag_debby: "auto", ag_polly: "codex" });
+
+      expect(body.agent_id).toBe("ag_polly");
+      expect(body.harness_override).toBe("codex");
+      expect(body.cost_control_mode_override).toBeUndefined();
+    });
+
+    it("keeps a concrete override from following the rejected agent", async () => {
+      const { body } = await landOnPolly({ ag_debby: "codex" });
+
+      expect(body.agent_id).toBe("ag_polly");
+      expect(body.harness_override).toBeUndefined();
+    });
+  });
+
+  // Curation is a deployment-wide constraint on what New Chat may start, so it
+  // outranks a project's configured agent; the user is told and must choose.
+  it("outranks a project default the deployment does not offer", () => {
+    mockClaudeModels([{ id: "opus", displayName: "Opus", isDefault: true }]);
+    useProjectsMock.mockReturnValue({
+      ...SUCCESS_QUERY_STATE,
+      data: [{ id: "proj_alpha", name: "Alpha" }],
+    });
+    useProjectConfigMock.mockReturnValue({
+      ...SUCCESS_QUERY_STATE,
+      data: { agent_id: "a1" },
+    });
+    renderLanding(
+      { picker: { restrictToAgentNames: new Set(["codex-native-ui"]), defaultAgentName: null } },
+      "/?project=Alpha",
+    );
+
+    // The project pins Claude Code, which this deployment does not offer: the
+    // trigger says so rather than quietly starting on something else.
+    expect(screen.getByTestId("new-chat-landing-agent-select").textContent).toContain(
+      "Agent unavailable",
+    );
+    openPicker();
+    expect(row("a1")).toBeNull();
+    expect(row("a2")).not.toHaveAttribute("data-active");
+  });
+
+  it("blames the fetch, not the deployment, when the agent list fails to load", () => {
+    mockClaudeModels([{ id: "opus", displayName: "Opus", isDefault: true }]);
+    mockAgents(undefined, { isLoading: false, isError: true });
+    curated(["codex-native-ui"], "codex-native-ui");
+    openPicker();
+
+    expect(screen.getByTestId("new-chat-landing-no-agents")).toHaveTextContent(
+      "Agents could not be loaded.",
+    );
+  });
+
   it("opens to an explanation, not a disabled trigger, when nothing matches", () => {
     mockClaudeModels([{ id: "opus", displayName: "Opus", isDefault: true }]);
     curated(["not-installed"]);
