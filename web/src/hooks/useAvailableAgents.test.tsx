@@ -1714,4 +1714,33 @@ describe("useAgentCatalog", () => {
       expect(result.current.data?.find((a) => a.name === "jcode")?.acpHarness).toBe(true);
     });
   });
+
+  it("reports a failed catalog and loads it on retry", async () => {
+    const harnesses = mockResponse({ data: [] });
+    routeFetch({
+      [BUILTINS_URL]: mockResponse({ detail: "down" }, { ok: false, status: 503 }),
+      [HARNESSES_URL]: harnesses,
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(() => useAgentCatalog(), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>
+          <CapabilitiesProvider info={FALLBACK_SERVER_INFO}>{children}</CapabilitiesProvider>
+        </QueryClientProvider>
+      ),
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.data).toBeUndefined();
+
+    routeFetch({
+      [BUILTINS_URL]: mockResponse({
+        data: [{ id: "ag_polly", name: "polly", harness: "claude-sdk", builtin: true }],
+        has_more: false,
+      }),
+      [HARNESSES_URL]: harnesses,
+    });
+    act(() => result.current.retry());
+    await waitFor(() => expect(result.current.data?.map((a) => a.name)).toEqual(["polly"]));
+    expect(result.current.isError).toBe(false);
+  });
 });

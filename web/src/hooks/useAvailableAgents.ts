@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { useSidebarData } from "./useSidebarData";
 import { authenticatedFetch } from "@/lib/identity";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
@@ -482,12 +482,14 @@ const AVAILABLE_AGENTS_STALE_MS = 30_000;
  * Agents known only from a session (a one-off upload) are therefore absent.
  *
  * @param enabled - Whether to fetch; defaults true.
- * @returns The merged agents (``undefined`` until the catalog loads) and
- *   whether the catalog is still loading.
+ * @returns The merged agents (``undefined`` until the catalog loads), whether
+ *   the catalog is still loading or failed to load, and a retry.
  */
 export function useAgentCatalog(enabled = true): {
   data: AvailableAgent[] | undefined;
   isLoading: boolean;
+  isError: boolean;
+  retry: () => void;
 } {
   const serverInfo = useServerInfo();
   const includeUserAgents = serverInfo !== "loading" && serverInfo.agent_install === true;
@@ -518,7 +520,9 @@ export function useAgentCatalog(enabled = true): {
           ),
     [catalog, userAgents, acpHarnessIds, harnessLabels],
   );
-  return { data, isLoading: catalogQuery.isLoading };
+  const { refetch } = catalogQuery;
+  const retry = useCallback(() => void refetch(), [refetch]);
+  return { data, isLoading: catalogQuery.isLoading, isError: catalogQuery.isError, retry };
 }
 
 interface UseAvailableAgentsOptions {

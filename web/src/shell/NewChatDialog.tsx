@@ -1774,18 +1774,23 @@ export function AgentHarnessPicker({
     (agent: AvailableAgent) => agent.id !== effectiveAgentId && hiddenAgents.has(agent.name),
     [hiddenAgents, effectiveAgentId],
   );
-  const { readyHarnessEntries, moreHarnessEntries } = useMemo(() => {
+  const { readyHarnessEntries, moreHarnessEntries, hidOfferedHarness } = useMemo(() => {
     const ready: AvailableAgent[] = [];
     let more: AvailableAgent[] = [];
+    let hidOffered = false;
     // Recorded during the split so the backfill below asks the same question
     // rather than restating it inverted.
     const unavailableIds = new Set<string>();
     for (const agent of harnessEntries) {
       const selected = agent.id === effectiveAgentId;
-      if (isHiddenEntry(agent)) continue;
       const readiness = harnessReadinessOnHost(agent.harness, host);
       const unavailable = !readiness.selectable && readiness.fallbackRelevant;
       if (!selected && hideUnconfigured && unavailable) continue;
+      // Readiness runs first, so this records only hides that removed an offered row.
+      if (isHiddenEntry(agent)) {
+        hidOffered = true;
+        continue;
+      }
       if (unavailable) unavailableIds.add(agent.id);
       const key = nativeCodingAgentForAvailableAgent(agent)?.iconKind ?? "";
       const primary = PRIMARY_HARNESS_ORDER.includes(key) || agent.id === promotedHarnessId;
@@ -1817,7 +1822,7 @@ export function AgentHarnessPicker({
         more = more.filter((agent) => !promotedIds.has(agent.id));
       }
     }
-    return { readyHarnessEntries: ready, moreHarnessEntries: more };
+    return { readyHarnessEntries: ready, moreHarnessEntries: more, hidOfferedHarness: hidOffered };
   }, [harnessEntries, host, hideUnconfigured, isHiddenEntry, effectiveAgentId, promotedHarnessId]);
   // Opening by hotkey skips onOpenChange, so prefetch here like a pointer open.
   const prefetchedOpenNonce = useRef(0);
@@ -1892,7 +1897,7 @@ export function AgentHarnessPicker({
   // Nothing is left to pick and the per-entry hides removed at least one row,
   // so point at Settings ("Create custom agent" may still render).
   const allEntriesHidden =
-    (harnessEntries.some(isHiddenEntry) || agentEntries.some(isHiddenEntry)) &&
+    (hidOfferedHarness || agentEntries.some(isHiddenEntry)) &&
     !autoHarnessAvailable &&
     readyHarnessEntries.length === 0 &&
     moreHarnessEntries.length === 0 &&

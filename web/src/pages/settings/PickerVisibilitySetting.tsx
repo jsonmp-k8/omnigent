@@ -46,7 +46,7 @@ export function pickerVisibilitySummary(
 /** Per-device visibility of entries in the shared agent pickers. */
 export function PickerVisibilitySetting() {
   const hidden = useHiddenPickerAgents();
-  const { data: agents, isLoading } = useAgentCatalog();
+  const { data: agents, isLoading, isError, retry } = useAgentCatalog();
   const [open, setOpen] = useState(false);
   const groups = useMemo(() => {
     const selectable = selectableSessionAgents(agents ?? []);
@@ -59,13 +59,16 @@ export function PickerVisibilitySetting() {
   }, [agents]);
   const entries = useMemo(() => groups.flatMap((group) => group.entries), [groups]);
   const anyHidden = entries.some((entry) => hidden.has(entry.name));
+  const loadFailed = entries.length === 0 && isError;
 
   const summary =
     entries.length > 0
       ? pickerVisibilitySummary(entries, hidden)
       : isLoading
         ? "Loading agents…"
-        : "No agents available on this server yet.";
+        : loadFailed
+          ? "Couldn't load this server's harnesses and agents."
+          : "No agents available on this server yet.";
 
   return (
     <div className="flex items-start justify-between gap-6">
@@ -81,6 +84,17 @@ export function PickerVisibilitySetting() {
         </span>
       </div>
       <div className="mt-0.5 flex shrink-0 items-center gap-1">
+        {loadFailed && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={retry}
+            data-testid="picker-visibility-retry"
+            componentId="settings.appearance.picker_visibility_retry"
+          >
+            Retry
+          </Button>
+        )}
         <Popover open={open} onOpenChange={setOpen}>
           <PopoverTrigger asChild>
             <Button
@@ -108,6 +122,7 @@ export function PickerVisibilitySetting() {
                           value={`${entry.display_name} ${entry.id}`}
                           keywords={[entry.name]}
                           data-checked={shown}
+                          aria-checked={shown}
                           data-testid={`picker-visibility-toggle-${entry.name}`}
                           onSelect={() => setPickerAgentHidden(entry.name, shown)}
                         >

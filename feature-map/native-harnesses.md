@@ -461,10 +461,11 @@ Cross-harness journeys:
   unchanged. See [Composer](./composer.md) for visible outcomes and prerequisites.
   These cases do not cover live providers or a post-refusal retry.
 - **`picker-entry-visibility`:**
-  `web/src/shell/AgentHarnessPicker.visibility.test.tsx` covers the picker rows
-  a hidden entry drops and when the picker points at Settings,
+  `web/src/shell/AgentHarnessPicker.test.tsx` covers the picker rows a hidden
+  entry drops and when the picker points at Settings,
   `web/src/pages/settings/PickerVisibilitySetting.test.tsx` the Settings
-  summary, checklist and **Show all**, `web/src/lib/pickerEntryVisibility.test.ts`
+  summary, checklist, **Show all** and a failed catalog load,
+  `web/src/lib/pickerEntryVisibility.test.ts`
   the stored set, `web/src/lib/settingsPortability.test.ts` export and import,
   `web/src/hooks/useAvailableAgents.test.tsx` (`useAgentCatalog`) the Settings
   list's agents, and `web/src/lib/agentGrouping.test.ts` that Settings and the

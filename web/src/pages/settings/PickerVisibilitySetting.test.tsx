@@ -14,6 +14,8 @@ import { PickerVisibilitySetting, pickerVisibilitySummary } from "./PickerVisibi
 const catalog = vi.hoisted(() => ({
   data: undefined as AvailableAgent[] | undefined,
   isLoading: false,
+  isError: false,
+  retry: vi.fn(),
 }));
 vi.mock("@/hooks/useAvailableAgents", async (importOriginal) => ({
   ...(await importOriginal<typeof AvailableAgentsModule>()),
@@ -46,6 +48,8 @@ afterEach(() => {
   window.localStorage.removeItem(HIDDEN_PICKER_AGENTS_STORAGE_KEY);
   catalog.data = undefined;
   catalog.isLoading = false;
+  catalog.isError = false;
+  catalog.retry.mockReset();
 });
 
 describe("pickerVisibilitySummary", () => {
@@ -65,7 +69,7 @@ describe("pickerVisibilitySummary", () => {
 });
 
 describe("PickerVisibilitySetting", () => {
-  const option = (name: string) => screen.getByTestId(`picker-visibility-toggle-${name}`);
+  const option = (name: string) => screen.getByRole("option", { name });
   const summary = () => screen.getByTestId("picker-visibility-summary");
 
   it("toggles an entry from the filterable checklist", () => {
@@ -77,17 +81,18 @@ describe("PickerVisibilitySetting", () => {
     fireEvent.click(screen.getByTestId("picker-visibility-edit"));
     expect(screen.getByText("Harnesses")).toBeInTheDocument();
     expect(screen.getByText("Agents")).toBeInTheDocument();
-    expect(option("codex-native-ui")).toHaveAttribute("data-checked", "true");
+    expect(option("Codex")).toHaveAttribute("aria-checked", "true");
 
-    fireEvent.click(option("codex-native-ui"));
+    fireEvent.click(option("Codex"));
     expect(readHiddenPickerAgents()).toEqual(new Set(["codex-native-ui"]));
-    expect(option("codex-native-ui")).toHaveAttribute("data-checked", "false");
+    expect(option("Codex")).toHaveAttribute("aria-checked", "false");
+    expect(option("Claude Code")).toHaveAttribute("aria-checked", "true");
     expect(summary()).toHaveTextContent("Showing 2 of 3. Hidden: Codex.");
 
     fireEvent.change(screen.getByPlaceholderText("Filter harnesses and agents…"), {
       target: { value: "poll" },
     });
-    expect(screen.getByRole("option", { name: "Polly" })).toBeInTheDocument();
+    expect(option("Polly")).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Codex" })).toBeNull();
   });
 
@@ -109,13 +114,22 @@ describe("PickerVisibilitySetting", () => {
     expect(summary()).toHaveTextContent("Showing 1 of 2. Hidden: Claude Code.");
   });
 
-  it.each([
-    ["while the catalog loads", true, "Loading agents…"],
-    ["for an empty catalog", false, "No agents available on this server yet."],
-  ])("explains the empty list %s", (_label, isLoading, expected) => {
-    catalog.isLoading = isLoading;
+  it.each<[string, { isLoading?: boolean; isError?: boolean }, string]>([
+    ["while the catalog loads", { isLoading: true }, "Loading agents…"],
+    ["for an empty catalog", {}, "No agents available on this server yet."],
+    ["when the catalog failed", { isError: true }, "Couldn't load this server's harnesses"],
+  ])("explains the empty list %s", (_label, state, expected) => {
+    Object.assign(catalog, state);
     render(<PickerVisibilitySetting />);
     expect(summary()).toHaveTextContent(expected);
     expect(screen.getByTestId("picker-visibility-edit")).toBeDisabled();
+    expect(screen.queryByTestId("picker-visibility-retry") !== null).toBe(state.isError ?? false);
+  });
+
+  it("retries a failed catalog load", () => {
+    catalog.isError = true;
+    render(<PickerVisibilitySetting />);
+    fireEvent.click(screen.getByTestId("picker-visibility-retry"));
+    expect(catalog.retry).toHaveBeenCalledTimes(1);
   });
 });
