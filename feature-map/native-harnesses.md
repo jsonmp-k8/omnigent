@@ -47,8 +47,9 @@ implements them separately, so a fix for one harness does not reach the others.
   Databricks detection finds a matching credential, and fails open for older
   hosts or servers that cannot report detection results.
 - `picker-entry-visibility`: the user hides individual harnesses and agents from
-  the new-chat picker in Settings → Appearance, per device. Independent of the
-  readiness filter above, which only drops rows that cannot launch.
+  every agent picker (new chat, automation, project default) in Settings →
+  Appearance, per device. Independent of the readiness filter above, which only
+  drops rows that cannot launch.
 - `model-and-effort`: the harness's own model catalog, and reasoning effort where
   the harness declares it. The web picker should offer what the CLI offers.
 - `smart-routing`: Pi applies the chosen route before inference from the
@@ -152,8 +153,9 @@ Real-provider history compatibility requires a separate live check.
 **CLI:** run `omnigent <name>` from the matrix below; add `--resume` with or
 without a session ID to resume.
 
-**Picker visibility:** open Settings → Appearance → **Show in the new-chat
-picker** and turn an entry off, or press **Show all** to restore them. This is
+**Picker visibility:** open Settings → Appearance → **Show in agent pickers**
+and turn an entry off, or press **Show all** to restore them. The entry drops
+from the New Chat, New automation and project-default pickers. This is
 the user's own per-device choice, unlike "Hide unconfigured harnesses" next to
 it, which only drops rows that cannot launch on the selected host.
 

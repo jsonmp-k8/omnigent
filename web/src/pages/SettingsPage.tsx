@@ -958,7 +958,8 @@ function FoldAssistantNarrationControl() {
 }
 
 /**
- * Per-entry show/hide list for the new-session picker.
+ * Per-entry show/hide list for every agent picker: new chat, automations and
+ * project defaults.
  *
  * Complements "Hide unconfigured harnesses" above, which can only drop rows
  * that cannot launch on the selected host. This one is the user's own choice,
@@ -982,11 +983,11 @@ function PickerEntryVisibilityControl() {
     <div className="flex flex-col gap-3">
       <div className="flex items-start justify-between gap-6">
         <div className="flex flex-col">
-          <span className="text-ui font-medium">Show in the new-chat picker</span>
+          <span className="text-ui font-medium">Show in agent pickers</span>
           <span className="text-sm text-muted-foreground">
-            Turn off any of this server's harnesses and agents you don't use to keep the picker
-            short. Hiding one here never affects existing sessions, and the entry you have selected
-            always stays visible.
+            Turn off any of this server's harnesses and agents you don't use to keep the pickers
+            short. This applies to new chats, automations and project defaults. Hiding one here
+            never affects existing sessions, and the entry you have selected always stays visible.
           </span>
         </div>
         <Button
@@ -1015,7 +1016,7 @@ function PickerEntryVisibilityControl() {
               <div key={agent.id} className="flex items-center justify-between gap-6 py-0.5">
                 <span className="truncate text-ui">{agent.display_name}</span>
                 <Switch
-                  aria-label={`Show ${agent.display_name} in the new-chat picker`}
+                  aria-label={`Show ${agent.display_name} in agent pickers`}
                   checked={!hidden.has(agent.name)}
                   onCheckedChange={(next) => setPickerAgentHidden(agent.name, !next)}
                   data-testid={`picker-visibility-toggle-${agent.name}`}
