@@ -475,20 +475,50 @@ export const USER_AGENTS_QUERY_KEY = ["available-agents-user"] as const;
 const AVAILABLE_AGENTS_STALE_MS = 30_000;
 
 /**
- * The server's agent catalog alone — no session discovery.
+ * The picker's agents without session discovery: the catalog plus the caller's
+ * own agents, flagged and labelled the way the picker shows them.
  *
- * Shares the picker's query key, and works outside a ``SidebarDataProvider``.
+ * Shares the picker's query keys, and works outside a ``SidebarDataProvider``.
  * Agents known only from a session (a one-off upload) are therefore absent.
  *
  * @param enabled - Whether to fetch; defaults true.
+ * @returns The merged agents (``undefined`` until the catalog loads) and
+ *   whether the catalog is still loading.
  */
-export function useAgentCatalog(enabled = true) {
-  return useQuery({
+export function useAgentCatalog(enabled = true): {
+  data: AvailableAgent[] | undefined;
+  isLoading: boolean;
+} {
+  const serverInfo = useServerInfo();
+  const includeUserAgents = serverInfo !== "loading" && serverInfo.agent_install === true;
+  const catalogQuery = useQuery({
     queryKey: AGENT_CATALOG_QUERY_KEY,
     queryFn: fetchAgentCatalog,
     enabled,
     staleTime: AVAILABLE_AGENTS_STALE_MS,
   });
+  const userAgentsQuery = useQuery({
+    queryKey: USER_AGENTS_QUERY_KEY,
+    queryFn: fetchUserAgents,
+    enabled: enabled && includeUserAgents,
+    staleTime: AVAILABLE_AGENTS_STALE_MS,
+  });
+  const acpHarnessIds = useAcpHarnessIds(enabled);
+  const harnessLabels = useHarnessLabels(enabled);
+  const catalog = catalogQuery.data;
+  const userAgents = userAgentsQuery.data;
+  const data = useMemo(
+    () =>
+      catalog === undefined
+        ? undefined
+        : applyAcpHarnessCatalog(
+            mergeAvailableAgents(catalog.agents, [], userAgents ?? [], catalog.suppressedNames),
+            acpHarnessIds,
+            harnessLabels,
+          ),
+    [catalog, userAgents, acpHarnessIds, harnessLabels],
+  );
+  return { data, isLoading: catalogQuery.isLoading };
 }
 
 interface UseAvailableAgentsOptions {
