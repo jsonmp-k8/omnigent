@@ -457,12 +457,11 @@ Cross-harness journeys:
   unchanged. See [Composer](./composer.md) for visible outcomes and prerequisites.
   These cases do not cover live providers or a post-refusal retry.
 - **`picker-entry-visibility`:**
-  `tests/e2e_ui/start_session/test_hidden_picker_entries.py` covers the
-  Settings → Appearance switches and the picker rows they drop. Unit coverage:
-  `web/src/lib/pickerEntryVisibility.test.ts`,
-  `web/src/shell/AgentHarnessPicker.visibility.test.tsx` and
-  `web/src/lib/agentGrouping.test.ts` (Settings and the picker group an entry
-  the same way).
+  `web/src/shell/AgentHarnessPicker.visibility.test.tsx` covers the picker rows
+  a hidden entry drops, `web/src/lib/pickerEntryVisibility.test.ts` the stored
+  set, `web/src/hooks/useAvailableAgents.test.tsx` (`useAgentCatalog`) the
+  Settings list's agents, and `web/src/lib/agentGrouping.test.ts` that Settings
+  and the picker group an entry the same way.
 - **`model-and-effort`, Pi inference bindings (component):**
   `tests/runtime/test_inference_routing.py::test_pi_single_model_policy_preserves_literal_ids_and_stays_curated`
   checks default/literal inputs and generated picker options, including a literal
