@@ -17,9 +17,10 @@ implements them separately, so a fix for one harness does not reach the others.
   Routing entry; a name matching nothing shows an empty state and logs at
   startup, while a failed agent fetch says so rather than blaming the
   deployment. A returning user's cached picker stays closed while `/v1/info` is
-  pending, so the full roster never shows ahead of the curation (a failed probe
-  falls back to the uncurated picker); "Hide unconfigured harnesses" applies to
-  the curated list too. A remembered pick the curation drops falls back to the
+  pending, including behind the embedded app's offline stand-in, so the full
+  roster never shows ahead of the curation (a failed probe falls back to the
+  uncurated picker); "Hide unconfigured harnesses" and the per-entry hides in
+  Settings > Appearance apply to the curated list too. A remembered pick the curation drops falls back to the
   configured default carrying that agent's own brain harness, never the
   rejected agent's, and a project's configured agent outside the curation is
   reported unavailable until the user picks an offered one. Display only,

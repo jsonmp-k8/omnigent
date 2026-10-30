@@ -149,7 +149,7 @@ def session_title_instructions(config: Mapping[str, Any]) -> str | None:
 class PickerCuration:
     """Which agents the New Chat picker offers, and which one it starts on.
 
-    Display only: see ``docs/PICKER_CURATION.md`` for what it does not change.
+    Display only: see "Curating the New Chat picker" in ``deploy/README.md``.
 
     :param restrict_to_agent_names: Names the picker may show. Empty means no
         restriction, which is the default.
