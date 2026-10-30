@@ -43,6 +43,7 @@ from omnigent.server.oidc import OIDCConfig
 from omnigent.server.routes.auth import (
     _AUTH_STATE_COOKIE_PLAIN,
     _resolve_oidc_email,
+    _validate_id_token,
     create_auth_router,
 )
 from omnigent.server.routes.device_auth import create_device_auth_router
@@ -263,7 +264,10 @@ def test_oidc_accepts_es384_id_token(monkeypatch: pytest.MonkeyPatch) -> None:
         algorithm="ES384",
     )
 
-    assert _resolve_oidc_email({"id_token": token}, _oidc_config()) == "Alice@Example.com"
+    config = _oidc_config()
+    claims = _validate_id_token({"id_token": token}, config)
+    assert claims is not None
+    assert _resolve_oidc_email(claims, config) == "Alice@Example.com"
 
 
 def test_callback_verified_email_mints_session(
@@ -643,7 +647,7 @@ def test_reauth_callback_rejects_token_expired_beyond_leeway(
     resp = _do_callback_reauth(client, token, reauth_at=reauth_at)
 
     assert resp.status_code == 400, resp.text
-    assert "Could not determine user email" in resp.json()["error"]
+    assert "IdP id_token failed validation" in resp.json()["error"]
     assert resp.cookies.get("ap_session") is None
 
 
@@ -859,7 +863,7 @@ def test_device_approval_reauthenticates_before_consent(
     login = client.get(consent.headers["location"], follow_redirects=False)
     authorization = parse_qs(urlsplit(login.headers["location"]).query)
     assert authorization["prompt"] == ["login"]
-    assert authorization["max_age"] == ["0"]
+    assert authorization["max_age"] == ["300"]
     state = jwt.decode(
         client.cookies[_AUTH_STATE_COOKIE_PLAIN], _TEST_SECRET, algorithms=["HS256"]
     )
@@ -1095,16 +1099,8 @@ def test_reauth_login_sends_a_max_age_an_entra_token_survives(
 ) -> None:
     """A forced re-auth must ask for a window the IdP can mint a live token in.
 
-    Microsoft Entra ID caps the id_token's ``exp`` at ``auth_time + max_age``.
-    With ``max_age=0`` the token it returns has already expired by the time the
-    callback validates it, so every CLI, host and device login fails — and says
-    "Could not determine user email from IdP", because a failed validation
-    yields no claims to read an email from.
-
-    This drives the real shape end to end: take the ``max_age`` the login route
-    actually puts on the wire, mint the token Entra would mint for it, and
-    require the callback to accept it. Reading it from the redirect rather than
-    from a helper is the point — a hardcoded zero would otherwise go unnoticed.
+    Entra caps the id_token's ``exp`` at ``auth_time + max_age``, so the token
+    is minted from the ``max_age`` the login redirect actually sends.
     """
     client, keys = callback_client
     redirect = client.get("/auth/login", params={"reauth": "1"}, follow_redirects=False)
@@ -1132,23 +1128,28 @@ def test_reauth_login_sends_a_max_age_an_entra_token_survives(
     assert resp.cookies.get("ap_session") is not None
 
 
+@pytest.mark.parametrize(
+    ("expired", "message"),
+    [(True, "IdP id_token failed validation"), (False, "IdP returned no id_token")],
+    ids=["expired id_token", "no id_token"],
+)
 def test_a_token_that_does_not_validate_says_so(
-    callback_client: tuple[TestClient, _IdpKeys],
+    callback_client: tuple[TestClient, _IdpKeys], expired: bool, message: str
 ) -> None:
-    """An expired token must not be reported as a missing email.
-
-    The email message sent at least one deployment looking at its claim
-    configuration for what was actually an expiry problem; the real cause was
-    only in the server log.
-    """
+    """A bad or missing id_token must not be reported as a missing email."""
     client, keys = callback_client
     now = int(time.time())
-    token = keys.sign_id_token(
-        {"email": "alice@example.com", "email_verified": True, "exp": now - 1}
+    token = (
+        # Past the id_token leeway, so it is expired however the clocks drift.
+        keys.sign_id_token(
+            {"email": "alice@example.com", "email_verified": True, "exp": now - 600}
+        )
+        if expired
+        else ""
     )
 
     resp = _do_callback(client, token)
 
     assert resp.status_code == 400, resp.text
-    assert "id_token failed validation" in resp.text
+    assert message in resp.text
     assert "email" not in resp.text.lower()

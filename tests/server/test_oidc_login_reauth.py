@@ -30,6 +30,7 @@ closes the residual "IdP ignored prompt=login" hole) is covered in
 
 from __future__ import annotations
 
+from dataclasses import replace
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -37,7 +38,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from omnigent.server.auth import UnifiedAuthProvider
-from omnigent.server.oidc import OIDCConfig
+from omnigent.server.oidc import OIDCConfig, parse_reauth_max_age
 from omnigent.server.routes.auth import create_auth_router
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 
@@ -76,12 +77,17 @@ def login_client(
     db_uri: str,
 ) -> TestClient:
     """Mount the OIDC auth router; return a TestClient for /auth/login probes."""
+    return _login_client(tmp_path, db_uri, _oidc_config())
+
+
+def _login_client(tmp_path, db_uri: str, config: OIDCConfig) -> TestClient:
+    """Mount the OIDC auth router for *config*; return a TestClient."""
     from omnigent.server.admin_list import AdminList
 
     admins = tmp_path / "admins"
     admins.write_text("")
     perm_store = SqlAlchemyPermissionStore(db_uri)
-    provider = UnifiedAuthProvider(source="oidc", oidc_config=_oidc_config())
+    provider = UnifiedAuthProvider(source="oidc", oidc_config=config)
 
     app = FastAPI()
     app.include_router(
@@ -222,28 +228,28 @@ def test_github_provider_reauth_sends_no_prompt(
     )
 
 
-def test_reauth_max_age_is_configurable(
-    login_client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A deployment whose IdP needs a different window can set one."""
-    monkeypatch.setenv("OMNIGENT_OIDC_REAUTH_MAX_AGE", "90")
+def test_reauth_login_sends_the_configured_max_age(tmp_path, db_uri: str) -> None:
+    """``/auth/login?reauth=1`` sends the deployment's ``max_age``, not a constant."""
+    client = _login_client(tmp_path, db_uri, replace(_oidc_config(), reauth_max_age_seconds=90))
 
-    params = _parse_auth_url(
-        login_client.get("/auth/login", params={"reauth": "1"}).headers["location"]
-    )
+    params = _parse_auth_url(client.get("/auth/login", params={"reauth": "1"}).headers["location"])
 
     assert params.get("max_age") == ["90"]
 
 
-@pytest.mark.parametrize("value", ["0", "-5", "abc", ""])
-def test_an_unusable_reauth_max_age_falls_back_to_the_default(
-    login_client: TestClient, monkeypatch: pytest.MonkeyPatch, value: str
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("90", 90),
+        (None, 300),
+        ("", 300),
+        # A typo must not reintroduce the expired-on-arrival failure.
+        ("0", 300),
+        ("-5", 300),
+        ("abc", 300),
+    ],
+)
+def test_reauth_max_age_parses_positive_seconds_and_falls_back(
+    raw: str | None, expected: int
 ) -> None:
-    """A typo must not reintroduce the expired-on-arrival failure."""
-    monkeypatch.setenv("OMNIGENT_OIDC_REAUTH_MAX_AGE", value)
-
-    params = _parse_auth_url(
-        login_client.get("/auth/login", params={"reauth": "1"}).headers["location"]
-    )
-
-    assert params.get("max_age") == ["300"]
+    assert parse_reauth_max_age(raw) == expected

@@ -28,7 +28,6 @@ import hmac
 import html
 import json
 import logging
-import os
 import re
 import secrets
 import time
@@ -72,8 +71,8 @@ _AUTH_STATE_COOKIE_PLAIN = "ap_auth_state"
 _AUTH_STATE_TTL_SECONDS = 300  # 5 minutes
 _CLI_TICKET_TTL_SECONDS = 300  # 5 minutes
 # Clock-skew tolerance for id_token ``exp``/``iat``/``nbf``. Microsoft Entra ID
-# caps ``exp`` at ``auth_time + max_age``, so the ``max_age=0`` that forced
-# re-auth sends yields a token at or just past its expiry when it arrives.
+# caps ``exp`` at ``auth_time + max_age``, so a short re-auth ``max_age`` leaves
+# a token little margin by the time it arrives.
 _ID_TOKEN_LEEWAY_SECONDS = 60
 # An upgrade notice, never a key in the login-ticket store.
 _CLI_UPGRADE_TICKET = "upgrade-required"
@@ -361,7 +360,7 @@ def create_auth_router(
             # Ask the IdP to force the user to re-enter credentials
             # rather than silently reusing an existing IdP session.
             params["prompt"] = "login"
-            params["max_age"] = str(_reauth_max_age_seconds())
+            params["max_age"] = str(config.reauth_max_age_seconds)
         endpoint = urlsplit(config.authorization_endpoint)
         query = [
             (name, value)
@@ -489,6 +488,7 @@ def create_auth_router(
                 return fail(400, "Token exchange returned an invalid response", "server_error")
 
             # Extract user email.
+            claims: dict[str, object] | None = None
             if config.provider_type == "github":
                 access_token = token_json.get("access_token")
                 email = await _resolve_github_email(
@@ -496,23 +496,28 @@ def create_auth_router(
                     access_token if isinstance(access_token, str) else "",
                 )
             else:
-                email = _resolve_oidc_email(token_json, config)
-                if not email and _validate_id_token(token_json, config) is None:
-                    # Say which step failed. These are different operator
-                    # problems — a bad signature, issuer, audience or expiry
-                    # against a missing or unverified claim — and the email
-                    # message sent at least one deployment looking in the
-                    # wrong place for a token that had expired on arrival.
+                # Report a missing or invalid id_token separately from a missing
+                # or unverified email claim.
+                id_token = token_json.get("id_token")
+                if not isinstance(id_token, str) or not id_token:
+                    _logger.error(
+                        "Rejecting login: the IdP's token response has no id_token "
+                        "(is the openid scope requested?)"
+                    )
+                    return fail(400, "IdP returned no id_token", "server_error")
+                claims = _validate_id_token(token_json, config)
+                if claims is None:
                     _logger.error(
                         "Rejecting login: the IdP's id_token did not validate "
                         "(see the id_token validation warning above for the reason)"
                     )
                     return fail(400, "IdP id_token failed validation", "server_error")
+                email = _resolve_oidc_email(claims, config)
 
         if not email:
             return fail(400, "Could not determine user email from IdP", "server_error")
 
-        # Forced re-auth gate (device consent, CLI tickets): /login sent prompt=login + max_age=0
+        # Forced re-auth gate (device consent, CLI tickets): /login sent prompt=login and max_age
         # and stamped reauth_at, so a missing or older auth_time means re-auth is unproven.
         # Refuse it unless OMNIGENT_OIDC_REQUIRE_REAUTH is off; GitHub never stamps reauth_at.
         reauth_at = state_payload.get("reauth_at")
@@ -522,7 +527,7 @@ def create_auth_router(
                 "(OMNIGENT_OIDC_REQUIRE_REAUTH is disabled)"
             )
         elif isinstance(reauth_at, int):
-            auth_time = _resolve_oidc_auth_time(token_json, config)
+            auth_time = _resolve_oidc_auth_time(claims)
             if auth_time is None:
                 _logger.warning(
                     "Rejecting reauth login: IdP id_token has no auth_time claim, "
@@ -1420,45 +1425,6 @@ def _auth_state_exp() -> int:
     return int(time.time()) + _AUTH_STATE_TTL_SECONDS
 
 
-#: How recently the IdP must have authenticated the user, in seconds, sent as
-#: ``max_age`` on a forced re-auth. Not zero: some IdPs (Microsoft Entra ID)
-#: cap the id_token's ``exp`` at ``auth_time + max_age``, so ``max_age=0``
-#: returns a token that has already expired by the time it reaches us, and
-#: every CLI, host and device login fails. The real freshness gate is the
-#: ``auth_time >= reauth_at`` check in the callback, which is stricter than
-#: ``max_age`` anyway: it compares against the instant this server demanded
-#: re-authentication, not a window the IdP is free to interpret.
-_REAUTH_MAX_AGE_ENV = "OMNIGENT_OIDC_REAUTH_MAX_AGE"
-_REAUTH_MAX_AGE_DEFAULT_SECONDS = 300
-
-
-def _reauth_max_age_seconds() -> int:
-    """Return the ``max_age`` to send on a forced re-auth.
-
-    :data:`_REAUTH_MAX_AGE_ENV` overrides the default for a deployment whose
-    IdP needs a different window. A value that is not a positive integer is
-    ignored: a typo must not reintroduce the expired-on-arrival failure, and
-    the callback's own freshness check still holds either way.
-
-    :returns: Seconds to send as ``max_age``.
-    """
-    raw = os.environ.get(_REAUTH_MAX_AGE_ENV, "").strip()
-    if not raw:
-        return _REAUTH_MAX_AGE_DEFAULT_SECONDS
-    try:
-        seconds = int(raw)
-    except ValueError:
-        seconds = 0
-    if seconds <= 0:
-        _logger.warning(
-            "%s must be a positive number of seconds; using %d",
-            _REAUTH_MAX_AGE_ENV,
-            _REAUTH_MAX_AGE_DEFAULT_SECONDS,
-        )
-        return _REAUTH_MAX_AGE_DEFAULT_SECONDS
-    return seconds
-
-
 async def _resolve_github_email(
     client: httpx.AsyncClient,
     access_token: str,
@@ -1569,25 +1535,20 @@ def _validate_id_token(
         return None
 
 
-def _resolve_oidc_auth_time(
-    token_json: dict[str, object],
-    config: OIDCConfig,
-) -> int | None:
+def _resolve_oidc_auth_time(claims: dict[str, object] | None) -> int | None:
     """Return the id_token's ``auth_time`` (last authentication instant).
 
     ``auth_time`` is the epoch second at which the IdP actually
     authenticated the end user. It is REQUIRED in the id_token when the
     request carried ``max_age`` (OIDC Core §3.1.3.7), which is exactly
     the forced-re-auth case. Used to verify the IdP honored
-    ``prompt=login``/``max_age=0`` rather than silently reusing its
-    session.
+    ``prompt=login`` rather than silently reusing its session.
 
-    :param token_json: Token endpoint response JSON with ``id_token``.
-    :param config: OIDC config for signature/claim validation.
-    :returns: ``auth_time`` as an int, or ``None`` when the token is
-        invalid or the claim is absent/non-numeric.
+    :param claims: Validated id_token claims, or ``None`` when there are none
+        (a GitHub login).
+    :returns: ``auth_time`` as an int, or ``None`` when there are no claims or
+        the claim is absent/non-numeric.
     """
-    claims = _validate_id_token(token_json, config)
     if claims is None:
         return None
     auth_time = claims.get("auth_time")
@@ -1601,14 +1562,13 @@ def _resolve_oidc_auth_time(
 
 
 def _resolve_oidc_email(
-    token_json: dict[str, object],
+    claims: dict[str, object],
     config: OIDCConfig,
 ) -> str | None:
-    """Extract the verified email from the OIDC ``id_token``.
+    """Extract the verified email from validated OIDC ``id_token`` claims.
 
-    Validates the JWT signature against the IdP's JWKS, verifies
-    ``iss`` and ``aud`` claims, and returns the ``email`` claim
-    **only when the IdP marked it verified** via ``email_verified``.
+    Returns the ``email`` claim **only when the IdP marked it verified** via
+    ``email_verified``.
 
     A valid signature proves the token came from the IdP; it does
     *not* prove the user controls the email address. Without the
@@ -1628,20 +1588,13 @@ def _resolve_oidc_email(
     ``preferred_username``). ``email_verified`` refers to the ``email``
     claim, so a custom claim always needs the verification opt-out too.
 
-    :param token_json: The token endpoint response JSON containing
-        ``id_token``.
-    :param config: The OIDC configuration with JWKS URI and
-        expected issuer/audience.
-    :returns: The user's email from the ``id_token`` when present and
-        marked verified; ``None`` if the token is missing/invalid, the
-        email claim is absent or not a non-empty string, or
-        ``email_verified`` is not truthy (and verification is not
-        skipped via config).
+    :param claims: Claims from :func:`_validate_id_token`.
+    :param config: The OIDC configuration (email claim and verification opt-out).
+    :returns: The user's email when present and marked verified; ``None`` if
+        the email claim is absent or not a non-empty string, or
+        ``email_verified`` is not truthy (and verification is not skipped via
+        config).
     """
-    claims = _validate_id_token(token_json, config)
-    if claims is None:
-        return None
-
     email = claims.get(config.email_claim)
     if not isinstance(email, str) or not email.strip():
         _logger.warning(
