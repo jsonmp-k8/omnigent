@@ -150,6 +150,7 @@ import {
   sandboxOptionLabel,
   sandboxProviderOptions,
 } from "@/lib/capabilities";
+import { isBootFallbackInfo } from "@/lib/bootCapabilities";
 import { useHeading, usePoweredBy } from "@/lib/branding";
 import {
   isSlashCommandText,
@@ -3953,8 +3954,9 @@ export function NewChatLandingScreen() {
   useEffect(() => {
     setPickerReadyTarget(pickerDataLoading ? null : pickerTarget);
   }, [pickerDataLoading, pickerTarget]);
-  const pickerLoading =
-    pickerDataLoading || pickerReadyTarget !== pickerTarget || info === "loading";
+  // The embed shows an offline fallback after 1.5s; it carries no curation.
+  const curationPending = info === "loading" || isBootFallbackInfo(info);
+  const pickerLoading = pickerDataLoading || pickerReadyTarget !== pickerTarget || curationPending;
   const [interactiveCacheKey, setInteractiveCacheKey] = useState<string | null>(null);
   useEffect(() => {
     setInteractiveCacheKey(cachedPickerOptions ? pickerCacheKey : null);
@@ -3964,7 +3966,7 @@ export function NewChatLandingScreen() {
   const interactiveWhileLoading =
     cachedPickerOptions !== null &&
     interactiveCacheKey === pickerCacheKey &&
-    info !== "loading" &&
+    !curationPending &&
     selectedAgent !== undefined &&
     (!harnessTriggerDetails.some((row) => row.label === "Model") ||
       pickerModelOptions.length > 0 ||
@@ -4884,12 +4886,8 @@ export function NewChatLandingScreen() {
     setPickedHarness(null);
     _setCostControlMode(null);
   }, [info, smartRoutingEnabled, pickedHarness]);
-  // Same degrade when curation, not the routing flag, is what took the pick
-  // away. The create binds the configured default, and a brain is one agent's
-  // preference: Debby's routed brain (or a concrete SDK of hers) and its
-  // cost-control override must not ride along into Polly's session. Re-seed
-  // from the agent that actually runs, as picking it would; the stored value
-  // stays put in case the deployment offers that agent again.
+  // Curation replaced the remembered agent: re-seed brain and cost control
+  // from the agent that runs.
   useEffect(() => {
     if (!curationRejectedTheRememberedPick || effectiveAgentId === null) return;
     const remembered = readLastHarness(effectiveAgentId);

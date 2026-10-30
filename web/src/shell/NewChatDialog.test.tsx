@@ -93,6 +93,7 @@ vi.mock("@/pages/settings/HarnessFixDialog", () => ({
 import { ComposerAddMenu } from "@/components/composer/ComposerAddMenu";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
+import { SERVER_INFO_OFFLINE_FALLBACK } from "@/lib/bootCapabilities";
 import { authenticatedFetch, getCurrentUserId, resolveIdentity } from "@/lib/identity";
 import { BACKGROUND_SESSION_TITLES_STORAGE_KEY } from "@/lib/backgroundSessionTitlesPreferences";
 import {
@@ -1366,7 +1367,13 @@ function renderLanding(
   // "loading" renders the probe still pending; `rerenderWith` resolves it later.
   const tree = (overrides: Partial<ServerInfo> | "loading") => (
     <QueryClientProvider client={client}>
-      <CapabilitiesProvider info={overrides === "loading" ? "loading" : landingInfo(overrides)}>
+      <CapabilitiesProvider
+        info={
+          overrides === "loading" || overrides === SERVER_INFO_OFFLINE_FALLBACK
+            ? (overrides as ServerInfo | "loading")
+            : landingInfo(overrides)
+        }
+      >
         <TooltipProvider>
           <MemoryRouter initialEntries={[route]}>
             <LandingNavigationProbe />
@@ -13002,7 +13009,8 @@ describe("NewChatLandingScreen picker curation", () => {
     expect(trigger).not.toHaveAttribute("aria-label", expect.stringContaining("Smart Routing"));
 
     const { body } = await submitAndReadBody();
-    expect(body.harness_override).not.toBe("auto");
+    expect(body).not.toHaveProperty("harness_override");
+    expect(body).not.toHaveProperty("cost_control_mode_override");
 
     openPicker();
     expect(screen.queryByTestId("new-chat-landing-harness-smart-routing")).toBeNull();
@@ -13010,7 +13018,11 @@ describe("NewChatLandingScreen picker curation", () => {
     expect(row("a1")).not.toHaveAttribute("data-active");
   });
 
-  it("keeps a returning user's cached picker closed until the curation is known", () => {
+  it.each([
+    ["the probe is pending", "loading" as const],
+    // The embed shows this after 1.5s; it carries no curation.
+    ["a stalled probe's offline fallback stands in", SERVER_INFO_OFFLINE_FALLBACK],
+  ])("keeps a returning user's cached picker closed while %s", (_case, pendingInfo) => {
     getCurrentUserIdMock.mockReturnValue("picker-user@example.test");
     mockClaudeModels([{ id: "opus", displayName: "Opus", isDefault: true }]);
     // An earlier, unrestricted visit cached the full roster for this user.
@@ -13023,13 +13035,17 @@ describe("NewChatLandingScreen picker curation", () => {
     // Agents and sessions have answered, but /v1/info has not: the cached
     // picker shows the remembered pick and stays closed, since the cached
     // roster could hold agents this deployment no longer offers.
-    const view = renderLanding("loading");
+    const view = renderLanding(pendingInfo);
     const trigger = screen.getByTestId("new-chat-landing-agent-select");
     expect(trigger).toHaveAttribute("aria-busy", "true");
     expect(trigger).toBeDisabled();
     openPicker();
     expect(row("a1")).toBeNull();
     expect(row("a2")).toBeNull();
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "Start on the cached pick" },
+    });
+    expect(screen.getByTestId("new-chat-landing-submit")).toBeDisabled();
 
     view.rerenderWith({
       picker: { restrictToAgentNames: new Set(["codex-native-ui"]), defaultAgentName: null },

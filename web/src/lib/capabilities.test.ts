@@ -7,7 +7,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // resolveServerInfo is imported dynamically inside each probe (below) so every
 // test starts from a fresh module cache; only the pure helpers are static.
-import { pickerCuration, sandboxOptionLabel, sandboxProviderOptions } from "./capabilities";
+import {
+  pickerCuration,
+  sandboxOptionLabel,
+  sandboxProviderOptions,
+  UNRESTRICTED_PICKER,
+} from "./capabilities";
 import type { ServerInfo } from "./capabilities";
 
 /** A ServerInfo with only the sandbox fields a test cares about set. */
@@ -374,8 +379,7 @@ describe("picker curation", () => {
   it("reads an older server, which reports nothing, as unrestricted", async () => {
     const parsed = await probe({});
 
-    expect(parsed.picker?.restrictToAgentNames.size ?? 0).toBe(0);
-    expect(parsed.picker?.defaultAgentName ?? null).toBeNull();
+    expect(parsed.picker).toEqual(UNRESTRICTED_PICKER);
   });
 
   it("drops a default the restriction does not offer", async () => {

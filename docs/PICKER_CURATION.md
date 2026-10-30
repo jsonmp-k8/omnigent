@@ -27,8 +27,9 @@ changes what exists:
 - every agent is still seeded, so nothing is removed from the server;
 - a session already bound to an unlisted agent keeps working, and so does
   forking it;
-- `GET /v1/agents` still returns the full roster, and an unlisted agent is
-  still reachable by id through the API.
+- curation does not further filter `GET /v1/agents`, and an unlisted agent is
+  still reachable by id through the API. An agent `OMNIGENT_SEEDED_AGENTS`
+  leaves out stays unavailable even when the restriction names it.
 
 Removing an agent from a deployment altogether is a different, server-side
 concern, and is configured separately. Reach for this one when every agent
@@ -41,11 +42,12 @@ named agents in the configured order. The Harnesses heading, the "Other..."
 submenus, the "Create custom agent" action and the Smart Routing entry all
 disappear, because none of them can lead anywhere the deployment allows. A
 returning user's cached picker stays closed while `GET /v1/info` is still
-pending, so the full roster is never shown ahead of the curation; if that
+pending, including while the embedded app shows its offline stand-in after
+1.5 seconds, so the full roster is never shown ahead of the curation; if that
 probe fails outright, the client falls back to the uncurated picker, as it
 does for an older server that has no `picker` block. The "Hide unconfigured
-harnesses" setting applies to the curated list as it does to the grouped
-menu. Name exactly one agent and the
+harnesses" setting and the per-entry hides in Settings › Appearance apply to
+the curated list as they do to the grouped menu. Name exactly one agent and the
 picker collapses to that one row. If the names match nothing the menu says so
 rather than opening blank, and the server logs a warning at startup naming the
 agents it could not find.
