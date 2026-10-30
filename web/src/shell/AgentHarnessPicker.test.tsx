@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { AgentHarnessPicker } from "./NewChatDialog";
@@ -10,6 +10,10 @@ import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
 import { StoryQueryRouter } from "@/storybook/StoryProviders";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { writeHideUnconfiguredHarnesses } from "@/lib/harnessVisibilityPreferences";
+import {
+  HIDDEN_PICKER_AGENTS_STORAGE_KEY,
+  writeHiddenPickerAgents,
+} from "@/lib/pickerEntryVisibility";
 
 const agent = (
   overrides: Partial<AvailableAgent> &
@@ -55,6 +59,12 @@ const polly = agent({
   id: "agent-polly",
   name: "polly",
   display_name: "Polly",
+  harness: "claude-sdk",
+});
+const debby = agent({
+  id: "agent-debby",
+  name: "debby",
+  display_name: "Debby",
   harness: "claude-sdk",
 });
 
@@ -123,7 +133,13 @@ function inlineHarnessIds(ids: string[]): string[] {
   return ids.filter((id) => screen.queryByTestId(`new-chat-landing-agent-${id}`) !== null);
 }
 
-afterEach(cleanup);
+const row = (id: string) => screen.queryByTestId(`new-chat-landing-agent-${id}`);
+
+afterEach(() => {
+  cleanup();
+  window.localStorage.removeItem(HIDDEN_PICKER_AGENTS_STORAGE_KEY);
+  writeHideUnconfiguredHarnesses(false);
+});
 
 describe("AgentHarnessPicker inline harness list", () => {
   it("keeps the preferred harnesses inline when they are seeded", async () => {
@@ -348,4 +364,98 @@ describe("a curated New Chat picker", () => {
     // The harness rows the curated list shows, not the grouped menu's inline set.
     expect(prefetched.at(-1)).toEqual([pi.id, codex.id]);
   });
+
+  describe("with entries the user hid", () => {
+    it("drops a hidden entry from the curated list, keeping the order", async () => {
+      writeHiddenPickerAgents(new Set([codex.name]));
+      renderPicker({
+        harnessEntries: [claude, codex],
+        agentEntries: [polly],
+        curatedEntries: [polly, codex, claude],
+      });
+      await openPicker();
+
+      expect(curatedLabels()).toEqual(["Polly", "Claude Code"]);
+    });
+
+    it("points at Settings when the user's hides emptied the curated list", async () => {
+      writeHiddenPickerAgents(new Set([polly.name]));
+      renderPicker({ harnessEntries: [claude], agentEntries: [polly], curatedEntries: [polly] });
+      await openPicker();
+
+      expect(screen.getByTestId("new-chat-landing-no-agents")).toHaveTextContent(
+        "Every entry is hidden.",
+      );
+    });
+  });
+});
+
+describe("AgentHarnessPicker per-entry visibility", () => {
+  it.each([
+    ["harness", codex],
+    // Polly launches fine here, so only this preference can drop it.
+    ["bundle agent", polly],
+  ])("drops a hidden %s row", async (_kind, hiddenEntry) => {
+    writeHiddenPickerAgents(new Set([hiddenEntry.name]));
+    renderPicker({
+      harnessEntries: [claude, codex],
+      agentEntries: [polly, debby],
+      effectiveAgentId: claude.id,
+    });
+    await openPicker();
+
+    expect(row(hiddenEntry.id)).toBeNull();
+    expect(row(claude.id)).toBeInTheDocument();
+    expect(row(debby.id)).toBeInTheDocument();
+  });
+
+  it("keeps the selected entry visible even when hidden", async () => {
+    writeHiddenPickerAgents(new Set([claude.name]));
+    renderPicker({ harnessEntries: [claude, codex], effectiveAgentId: claude.id });
+    await openPicker();
+
+    expect(row(claude.id)).toBeInTheDocument();
+  });
+
+  it("reacts to a change without a remount", async () => {
+    renderPicker({ harnessEntries: [claude, codex], effectiveAgentId: claude.id });
+    await openPicker();
+    expect(row(codex.id)).toBeInTheDocument();
+
+    act(() => writeHiddenPickerAgents(new Set([codex.name])));
+
+    expect(row(codex.id)).toBeNull();
+  });
+
+  const claudeOnlyHost: Host = {
+    ...readyHost,
+    configured_harnesses: { "claude-native": true, "codex-native": false },
+  };
+  const unconfiguredHost: Host = {
+    ...readyHost,
+    configured_harnesses: { "claude-native": false, "codex-native": false },
+  };
+  it.each([
+    ["every offered entry is hidden", [claude.name, codex.name, polly.name], readyHost, true],
+    ["a hidden ready harness is all that was left", [claude.name], claudeOnlyHost, true],
+    ["only a stale name is stored", ["removed-agent"], unconfiguredHost, false],
+    ["readiness already removed the hidden harness", [codex.name], unconfiguredHost, false],
+  ])(
+    "points at Settings only when the hides emptied the picker: %s",
+    async (_case, hiddenNames, host, pointsAtSettings) => {
+      writeHiddenPickerAgents(new Set(hiddenNames));
+      writeHideUnconfiguredHarnesses(true);
+      renderPicker({
+        harnessEntries: [claude, codex],
+        agentEntries: host === readyHost ? [polly] : [],
+        effectiveAgentId: null,
+        host,
+      });
+      await openPicker();
+
+      expect(row(claude.id)).toBeNull();
+      expect(row(codex.id)).toBeNull();
+      expect(screen.queryByTestId("new-chat-landing-all-hidden") !== null).toBe(pointsAtSettings);
+    },
+  );
 });
