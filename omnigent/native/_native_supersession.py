@@ -14,6 +14,26 @@ import httpx
 
 _logger = logging.getLogger(__name__)
 
+_SUPERSESSION_LEADS = {
+    "/clear": ("This conversation was ended by `/clear`.", "the new chat"),
+    "/rewind": ("This conversation was rewound with `/rewind`.", "the rewound chat"),
+}
+
+
+def supersession_notice_text(new_session_id: str, *, command: str = "/clear") -> str:
+    """
+    Return the notice a superseded session keeps, linking to its successor.
+
+    :param new_session_id: Conversation the work moved to, e.g. ``"conv_new"``.
+    :param command: Command that moved it, ``"/clear"`` or ``"/rewind"``.
+    :returns: Markdown notice text.
+    """
+    lead, link_text = _SUPERSESSION_LEADS[command]
+    return (
+        f"{lead} Continue in [{link_text}](/c/{new_session_id}). "
+        "You can also send a message here to resume this conversation."
+    )
+
 
 async def post_clear_supersession(
     client: httpx.AsyncClient,
@@ -74,11 +94,7 @@ async def post_clear_supersession(
             exc_info=True,
             extra={"session_id": old_session_id},
         )
-    notice = (
-        "This conversation was ended by `/clear`. "
-        f"Continue in [the new chat](/c/{new_session_id}). "
-        "You can also send a message here to resume this conversation."
-    )
+    notice = supersession_notice_text(new_session_id)
     try:
         item_resp = await client.post(
             events_path,

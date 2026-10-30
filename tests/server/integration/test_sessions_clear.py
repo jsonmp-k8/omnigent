@@ -59,16 +59,25 @@ def _fake_runner_returning(clear_status: int) -> tuple[httpx.AsyncClient, list[d
 
 
 async def _post_clear(
-    client: httpx.AsyncClient, clear_status: int
+    client: httpx.AsyncClient,
+    clear_status: int,
+    monkeypatch: pytest.MonkeyPatch,
+    harness: str = "claude-native",
 ) -> tuple[httpx.Response, list[dict[str, Any]]]:
     """
     POST a ``clear`` control with the runner answering *clear_status*.
 
     :param client: The test HTTP client.
     :param clear_status: Status the fake runner returns for the control.
+    :param monkeypatch: Pins the session's resolved harness.
+    :param harness: Harness the session resolves to. claude-sdk ``clear``
+        moves to a fresh session instead (``test_sessions_rewind.py``).
     :returns: The server response and the forwarded clear bodies.
     """
     from omnigent.runtime import set_runner_client
+    from omnigent.server.routes import sessions as sessions_module
+
+    monkeypatch.setattr(sessions_module, "_resolve_harness", lambda *_a, **_k: harness)
 
     runner, captured = _fake_runner_returning(clear_status)
     set_runner_client(runner)
@@ -82,27 +91,33 @@ async def _post_clear(
     return resp, captured
 
 
-async def test_clear_is_forwarded_to_the_runner(client: httpx.AsyncClient) -> None:
+async def test_clear_is_forwarded_to_the_runner(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A runner that typed the harness's /clear makes the control succeed."""
-    resp, captured = await _post_clear(client, 200)
+    resp, captured = await _post_clear(client, 200, monkeypatch)
 
     assert resp.status_code == 202, resp.text
     assert resp.json() == {"queued": False}
     assert captured == [{"type": "clear"}]
 
 
-async def test_clear_reports_unsupported_session_types(client: httpx.AsyncClient) -> None:
+async def test_clear_reports_unsupported_session_types(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A runner no-op (harness without a native /clear) is a clear 400."""
-    resp, captured = await _post_clear(client, 204)
+    resp, captured = await _post_clear(client, 204, monkeypatch, harness="openai-agents")
 
     assert resp.status_code == 400, resp.text
     assert "/clear is not available" in resp.text
     assert captured == [{"type": "clear"}]
 
 
-async def test_clear_surfaces_a_failed_injection(client: httpx.AsyncClient) -> None:
+async def test_clear_surfaces_a_failed_injection(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A runner that could not type /clear surfaces an error, not success."""
-    resp, captured = await _post_clear(client, 503)
+    resp, captured = await _post_clear(client, 503, monkeypatch)
 
     assert resp.status_code >= 500, resp.text
     assert "Clear failed" in resp.text
