@@ -50,7 +50,9 @@ harnesses" setting and the per-entry hides in Settings › Appearance apply to
 the curated list as they do to the grouped menu. Name exactly one agent and the
 picker collapses to that one row. If the names match nothing the menu says so
 rather than opening blank, and the server logs a warning at startup naming the
-agents it could not find.
+agents it could not find. It also names any agent `OMNIGENT_SEEDED_AGENTS`
+leaves out: the env var wins, so New Chat never offers those, even when
+`restrict_to_agent_names` lists them.
 
 `default_agent_name` only decides where someone with no history begins: a user
 who has picked an agent before still returns to their own pick. A default that

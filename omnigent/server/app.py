@@ -993,43 +993,57 @@ def _ensure_builtin_agent(
     _logger.info("Registered built-in %s agent as %s", name, agent_id)
 
 
-def _warn_on_empty_picker_restriction(agent_store: AgentStore, curation: PickerCuration) -> None:
-    """Say so at startup when ``restrict_to_agent_names`` names an unknown agent.
+def _warn_on_empty_picker_restriction(
+    agent_store: AgentStore,
+    curation: PickerCuration,
+    suppressed_agent_names: frozenset[str] = frozenset(),
+) -> None:
+    """Say so at startup when ``restrict_to_agent_names`` names an agent New Chat cannot offer.
 
-    The restriction is display-only, so a mistyped name fails quietly: the
-    picker simply has less in it, or nothing at all. Each name is looked up
-    directly, so the check holds however many agents the server has.
+    The restriction is display-only, so a mistyped name, or one
+    ``OMNIGENT_SEEDED_AGENTS`` leaves out, fails quietly: the picker simply has
+    less in it, or nothing at all. Each name is looked up directly, so the
+    check holds however many agents the server has.
 
     :param agent_store: Store the picker's roster is read from.
     :param curation: The configured curation; checked only when it restricts.
+    :param suppressed_agent_names: Packaged agents ``OMNIGENT_SEEDED_AGENTS``
+        leaves out; seeded, but never offered.
     """
     if not curation.restricted:
         return
+    names = curation.restrict_to_agent_names
     try:
-        missing = [
-            name
-            for name in curation.restrict_to_agent_names
-            if agent_store.get_by_name(name) is None
-        ]
+        missing = [name for name in names if agent_store.get_by_name(name) is None]
     except Exception:  # noqa: BLE001 — a store hiccup must not stop startup
         _logger.warning("could not check %s against the agent roster", RESTRICT_TO_AGENT_NAMES_KEY)
         return
-    if not missing:
-        return
-    if len(missing) == len(curation.restrict_to_agent_names):
+    suppressed = [name for name in names if name in suppressed_agent_names and name not in missing]
+    if suppressed:
+        # The env var wins: it decides what the server offers at all.
         _logger.warning(
-            "server config %s matches no server agent (%s); only a user's own agent "
-            "with one of these names will show in New Chat",
+            "server config %s names %d agent(s) that %s leaves out, so New Chat will not "
+            "offer them: %s",
             RESTRICT_TO_AGENT_NAMES_KEY,
-            ", ".join(missing),
+            len(suppressed),
+            SEEDED_AGENTS_ENV,
+            ", ".join(suppressed),
+        )
+    if len(missing) + len(suppressed) == len(names):
+        _logger.warning(
+            "server config %s matches no agent this server offers (%s); only a user's own "
+            "agent with one of these names will show in New Chat",
+            RESTRICT_TO_AGENT_NAMES_KEY,
+            ", ".join(names),
         )
         return
-    _logger.warning(
-        "server config %s has %d name(s) matching no server agent: %s",
-        RESTRICT_TO_AGENT_NAMES_KEY,
-        len(missing),
-        ", ".join(missing),
-    )
+    if missing:
+        _logger.warning(
+            "server config %s has %d name(s) matching no server agent: %s",
+            RESTRICT_TO_AGENT_NAMES_KEY,
+            len(missing),
+            ", ".join(missing),
+        )
 
 
 def _ensure_default_agents(
@@ -1991,7 +2005,9 @@ def create_app(
                 agent_store, artifact_store, agent_cache
             )
         # The roster exists either way, so the check does not depend on seeding here.
-        _warn_on_empty_picker_restriction(agent_store, picker_curation)
+        _warn_on_empty_picker_restriction(
+            agent_store, picker_curation, app_inst.state.suppressed_agent_names
+        )
 
         # Populate the policy registry (builtins + user-configured
         # modules) so GET /v1/policy-registry serves the catalog.
