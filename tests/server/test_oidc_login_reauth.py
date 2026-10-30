@@ -30,6 +30,7 @@ closes the residual "IdP ignored prompt=login" hole) is covered in
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from urllib.parse import parse_qs, urlsplit
 
@@ -238,18 +239,21 @@ def test_reauth_login_sends_the_configured_max_age(tmp_path, db_uri: str) -> Non
 
 
 @pytest.mark.parametrize(
-    ("raw", "expected"),
+    ("raw", "expected", "warned"),
     [
-        ("90", 90),
-        (None, 300),
-        ("", 300),
+        ("90", 90, False),
+        (None, 300, False),
+        ("", 300, False),
         # A typo must not reintroduce the expired-on-arrival failure.
-        ("0", 300),
-        ("-5", 300),
-        ("abc", 300),
+        ("0", 300, True),
+        ("-5", 300, True),
+        ("abc", 300, True),
     ],
 )
 def test_reauth_max_age_parses_positive_seconds_and_falls_back(
-    raw: str | None, expected: int
+    raw: str | None, expected: int, warned: bool, caplog: pytest.LogCaptureFixture
 ) -> None:
-    assert parse_reauth_max_age(raw) == expected
+    with caplog.at_level(logging.WARNING, logger="omnigent.server.oidc"):
+        assert parse_reauth_max_age(raw) == expected
+
+    assert ("OMNIGENT_OIDC_REAUTH_MAX_AGE must be a positive" in caplog.text) is warned

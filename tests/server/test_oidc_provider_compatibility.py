@@ -274,6 +274,8 @@ def test_authorization_override_preserves_provider_query(monkeypatch, request, r
         "&code_challenge=wrong&code_challenge_method=plain"
         "&redirect_uri=https%3A%2F%2Fwrong.example.test&scope=wrong&prompt=select_account&max_age=3600",
     )
+    request.getfixturevalue("oidc_env")
+    monkeypatch.setenv("OMNIGENT_OIDC_REAUTH_MAX_AGE", "120")
     client, _, _, _, _ = request.getfixturevalue("provider_client")
     response = client.get(
         "/auth/login", params={"reauth": "1"} if reauth else {}, follow_redirects=False
@@ -292,7 +294,7 @@ def test_authorization_override_preserves_provider_query(monkeypatch, request, r
     assert query["code_challenge"] != ["wrong"]
     assert query["code_challenge_method"] == ["S256"]
     assert query["prompt"] == (["login"] if reauth else ["select_account"])
-    assert query["max_age"] == (["300"] if reauth else ["3600"])
+    assert query["max_age"] == (["120"] if reauth else ["3600"])
 
 
 def test_public_pkce_ps256_login_and_code_replay(provider_client):

@@ -1107,17 +1107,15 @@ def test_reauth_login_sends_a_max_age_an_entra_token_survives(
     assert redirect.status_code == 302, redirect.text
     max_age = int(parse_qs(urlsplit(redirect.headers["location"]).query)["max_age"][0])
     now = int(time.time())
-    # The real sequence: the demand, then the user types their password, then
-    # the redirect and the code exchange. auth_time is behind "now" by the
-    # seconds that took, which is what makes exp == auth_time fatal.
-    reauth_at = now - 10
-    auth_time = now - 5
+    # Signed in two minutes ago: past the id_token leeway, inside the window.
+    reauth_at = now - 150
+    auth_time = now - 120
     token = keys.sign_id_token(
         {
             "email": "alice@example.com",
             "email_verified": True,
             "auth_time": auth_time,
-            # Entra's rule. At max_age=0 this is already in the past.
+            # Model provider expiry as auth_time + max_age.
             "exp": auth_time + max_age,
         }
     )
