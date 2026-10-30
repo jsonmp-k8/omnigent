@@ -1,7 +1,7 @@
 """Add the ``message_reactions`` table.
 
 Revision ID: rx1a2b3c4d5e
-Revises: nf12ab34cd56
+Revises: d0a1f879a01d
 Create Date: 2026-10-21 00:00:00.000000
 
 One row per (workspace, conversation, response, user): a thumbs-up or
@@ -25,7 +25,7 @@ from sqlalchemy.dialects.mysql import BINARY as MySQLBinary
 _UUID16 = sa.LargeBinary(length=16).with_variant(MySQLBinary(16), "mysql")
 
 revision: str = "rx1a2b3c4d5e"
-down_revision: str | None = "nf12ab34cd56"
+down_revision: str | None = "d0a1f879a01d"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
