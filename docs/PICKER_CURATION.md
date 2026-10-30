@@ -1,8 +1,7 @@
 # Curating the New Chat picker
 
 A deployment can decide which agents the New Chat picker offers, and which one
-a fresh chat starts on, from the server config file (see
-`omnigent/server/server_config.py` for where that file is resolved):
+a fresh chat starts on, from the server config file:
 
 ```yaml
 # Only these agents appear in New Chat, in this order.
@@ -15,6 +14,14 @@ default_agent_name: polly
 
 Both keys are optional. With neither set, the picker behaves exactly as it
 always has.
+
+Where the server reads that file depends on how it starts:
+
+- `omnigent server -c <file>` reads `<file>`. A plain `omnigent server`,
+  without `-c`, reads no config file for these keys, and ignores both
+  `OMNIGENT_CONFIG` and `<data_dir>/config.yaml`.
+- The Docker image reads `OMNIGENT_CONFIG` if it is set, else
+  `<data_dir>/config.yaml` (`/data/config.yaml` on the volume).
 
 Both values are published on `GET /v1/info`, which needs no authentication,
 so the names you put here are visible to anyone who can reach the server.
