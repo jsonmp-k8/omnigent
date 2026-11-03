@@ -256,6 +256,31 @@ def test_non_decision_warning_omits_event_content(caplog: pytest.LogCaptureFixtu
     assert "synthetic_secret" not in warnings[0].lower()
 
 
+def test_one_expression_warns_once_per_problem(caplog: pytest.LogCaptureFixture) -> None:
+    """Each distinct problem from the same expression gets its own single warning."""
+    _warn_non_decision.cache_clear()
+    evaluate = cel_policy(expression='event.type == "request" ? true : {"result": "BLOCK"}')
+    with caplog.at_level("WARNING", logger="omnigent.policies.builtins.cel"):
+        for _ in range(2):
+            assert evaluate({"type": "request", "data": "hi"}) is None
+            assert evaluate({"type": "tool_call", "data": {"name": "x"}}) is None
+    warnings = [record.getMessage() for record in caplog.records]
+    assert len(warnings) == 2
+    assert "BoolType instead of a map" in warnings[0]
+    assert "StringType result other than DENY, ASK or ALLOW" in warnings[1]
+
+
+def test_warning_cache_is_bounded(caplog: pytest.LogCaptureFixture) -> None:
+    """Problems beyond the bound evict the oldest, which then warns again."""
+    _warn_non_decision.cache_clear()
+    with caplog.at_level("WARNING", logger="omnigent.policies.builtins.cel"):
+        for i in range(_PROGRAM_CACHE_SIZE + 5):
+            cel_policy(expression=f"{i} == {i}")({"type": "request"})
+        assert _warn_non_decision.cache_info().currsize == _PROGRAM_CACHE_SIZE
+        cel_policy(expression="0 == 0")({"type": "request"})
+    assert len(caplog.records) == _PROGRAM_CACHE_SIZE + 6
+
+
 def test_mixed_outcome_expression_still_decides_after_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
