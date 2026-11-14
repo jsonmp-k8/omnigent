@@ -4465,7 +4465,13 @@ def register_core_routes(
             # full rationale. live_forward (== not silent) already excludes
             # bind-time auto-applies, so only an explicit /model lands a note.
             if _is_native_terminal_session(updated):
+                # A lost Claude reply may follow a committed selection.
                 if (
+                    _model_forward is None
+                    and wake_for_model_change
+                    and updated.labels.get(_CLAUDE_NATIVE_WRAPPER_LABEL_KEY)
+                    == _CLAUDE_NATIVE_WRAPPER_LABEL_VALUE
+                ) or (
                     _model_forward is not None
                     and _runner_reply_field(_model_forward.body, "error")
                     == "claude_native_model_unconfirmed"

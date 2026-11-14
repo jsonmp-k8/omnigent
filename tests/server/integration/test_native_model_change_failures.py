@@ -90,6 +90,7 @@ class _Tunnel:
     session: RunnerSession
     frames: list[Frame] = field(default_factory=list)
     dispatch_errors: list[Exception] = field(default_factory=list)
+    dispatch_task: asyncio.Task[None] | None = None
 
 
 @asynccontextmanager
@@ -123,6 +124,7 @@ async def _tunneled_runner(app: FastAPI) -> AsyncIterator[tuple[httpx.AsyncClien
                 tunnel.dispatch_errors.append(exc)
 
     dispatch = asyncio.create_task(dispatch_requests())
+    tunnel.dispatch_task = dispatch
     try:
         async with httpx.AsyncClient(
             transport=WSTunnelTransport(registry, session.runner_id), base_url="http://runner"
@@ -494,6 +496,101 @@ async def test_unconfirmed_claude_model_change_keeps_intent_without_claiming_an_
         if item.type == "error" and item.data.code == "model_change_not_applied"
     ] == []
     assert session.tunnel.dispatch_errors == []
+
+
+async def test_cancelled_claude_model_change_keeps_intent_after_losing_the_reply(
+    client: httpx.AsyncClient,
+    native_session: _NativeSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    from tests._helpers.polling import poll_until_async
+
+    session = native_session
+    assert session.claude is not None
+    pane = session.claude
+    dispatch = session.tunnel.dispatch_task
+    assert dispatch is not None
+    committed = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    deadlines: list[threading.Event] = []
+    keys: list[str] = []
+
+    def select(bridge_dir: Path, *, model: str, **kwargs: Any) -> Any:
+        deadline = claude_bridge._INJECTION_CANCEL_EVENT.get()
+        assert deadline is not None
+        deadlines.append(deadline)
+        keys.append("s")
+        receipt = pane.select(bridge_dir, model=model, **kwargs)
+        committed.set()
+        try:
+            assert release.wait(5)
+            claude_bridge._check_injection_cancelled()
+            keys.append("late s")
+            return receipt
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(claude_bridge, "inject_model_command", select)
+    session.tunnel.frames.clear()
+    pending = asyncio.create_task(_pick_model(client, session))
+    try:
+        assert await asyncio.to_thread(committed.wait, 2)
+        assert session.store.get_conversation(session.session_id).model_override == (
+            session.requested_model
+        )
+        dispatch.cancel()
+        await poll_until_async(lambda: deadlines[0].is_set(), timeout_s=2)
+        assert not dispatch.done() and not pending.done()
+        metadata = await client.patch(
+            f"/v1/sessions/{session.session_id}",
+            json={
+                "title": "Metadata changed during selection",
+                "reasoning_effort": "low",
+                "silent": True,
+            },
+        )
+        assert metadata.status_code == 200, metadata.text
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(dispatch, timeout=2)
+        assert finished.is_set()
+        assert keys == ["s"]
+        session.tunnel.registry.deregister(
+            session.tunnel.session.runner_id, session=session.tunnel.session
+        )
+        response = await asyncio.wait_for(pending, timeout=5)
+
+        assert session.runner_replies == []
+        requests = [frame for frame in session.tunnel.frames if isinstance(frame, RequestFrame)]
+        assert [json.loads(frame.body or "{}") for frame in requests] == [
+            {"type": "model_change", "model": session.requested_model}
+        ]
+        assert session.tunnel.dispatch_errors == []
+        assert pane.commands == [session.requested_model]
+        assert claude_bridge.read_claude_status_model(pane.bridge_dir) == session.requested_model
+        saved = session.store.get_conversation(session.session_id)
+        assert saved.title == "Metadata changed during selection"
+        assert saved.reasoning_effort == "low"
+        assert saved.model_override == session.requested_model
+        assert response.status_code == 503, response.text
+        assert "may have changed the session model" in response.text
+        assert "Check the terminal's current model before retrying" in response.text
+        assert session.errors == []
+        assert session.notices == []
+        assert [
+            item
+            for item in session.store.list_items(session.session_id).data
+            if item.type == "error" and item.data.code == "model_change_not_applied"
+        ] == []
+    finally:
+        release.set()
+        for task in (dispatch, pending):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(dispatch, pending, return_exceptions=True)
 
 
 @pytest.mark.parametrize("unconfirmed", [False, True], ids=["refused", "unconfirmed"])
