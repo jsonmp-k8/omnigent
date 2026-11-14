@@ -2082,26 +2082,6 @@ def claude_global_config_path(
     return _claude_joined_path(base, config_dir or home_value, f".claude{suffix}.json")
 
 
-def claude_user_settings_path(
-    cwd: Path | None = None, env: Mapping[str, str] | None = None
-) -> Path:
-    """
-    Return the user ``settings.json`` Claude saves its default model to.
-
-    :param cwd: Claude's working directory, e.g. ``Path("/home/user/repo")``.
-        ``None`` uses this process's working directory.
-    :param env: Claude's launch environment. ``None`` uses this process's.
-    :returns: ``$CLAUDE_CONFIG_DIR/settings.json``, else
-        ``$HOME/.claude/settings.json``, resolved the way Claude joins paths.
-    """
-    env = os.environ if env is None else env
-    base = cwd if cwd is not None else Path.cwd()
-    config_dir = env.get("CLAUDE_CONFIG_DIR")
-    if config_dir is None:
-        config_dir = os.path.join(env.get("HOME") or str(_account_home_dir()), ".claude")
-    return _claude_joined_path(base, config_dir, "settings.json")
-
-
 def _claude_joined_path(cwd: Path, directory: str, name: str) -> Path:
     """
     Return the file Claude opens for ``path.join(directory, name)`` from *cwd*.

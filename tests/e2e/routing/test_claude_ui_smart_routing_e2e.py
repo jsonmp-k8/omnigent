@@ -28,11 +28,11 @@ from pathlib import Path
 import httpx
 import pytest
 
-from omnigent.harnesses.claude_native.bridge import claude_user_settings_path
 from omnigent.server.smart_routing import models_in_family
 from tests.e2e.routing._helpers import (
     arm_in,
     claude_settings_snapshot,
+    claude_user_settings_path,
     decisions,
     same_arm,
     session_snapshot,

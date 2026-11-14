@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -462,6 +463,21 @@ def rollout_turn_contexts(session_id: str) -> list[dict[str, Any]]:
 
 
 # ── Isolation guards ────────────────────────────────────────────────────────
+
+
+def claude_user_settings_path(cwd: Path, env: Mapping[str, str]) -> Path:
+    """Resolve the launched Claude's saved settings for preservation checks.
+
+    :param cwd: Claude's working directory.
+    :param env: Claude's explicit launch environment.
+    :returns: The settings file resolved with Claude's path-joining rules.
+    """
+    from omnigent.harnesses.claude_native.bridge import _account_home_dir, _claude_joined_path
+
+    config_dir = env.get("CLAUDE_CONFIG_DIR")
+    if config_dir is None:
+        config_dir = os.path.join(env.get("HOME") or str(_account_home_dir()), ".claude")
+    return _claude_joined_path(cwd, config_dir, "settings.json")
 
 
 def claude_settings_snapshot(path: Path, *, include_model: bool = False) -> str:

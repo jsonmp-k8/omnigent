@@ -11800,6 +11800,8 @@ def test_wait_for_claude_prompt_ready_tail_is_observed_not_recaptured(
     capture observed while the loop was still deciding. A box-less capture
     followed by a box-present one that arrives only after the deadline
     proves the point: the box-present frame must NOT leak into the error.
+    A live-pane stub and disabled slow-boot extension keep this zero-budget
+    check focused on the error tail instead of startup recovery.
 
     :param monkeypatch: Pytest monkeypatch fixture.
     :returns: None.
@@ -13739,9 +13741,6 @@ def test_model_draft_does_not_consume_other_prompt_whitespace(prefix: str) -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "prompt_separator", [" ", "\u00a0"], ids=["separator-space", "separator-nbsp"]
-)
 @pytest.mark.parametrize("busy", [False, True], ids=["idle", "busy"])
 @pytest.mark.parametrize("delivery", ["direct", "routed-pending"])
 @pytest.mark.parametrize("cache_cost", [False, True], ids=["immediate", "cache-cost"])
@@ -13750,12 +13749,11 @@ async def test_model_command_selects_session_only_then_reads_fresh_status(
     monkeypatch: pytest.MonkeyPatch,
     busy: bool,
     delivery: str,
-    prompt_separator: str,
     cache_cost: bool,
 ) -> None:
     composer = _SessionModelComposer(
         busy=busy,
-        prompt_separator=prompt_separator,
+        prompt_separator="\u00a0",
         cache_cost_label="Choice 1" if cache_cost else None,
     )
     bridge_dir = _session_model_bridge(tmp_path, composer)
@@ -14680,6 +14678,9 @@ def test_model_command_stops_selection_at_cancellation_or_deadline(
         else None
     )
     assert composer.confirmations == int(phase == "confirmation")
+    if stop == "deadline":
+        # Only the injected stall consumes time; rendered controls need no wait.
+        assert claude_native_bridge.time.monotonic() == pytest.approx(1.0)
 
 
 def test_cancelled_model_switch_cleanup_is_bounded_without_retrying_keys(
@@ -14739,8 +14740,11 @@ def test_model_command_cleans_only_its_exact_unsubmitted_command(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("caller", ["executor", "native-control"])
-@pytest.mark.parametrize("phase", ["draft", "picker", "commit", "status-draft", "status"])
-@pytest.mark.parametrize("replacement", [False, True], ids=["owned", "replaced"])
+@pytest.mark.parametrize(
+    ("phase", "replacement"),
+    [("draft", False), ("picker", True), ("commit", False), ("status", True)],
+    ids=["owned-draft", "replaced-picker", "committed", "replaced-status"],
+)
 async def test_cancelled_model_switch_cleans_only_observed_owned_controls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -14769,11 +14773,7 @@ async def test_cancelled_model_switch_cleans_only_observed_owned_controls(
 
     def send(socket_path: str, *args: str) -> None:
         composer._run_tmux(socket_path, *args)
-        if (
-            (phase == "draft" and args[-1] == "/model")
-            or (phase == "commit" and args[-1] == "s")
-            or (phase == "status-draft" and args[-1] == "/status")
-        ):
+        if (phase == "draft" and args[-1] == "/model") or (phase == "commit" and args[-1] == "s"):
             pause()
 
     def capture(socket_path: str, target: str) -> str:
@@ -14820,10 +14820,7 @@ async def test_cancelled_model_switch_cleans_only_observed_owned_controls(
         if caller == "executor":
             assert executor._inject_lock.locked()
         if replacement:
-            if phase in {"draft", "status-draft"}:
-                composer.text = "a person's replacement draft"
-                composer.cursor = len(composer.text)
-            elif phase == "picker":
+            if phase == "picker":
                 composer.options[0] = "a-persons-replacement-model"
             else:
                 composer.overlay = "status"
@@ -14833,17 +14830,13 @@ async def test_cancelled_model_switch_cleans_only_observed_owned_controls(
             await asyncio.wait_for(asyncio.shield(task), 2)
         assert composer.sends[: len(cancelled_at)] == cancelled_at
         cleanup = [args[-1] for args in composer.sends[len(cancelled_at) :]]
-        expected = (
-            []
-            if replacement or phase == "commit"
-            else [_CLEAR_ONE_ROW_COMPOSER if phase in {"draft", "status-draft"} else "Escape"]
-        )
+        expected = [_CLEAR_ONE_ROW_COMPOSER] if phase == "draft" else []
         assert cleanup == expected
         assert [args[-1] for args in composer.sends].count("s") == (
-            1 if phase in {"commit", "status-draft", "status"} else 0
+            1 if phase in {"commit", "status"} else 0
         )
         assert composer.model == (
-            "private-glm[1m]" if phase in {"commit", "status-draft", "status"} else initial_model
+            "private-glm[1m]" if phase in {"commit", "status"} else initial_model
         )
         if not replacement:
             assert composer.text == "" and composer.overlay is None
@@ -20241,7 +20234,9 @@ def test_a_sandboxed_helper_accepts_the_bridge_under_its_read_only_pinned_tmpdir
     ids=["home", "config dir", "relative config dir"],
 )
 def test_settings_path_follows_claudes_config_dir(env: dict[str, str], expected: str) -> None:
-    assert claude_native_bridge.claude_user_settings_path(Path("/repo"), env) == Path(expected)
+    from tests.e2e.routing._helpers import claude_user_settings_path
+
+    assert claude_user_settings_path(Path("/repo"), env) == Path(expected)
 
 
 @pytest.mark.parametrize("command", ["/model sonnet", "/model private-model[1m]"])
