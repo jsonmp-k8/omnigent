@@ -37,6 +37,10 @@ from omnigent.inner.executor import (
     TurnComplete,
 )
 from omnigent.inner.native_attachments import attachment_cache_dir
+from tests.harnesses.claude_native.test_claude_native_bridge import (
+    _session_model_bridge,
+    _SessionModelComposer,
+)
 
 # Minimal valid 1x1 white PNG used for multimodal attachment tests.
 _TINY_PNG_B64 = (
@@ -1548,6 +1552,168 @@ async def test_run_turn_keeps_the_pane_when_a_terminal_dialog_blocks_delivery(
     assert isinstance(events[0], ExecutorError)
     assert "waiting for an answer" in events[0].message
     assert events[0].undelivered is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("busy", [False, True], ids=["idle", "busy"])
+@pytest.mark.parametrize("cache_cost", [False, True], ids=["immediate", "cache-cost"])
+async def test_run_turn_holds_model_selection_until_prompt_is_answered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    busy: bool,
+    cache_cost: bool,
+) -> None:
+    monkeypatch.setattr(claude_bridge, "_TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr(claude_bridge, "_BRIDGE_ROOT", tmp_path)
+    monkeypatch.delenv("IS_SANDBOX", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    composer = _SessionModelComposer(
+        busy=busy,
+        prompt_separator="\u00a0",
+        cache_cost_label="Choice 1" if cache_cost else None,
+    )
+    bridge_dir = _session_model_bridge(tmp_path, composer)
+    composer.install(monkeypatch)
+    pending = True
+    hold_polls = 0
+    selections = 0
+    receipts: list[ClaudeModelSwitchResult] = []
+    messages: list[str] = []
+    monkeypatch.setenv(REQUEST_SESSION_ID_ENV_VAR, "web-session")
+    monkeypatch.setattr(claude_bridge, "_has_approval_wait", lambda _bridge: pending)
+    monkeypatch.setattr(claude_native_executor, "_MESSAGE_HOLD_POLL_S", 0.0)
+
+    def pending_prompt(_bridge: Path) -> bool:
+        nonlocal pending, hold_polls
+        assert composer.sends == [] and messages == []
+        hold_polls += 1
+        pending = hold_polls < 3
+        return pending
+
+    def select(_bridge: Path, *, model: str) -> ClaudeModelSwitchResult:
+        nonlocal selections
+        selections += 1
+        receipt = claude_bridge.inject_model_command(_bridge, model=model)
+        receipts.append(receipt)
+        return receipt
+
+    def deliver(_bridge: Path, *, content: str, timeout_s: float = 30.0) -> None:
+        del timeout_s
+        assert _bridge == bridge_dir
+        assert composer.status_queries == 1 and composer.overlay is None
+        assert len(receipts) == 1 and receipts[0].status_model == composer.model
+        messages.append(content)
+
+    monkeypatch.setattr(claude_native_executor, "has_pending_user_prompt", pending_prompt)
+    monkeypatch.setattr(claude_native_executor, "terminal_dialog_pending", lambda _b: False)
+    monkeypatch.setattr(claude_native_executor, "inject_model_command", select)
+    monkeypatch.setattr(claude_native_executor, "inject_user_message", deliver)
+    killed = Mock(side_effect=AssertionError("a held turn reaped its pane"))
+    monkeypatch.setattr(claude_native_executor, "kill_session", killed)
+    executor = ClaudeNativeExecutor(bridge_dir)
+    events = [
+        event
+        async for event in executor.run_turn(
+            messages=[{"role": "user", "content": "dependent routed prompt"}],
+            tools=[],
+            system_prompt="",
+            config=ExecutorConfig(model="private-glm[1m]"),
+        )
+    ]
+    assert events == [TurnComplete(response=None)]
+    assert selections == 2 and hold_polls == 3
+    assert messages == ["dependent routed prompt"]
+    assert len(receipts) == 1
+    killed.assert_not_called()
+    result = receipts[0]
+    assert result.resolved_model == result.status_model == composer.model == "private-glm[1m]"
+    assert result.session_id == composer.session
+    assert composer.submitted == ["/model", "/status"]
+    assert composer.status_queries == 1
+    assert composer.confirmations == int(cache_cost)
+    assert [args[-1] for args in composer.sends] == [
+        "/model",
+        "Enter",
+        "Down",
+        "s",
+        *(["Enter"] if cache_cost else []),
+        "/status",
+        "Enter",
+        "Escape",
+    ]
+    assert next(args for args in composer.sends if args[-1] == "s") == (
+        "send-keys",
+        "-l",
+        "-t",
+        "claude:0.0",
+        "s",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["preflight", "picker", "status", "send-failure"])
+async def test_routed_model_switch_reaps_a_confirmed_dead_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    monkeypatch.setattr(claude_bridge, "_TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr(claude_bridge, "_BRIDGE_ROOT", tmp_path)
+    monkeypatch.delenv("IS_SANDBOX", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    composer = _SessionModelComposer()
+    bridge_dir = _session_model_bridge(tmp_path, composer)
+    composer.install(monkeypatch)
+    failed_send = False
+
+    def state(*args: object) -> claude_bridge._ClaudePaneState:
+        dead = stage == "preflight" or composer.overlay == stage or failed_send
+        return claude_bridge._ClaudePaneState(
+            not dead, exited=dead, exit_status="7" if dead else None
+        )
+
+    def send(socket: str, *args: str) -> None:
+        nonlocal failed_send
+        if stage == "send-failure" and args[-1] == "Down":
+            failed_send = True
+            raise RuntimeError("tmux send failed after the pane exited")
+        composer._run_tmux(socket, *args)
+
+    worker_finished = threading.Event()
+    killed: list[Path] = []
+
+    def select(_bridge: Path, *, model: str) -> ClaudeModelSwitchResult:
+        try:
+            return claude_bridge.inject_model_command(_bridge, model=model)
+        finally:
+            worker_finished.set()
+
+    def reap(path: Path, **kwargs: object) -> None:
+        assert worker_finished.is_set()
+        killed.append(path)
+
+    monkeypatch.setattr(claude_bridge, "_claude_pane_state", state)
+    monkeypatch.setattr(claude_bridge, "_run_tmux", send)
+    monkeypatch.setattr(claude_native_executor, "inject_model_command", select)
+    monkeypatch.setattr(claude_native_executor, "kill_session", reap)
+    monkeypatch.setattr(
+        claude_native_executor,
+        "inject_user_message",
+        lambda *a, **k: pytest.fail("A dead pane must receive no prompt"),
+    )
+    executor = ClaudeNativeExecutor(bridge_dir)
+    events = [
+        event
+        async for event in executor.run_turn(
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+            system_prompt="",
+            config=ExecutorConfig(model="private-glm[1m]"),
+        )
+    ]
+    assert len(events) == 1 and isinstance(events[0], ExecutorError)
+    assert events[0].undelivered and not events[0].preserve_session
+    assert worker_finished.is_set()
+    assert killed == [bridge_dir]
+    assert all(text in {"/model", "/status"} for text in composer.submitted)
 
 
 @pytest.mark.asyncio

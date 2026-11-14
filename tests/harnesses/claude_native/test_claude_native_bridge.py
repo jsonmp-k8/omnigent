@@ -13742,13 +13742,11 @@ def test_model_draft_does_not_consume_other_prompt_whitespace(prefix: str) -> No
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("busy", [False, True], ids=["idle", "busy"])
-@pytest.mark.parametrize("delivery", ["direct", "routed-pending"])
 @pytest.mark.parametrize("cache_cost", [False, True], ids=["immediate", "cache-cost"])
 async def test_model_command_selects_session_only_then_reads_fresh_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     busy: bool,
-    delivery: str,
     cache_cost: bool,
 ) -> None:
     composer = _SessionModelComposer(
@@ -13759,63 +13757,7 @@ async def test_model_command_selects_session_only_then_reads_fresh_status(
     bridge_dir = _session_model_bridge(tmp_path, composer)
     composer.install(monkeypatch)
 
-    if delivery == "direct":
-        result = claude_native_bridge.inject_model_command(bridge_dir, model="private-glm[1m]")
-    else:
-        from omnigent.inner import claude_native_executor
-        from omnigent.inner.executor import ExecutorConfig, TurnComplete
-
-        pending = True
-        hold_polls = 0
-        selections = 0
-        receipts: list[claude_native_bridge.ClaudeModelSwitchResult] = []
-        messages: list[str] = []
-        monkeypatch.setenv(claude_native_bridge.REQUEST_SESSION_ID_ENV_VAR, "web-session")
-        monkeypatch.setattr(claude_native_bridge, "_has_approval_wait", lambda _bridge: pending)
-        monkeypatch.setattr(claude_native_executor, "_MESSAGE_HOLD_POLL_S", 0.0)
-
-        def pending_prompt(_bridge: Path) -> bool:
-            nonlocal pending, hold_polls
-            assert composer.sends == [] and messages == []
-            hold_polls += 1
-            pending = hold_polls < 3
-            return pending
-
-        def select(_bridge: Path, *, model: str) -> claude_native_bridge.ClaudeModelSwitchResult:
-            nonlocal selections
-            selections += 1
-            receipt = claude_native_bridge.inject_model_command(_bridge, model=model)
-            receipts.append(receipt)
-            return receipt
-
-        def deliver(_bridge: Path, *, content: str, timeout_s: float = 30.0) -> None:
-            del timeout_s
-            assert _bridge == bridge_dir
-            assert composer.status_queries == 1 and composer.overlay is None
-            messages.append(content)
-
-        monkeypatch.setattr(claude_native_executor, "has_pending_user_prompt", pending_prompt)
-        monkeypatch.setattr(claude_native_executor, "terminal_dialog_pending", lambda _b: False)
-        monkeypatch.setattr(claude_native_executor, "inject_model_command", select)
-        monkeypatch.setattr(claude_native_executor, "inject_user_message", deliver)
-        killed = Mock(side_effect=AssertionError("a held routed turn reaped its pane"))
-        monkeypatch.setattr(claude_native_executor, "kill_session", killed)
-        executor = claude_native_executor.ClaudeNativeExecutor(bridge_dir)
-        events = [
-            event
-            async for event in executor.run_turn(
-                messages=[{"role": "user", "content": "dependent routed prompt"}],
-                tools=[],
-                system_prompt="",
-                config=ExecutorConfig(model="private-glm[1m]"),
-            )
-        ]
-        assert events == [TurnComplete(response=None)]
-        assert selections == 2 and hold_polls == 3
-        assert messages == ["dependent routed prompt"]
-        assert len(receipts) == 1
-        killed.assert_not_called()
-        result = receipts[0]
+    result = claude_native_bridge.inject_model_command(bridge_dir, model="private-glm[1m]")
 
     assert result.resolved_model == result.status_model == composer.model == "private-glm[1m]"
     assert result.session_id == composer.session
@@ -13994,6 +13936,9 @@ def test_model_command_clears_only_the_exact_owned_blocked_draft(
         ("blocked prompt\n", "blocked prompt"),
         ("blocked prompt extra", "blocked prompt"),
         ("blocked prompt", "\u00a0blocked prompt"),
+        ("blocked prompt", "blocked prompt "),
+        ("blocked prompt", "blocked prompt\n"),
+        ("blocked prompt", "different prompt"),
     ],
     ids=[
         "leading-nbsp",
@@ -14006,6 +13951,9 @@ def test_model_command_clears_only_the_exact_owned_blocked_draft(
         "trailing-newline",
         "trailing-text",
         "claimed-padding",
+        "claimed-trailing-space",
+        "claimed-trailing-newline",
+        "different-text",
     ],
 )
 def test_model_command_refuses_whitespace_normalized_draft_ownership(
@@ -14027,23 +13975,6 @@ def test_model_command_refuses_whitespace_normalized_draft_ownership(
     assert composer.sends == []
     assert composer.text == draft
     assert composer.model == "claude-sonnet-5-5"
-
-
-@pytest.mark.parametrize("owned", ["blocked prompt ", "blocked prompt\n", "different prompt"])
-def test_model_command_does_not_normalize_draft_ownership(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owned: str
-) -> None:
-    composer = _SessionModelComposer(draft="blocked prompt")
-    bridge_dir = _session_model_bridge(tmp_path, composer)
-    composer.install(monkeypatch)
-
-    with pytest.raises(claude_native_bridge.ClaudeModelSwitchRefused):
-        claude_native_bridge.inject_model_command(
-            bridge_dir, model="private-glm[1m]", owned_draft=owned
-        )
-
-    assert composer.sends == []
-    assert composer.text == "blocked prompt"
 
 
 def test_model_command_rechecks_an_owned_draft_before_clearing_it(
@@ -14742,8 +14673,22 @@ def test_model_command_cleans_only_its_exact_unsubmitted_command(
 @pytest.mark.parametrize("caller", ["executor", "native-control"])
 @pytest.mark.parametrize(
     ("phase", "replacement"),
-    [("draft", False), ("picker", True), ("commit", False), ("status", True)],
-    ids=["owned-draft", "replaced-picker", "committed", "replaced-status"],
+    [
+        ("draft", False),
+        ("picker-enter", False),
+        ("picker-down", False),
+        ("picker", True),
+        ("commit", False),
+        ("status", True),
+    ],
+    ids=[
+        "owned-draft",
+        "after-enter",
+        "after-down",
+        "replaced-picker",
+        "committed",
+        "replaced-status",
+    ],
 )
 async def test_cancelled_model_switch_cleans_only_observed_owned_controls(
     tmp_path: Path,
@@ -14759,6 +14704,7 @@ async def test_cancelled_model_switch_cleans_only_observed_owned_controls(
     bridge_dir = _session_model_bridge(tmp_path, composer)
     composer.install(monkeypatch)
     started, release = threading.Event(), threading.Event()
+    worker_finished = threading.Event()
     initial_model = composer.model
     observed_picker = observed_status = 0
     cancelled_at: list[tuple[str, ...]] = []
@@ -14773,7 +14719,13 @@ async def test_cancelled_model_switch_cleans_only_observed_owned_controls(
 
     def send(socket_path: str, *args: str) -> None:
         composer._run_tmux(socket_path, *args)
-        if (phase == "draft" and args[-1] == "/model") or (phase == "commit" and args[-1] == "s"):
+        key = args[-1]
+        if (
+            (phase == "draft" and key == "/model")
+            or (phase == "picker-enter" and key == "Enter" and composer.overlay == "picker")
+            or (phase == "picker-down" and key == "Down")
+            or (phase == "commit" and key == "s")
+        ):
             pause()
 
     def capture(socket_path: str, target: str) -> str:
@@ -14789,8 +14741,15 @@ async def test_cancelled_model_switch_cleans_only_observed_owned_controls(
                 pause()
         return pane
 
+    def select_model(_bridge: Path, *, model: str) -> claude_native_bridge.ClaudeModelSwitchResult:
+        try:
+            return claude_native_bridge.inject_model_command(_bridge, model=model)
+        finally:
+            worker_finished.set()
+
     monkeypatch.setattr(claude_native_bridge, "_run_tmux", send)
     monkeypatch.setattr(claude_native_bridge, "_capture_pane", capture)
+    monkeypatch.setattr(claude_native_executor, "inject_model_command", select_model)
     monkeypatch.setattr(
         claude_native_executor, "kill_session", lambda path, **kwargs: killed.append(path)
     )
@@ -14805,7 +14764,7 @@ async def test_cancelled_model_switch_cleans_only_observed_owned_controls(
         else:
             await native_controls._drive_claude_pane(
                 native_controls._ClaudeControlDeadline(),
-                claude_native_bridge.inject_model_command,
+                select_model,
                 bridge_dir,
                 model="private-glm[1m]",
             )
@@ -14817,6 +14776,8 @@ async def test_cancelled_model_switch_cleans_only_observed_owned_controls(
         task.cancel()
         await asyncio.sleep(0)
         assert not task.done(), "cancellation released an in-flight pane worker"
+        assert not worker_finished.is_set()
+        assert claude_native_bridge._bridge_injection_lock(bridge_dir).locked()
         if caller == "executor":
             assert executor._inject_lock.locked()
         if replacement:
@@ -14828,6 +14789,7 @@ async def test_cancelled_model_switch_cleans_only_observed_owned_controls(
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(asyncio.shield(task), 2)
+        assert worker_finished.is_set()
         assert composer.sends[: len(cancelled_at)] == cancelled_at
         cleanup = [args[-1] for args in composer.sends[len(cancelled_at) :]]
         expected = [_CLEAR_ONE_ROW_COMPOSER] if phase == "draft" else []
@@ -14839,7 +14801,13 @@ async def test_cancelled_model_switch_cleans_only_observed_owned_controls(
             "private-glm[1m]" if phase in {"commit", "status"} else initial_model
         )
         if not replacement:
-            assert composer.text == "" and composer.overlay is None
+            assert composer.text == ""
+            assert composer.overlay == (
+                "picker" if phase in {"picker-enter", "picker-down"} else None
+            )
+        if phase in {"picker-enter", "picker-down"}:
+            assert composer.highlight == int(phase == "picker-down")
+            assert composer.status_queries == 0
         assert composer.busy
         assert killed == []
         assert not executor._inject_lock.locked()
@@ -15543,58 +15511,6 @@ def test_model_switch_caps_each_tmux_subprocess_to_its_remaining_parent_deadline
             invoke()
 
     assert timeouts == pytest.approx([0.4, 0.1])
-
-
-@pytest.mark.parametrize("stage", ["preflight", "picker", "status", "send-failure"])
-async def test_routed_model_switch_reaps_a_confirmed_dead_pane(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
-) -> None:
-    from omnigent.inner import claude_native_executor
-    from omnigent.inner.executor import ExecutorConfig, ExecutorError
-
-    composer = _SessionModelComposer()
-    bridge_dir = _session_model_bridge(tmp_path, composer)
-    composer.install(monkeypatch)
-    failed_send = False
-
-    def state(*args: object) -> claude_native_bridge._ClaudePaneState:
-        dead = stage == "preflight" or composer.overlay == stage or failed_send
-        return claude_native_bridge._ClaudePaneState(
-            not dead, exited=dead, exit_status="7" if dead else None
-        )
-
-    def send(socket: str, *args: str) -> None:
-        nonlocal failed_send
-        if stage == "send-failure" and args[-1] == "Down":
-            failed_send = True
-            raise RuntimeError("tmux send failed after the pane exited")
-        composer._run_tmux(socket, *args)
-
-    killed: list[Path] = []
-    monkeypatch.setattr(claude_native_bridge, "_claude_pane_state", state)
-    monkeypatch.setattr(claude_native_bridge, "_run_tmux", send)
-    monkeypatch.setattr(
-        claude_native_executor, "kill_session", lambda path, **kwargs: killed.append(path)
-    )
-    monkeypatch.setattr(
-        claude_native_executor,
-        "inject_user_message",
-        lambda *a, **k: pytest.fail("A dead pane must receive no prompt"),
-    )
-    executor = claude_native_executor.ClaudeNativeExecutor(bridge_dir)
-    events = [
-        event
-        async for event in executor.run_turn(
-            messages=[{"role": "user", "content": "hello"}],
-            tools=[],
-            system_prompt="",
-            config=ExecutorConfig(model="private-glm[1m]"),
-        )
-    ]
-    assert len(events) == 1 and isinstance(events[0], ExecutorError)
-    assert events[0].undelivered and not events[0].preserve_session
-    assert killed == [bridge_dir]
-    assert all(text in {"/model", "/status"} for text in composer.submitted)
 
 
 @pytest.mark.parametrize("alive", [None, False])
