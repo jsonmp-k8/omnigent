@@ -1933,6 +1933,7 @@ async def test_events_model_change_settles_held_metadata_lock_without_late_write
 
     from omnigent.native import native_bridge_common
 
+    control_ready = asyncio.Event()
     started = threading.Event()
     finished = threading.Event()
     metadata: list[tuple[Path, bytes]] = []
@@ -1947,6 +1948,7 @@ async def test_events_model_change_settles_held_metadata_lock_without_late_write
         config_path = bridge_dir / "bridge.json"
         metadata.append((config_path, config_path.read_bytes()))
         locks.enter_context(native_bridge_common.bridge_dir_preparation_lock(bridge_dir))
+        control_ready.set()
 
     def record_until_stopped(*args: Any, **kwargs: Any) -> None:
         try:
@@ -1967,6 +1969,8 @@ async def test_events_model_change_settles_held_metadata_lock_without_late_write
         )
     )
     try:
+        # App startup is setup, outside the metadata worker's control deadline.
+        await asyncio.wait_for(control_ready.wait(), 10)
         assert await asyncio.to_thread(started.wait, 2)
         if stop == "cancellation":
             task.cancel()
