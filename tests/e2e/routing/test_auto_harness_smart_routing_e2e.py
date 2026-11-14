@@ -29,12 +29,12 @@ from pathlib import Path
 import httpx
 import pytest
 
-from omnigent.harnesses.claude_native.bridge import claude_user_settings_path
 from omnigent.runner.subagent_routing import AUTO_HARNESS_LABEL_KEY
 from tests.e2e.routing._helpers import (
     arm_in,
     claude_bridge_dir,
     claude_settings_snapshot,
+    claude_user_settings_path,
     decisions,
     same_arm,
     session_snapshot,

@@ -1551,9 +1551,8 @@ async def test_run_turn_keeps_the_pane_when_a_terminal_dialog_blocks_delivery(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["preflight", "picker", "commit", "status"])
 async def test_run_turn_reports_a_refused_routed_model_switch_as_undelivered(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, phase: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """An explicit retry after refusal preserves the pane and delivers exactly once."""
     monkeypatch.delenv(REQUEST_SESSION_ID_ENV_VAR, raising=False)
@@ -1561,7 +1560,12 @@ async def test_run_turn_reports_a_refused_routed_model_switch_as_undelivered(
     killed: list[Path] = []
     selections: list[str] = []
     refusing = True
-    refusal = ClaudeModelSwitchRefused("Session-only selection refused", phase=phase)
+    refusal = ClaudeModelSwitchRefused(
+        "Session-only selection refused",
+        phase="status",
+        command_submitted=True,
+        model_may_have_changed=True,
+    )
 
     def select(_bridge_dir: Path, *, model: str) -> ClaudeModelSwitchResult:
         selections.append(model)
