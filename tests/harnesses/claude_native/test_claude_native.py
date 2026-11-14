@@ -6877,6 +6877,11 @@ async def test_prepare_claude_terminal_fresh_session_is_not_cold_resumed(
     monkeypatch.setattr(claude_native, "_read_claude_terminal_tmux", _fake_read_tmux)
     monkeypatch.setattr(claude_native, "prepare_bridge_dir", _prepare_bridge)
     monkeypatch.setattr(claude_native, "stored_claude_catalog_rows", lambda _config: rows)
+    # A concurrent refresh must not replace the captured launch vocabulary.
+    monkeypatch.setattr(
+        "omnigent.models.model_catalog_store.read_catalog",
+        lambda *_args, **_kwargs: [{"id": "replacement-model"}],
+    )
     monkeypatch.setattr(
         claude_native,
         "reset_transcript_forward_state",
@@ -6904,6 +6909,9 @@ async def test_prepare_claude_terminal_fresh_session_is_not_cold_resumed(
     # claude writes on cold start), the first turn would be dropped.
     assert prepared.cold_resumed is False
     assert prepared.reattached is False
+    assert vocabulary["picker_values"] == (
+        ["private-model"] if catalog_state == "populated" else []
+    )
     assert vocabulary["picker_options"] == (
         None if catalog_state == "missing" else [option] if catalog_state == "populated" else []
     )

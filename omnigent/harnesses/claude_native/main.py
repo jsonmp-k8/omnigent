@@ -5503,7 +5503,7 @@ async def _prepare_claude_terminal(
             workspace=Path.cwd(),
             launch_model=claude_config.model if claude_config else None,
             launch_env=claude_config.env if claude_config else None,
-            picker_values=stored_claude_picker_values(claude_config),
+            picker_values=stored_claude_picker_values(claude_config, picker_catalog or ()),
             picker_options=(
                 picker_model_options(picker_catalog) if picker_catalog is not None else None
             ),
