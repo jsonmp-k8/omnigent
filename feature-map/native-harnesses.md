@@ -746,6 +746,11 @@ Cross-harness journeys:
   Requires Claude Code 2.1.323 or newer and tmux; use a clean container if
   machine-managed settings override the fixture's picker. It makes no model
   calls and does not verify browser rendering or live gateway servability.
+  Each switch keeps its initially resolved target descriptor; later catalog
+  refreshes do not invalidate that selection. The live picker and fresh status
+  must still confirm that target. Preserving uncertainty after an unconfirmed
+  switch requires an upgraded server, preferably deployed before the runner.
+  A new runner cannot repair an older server's rollback behavior.
 - **`model-and-effort`, Claude browser selection and refusal (nightly):**
   `tests/e2e_ui/chat/test_claude_model_picker.py::test_claude_native_picker_repeated_pins_reach_the_real_terminal`
   proves alias picks through the gear, model pill and Ctrl+Shift+M using

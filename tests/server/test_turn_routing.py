@@ -1299,26 +1299,56 @@ async def test_replay_hold_keeps_a_replacement_pending_prompt_untouched(
     assert pending is not None and pending.prompt == "replacement"
 
 
+@pytest.mark.parametrize("hold_s", [0, 30], ids=["zero-budget", "resumed-worker"])
 async def test_replay_hold_expires_without_sending_or_discarding_the_prompt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hold_s: int
 ) -> None:
+    import threading
+    from types import SimpleNamespace
+
     from omnigent.harnesses.claude_native import bridge
 
     _mark(tmp_path)
     write_pending_replay(
         tmp_path, session_id="conv_1", prompt="hello", blocked_turn_id=None, model="private-model"
     )
+    pending_before = read_pending_replay(tmp_path)
+    assert pending_before is not None
     client = _FakeServerClient()
+    loop = asyncio.get_running_loop()
+    clock = SimpleNamespace(now=0.0)
+    resumed = asyncio.Event()
+    cleaning = asyncio.Event()
+    expire = threading.Event()
+    release = threading.Event()
+    drained = threading.Event()
     attempts = 0
 
     def select(_bridge: Path, **kwargs: object) -> None:
         nonlocal attempts
         attempts += 1
-        raise bridge.ClaudeUserPromptPending("Answer the question", nothing_typed=True)
+        if attempts == 1:
+            raise bridge.ClaudeUserPromptPending("Answer the question", nothing_typed=True)
+        assert attempts == 2
+        try:
+            deadline = bridge._INJECTION_CANCEL_EVENT.get()
+            assert isinstance(deadline, bridge.ModelSwitchDeadline)
+            assert not deadline.is_set()
+            loop.call_soon_threadsafe(resumed.set)
+            assert expire.wait(timeout=2)
+            bridge._check_injection_cancelled()
+            raise AssertionError("the resumed worker ignored its expired hold")
+        finally:
+            loop.call_soon_threadsafe(cleaning.set)
+            assert release.wait(timeout=2)
+            drained.set()
 
     monkeypatch.setattr(bridge, "inject_model_command", select)
-    monkeypatch.setattr(bridge, "CLAUDE_INPUT_HOLD_S", 0)
-    await schedule_replay(
+    monkeypatch.setattr(bridge, "CLAUDE_INPUT_HOLD_S", hold_s)
+    monkeypatch.setattr(turn_routing, "REPLAY_POLL_S", 0)
+    # Advance the worker's deadline clock without changing asyncio's timers.
+    monkeypatch.setattr(turn_routing, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    replay = schedule_replay(
         "conv_1",
         prompt="hello",
         bridge_dir=tmp_path,
@@ -1328,9 +1358,28 @@ async def test_replay_hold_expires_without_sending_or_discarding_the_prompt(
         model="private-model",
         idle=lambda _: True,
     )
-    assert attempts == 1
+    try:
+        if hold_s:
+            await asyncio.wait_for(resumed.wait(), timeout=2)
+            clock.now += hold_s
+            expire.set()
+            await asyncio.wait_for(cleaning.wait(), timeout=2)
+            await asyncio.sleep(0)
+            assert not replay.done(), "replay returned before its worker drained"
+            assert not drained.is_set()
+            assert not client.posts
+            assert read_pending_replay(tmp_path) == pending_before
+            release.set()
+        await asyncio.wait_for(replay, timeout=2)
+    finally:
+        expire.set()
+        release.set()
+        if not replay.done():
+            await asyncio.wait_for(replay, timeout=2)
+    assert attempts == (2 if hold_s else 1)
+    assert drained.is_set() is bool(hold_s)
     assert not client.posts
-    assert read_pending_replay(tmp_path) is not None
+    assert read_pending_replay(tmp_path) == pending_before
 
 
 async def test_replay_leaves_the_model_alone_for_codex(
